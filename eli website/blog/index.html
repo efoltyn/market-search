@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eli Blog</title>
+    <meta name="description" content="Short essays on tool-using models, verified research, and agentic UX.">
+    <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="rss.xml">
+    <style>
+        :root {
+            --bg: #ffffff;
+            --fg: #000000;
+            --gray: #666666;
+            --light-gray: #f5f5f7;
+            --radius: 12px;
+            --font-serif: "New York", "Apple Garamond", "Baskerville", "Times New Roman", serif;
+            --font-sans: "SF Pro Text", "Helvetica Neue", sans-serif;
+            --font-mono: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background-color: var(--bg);
+            color: var(--fg);
+            font-family: var(--font-serif);
+            line-height: 1.65;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        a { color: var(--fg); text-decoration: none; border-bottom: 1px solid transparent; transition: 0.2s; }
+        a:hover { border-bottom: 1px solid var(--fg); }
+
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.82);
+            backdrop-filter: saturate(180%) blur(18px);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+        }
+
+        .nav-inner {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 18px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .nav-logo {
+            font-family: var(--font-sans);
+            font-weight: 700;
+            letter-spacing: -0.05em;
+            font-size: 16px;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            font-family: var(--font-sans);
+            font-size: 0.9rem;
+        }
+
+        .nav-cta {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--light-gray);
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            padding: 10px 14px;
+            border-radius: 9999px;
+            font-weight: 600;
+        }
+
+        .nav-cta:hover { border-color: rgba(0, 0, 0, 0.18); }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 64px 24px 80px;
+        }
+
+        .hero {
+            text-align: left;
+            margin-bottom: 40px;
+        }
+
+        .kicker {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            letter-spacing: 0.08em;
+            color: var(--gray);
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+
+        h1 {
+            font-size: 3rem;
+            font-weight: 500;
+            letter-spacing: -0.04em;
+            line-height: 1.05;
+            margin-bottom: 16px;
+        }
+
+        .subtitle {
+            font-family: var(--font-sans);
+            font-size: 1.1rem;
+            color: var(--gray);
+            max-width: 680px;
+        }
+
+        .posts {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 16px;
+            margin-top: 24px;
+        }
+
+        .post-card {
+            background: #fff;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            border-radius: 14px;
+            padding: 18px;
+            transition: transform 0.18s ease, border-color 0.18s ease;
+        }
+
+        .post-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(0, 0, 0, 0.16);
+        }
+
+        .post-meta {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--gray);
+            margin-bottom: 10px;
+        }
+
+        .post-card h2 {
+            font-family: var(--font-sans);
+            font-size: 1rem;
+            font-weight: 650;
+            margin-bottom: 10px;
+        }
+
+        .post-card p {
+            color: var(--gray);
+            font-size: 1.02rem;
+            line-height: 1.7;
+        }
+
+        footer {
+            margin-top: 80px;
+            font-family: var(--font-sans);
+            font-size: 0.9rem;
+            color: var(--gray);
+            display: flex;
+            gap: 18px;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 600px) {
+            h1 { font-size: 2.4rem; }
+            .container { padding-top: 48px; }
+        }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <div class="nav-inner">
+        <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
+        <div class="nav-links">
+            <a href="./">Blog</a>
+            <a class="nav-cta" href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+        </div>
+    </div>
+</nav>
+
+<main class="container">
+    <header class="hero">
+        <p class="kicker">Blog</p>
+        <h1>Notes from the harness.</h1>
+        <p class="subtitle">Mini whitepapers on tool-using models, verification, and the UI that makes “agentic” feel real.</p>
+    </header>
+
+    <section class="posts" aria-label="Posts">
+        <a class="post-card" href="beyond-the-cutoff.html">
+            <div class="post-meta">2026-01-13 • Research</div>
+            <h2>Beyond the Cutoff: Tools Beat Memory</h2>
+            <p>Why Eli starts with timeseries, not headlines—and how tool access turns “knowledge cutoff” into a solvable problem.</p>
+        </a>
+        <a class="post-card" href="self-repair.html">
+            <div class="post-meta">2026-01-13 • Emergence</div>
+            <h2>Self-Repair Is an Emergent Feature</h2>
+            <p>Give a model an execution loop and safe diffs, and it begins acting like a debugger. That behavior falls out naturally.</p>
+        </a>
+        <a class="post-card" href="diffs-as-interface.html">
+            <div class="post-meta">2026-01-13 • Engineering</div>
+            <h2>Diffs as an Interface</h2>
+            <p>Text isn’t an API. Diffs are. Eli uses diffs + undo + approvals so the model can ship code without wrecking your repo.</p>
+        </a>
+    </section>
+
+    <footer>
+        <a href="../">Home</a>
+        <a href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+        <span>v0.1.0</span>
+    </footer>
+</main>
+</body>
+</html>

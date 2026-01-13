@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eli | Terminal-First Financial Research Agent</title>
+    <meta name="description" content="A Rust-powered autonomous agent that fetches raw market data, writes Python to analyze it, and builds instincts through prediction. Local. Private. Free.">
+    <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="blog/rss.xml">
+    <style>
+        /*
+           THE ELI DESIGN SYSTEM
+           Terminal-first aesthetic meets forensic precision.
+        */
+
+        :root {
+            --bg: #ffffff;
+            --fg: #000000;
+            --gray: #666666;
+            --light-gray: #f5f5f7;
+            --accent: #000000;
+            --radius: 12px;
+            --font-serif: "New York", "Apple Garamond", "Baskerville", "Times New Roman", serif;
+            --font-sans: "SF Pro Text", "Helvetica Neue", sans-serif;
+            --font-mono: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--fg);
+            font-family: var(--font-serif);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            overflow-x: hidden;
+        }
+
+        /* NAV */
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.82);
+            backdrop-filter: saturate(180%) blur(18px);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+        }
+
+        #how, #blog {
+            scroll-margin-top: 96px;
+        }
+
+        .nav-inner {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 18px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .nav-logo {
+            font-family: var(--font-sans);
+            font-weight: 700;
+            letter-spacing: -0.05em;
+            font-size: 16px;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            font-family: var(--font-sans);
+            font-size: 0.9rem;
+        }
+
+        .nav-links a {
+            color: var(--fg);
+            border-bottom: 1px solid transparent;
+        }
+
+        .nav-cta {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--light-gray);
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            padding: 10px 14px;
+            border-radius: 9999px;
+            font-weight: 600;
+        }
+
+        .nav-cta:hover {
+            border-color: rgba(0, 0, 0, 0.18);
+        }
+
+        .gh-mark {
+            width: 16px;
+            height: 16px;
+            opacity: 0.9;
+        }
+
+        /* LAYOUT */
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 64px 24px 80px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+
+        /* TYPOGRAPHY */
+        h1 {
+            font-size: 4.5rem;
+            font-weight: 500;
+            letter-spacing: -0.04em;
+            line-height: 1;
+            margin-bottom: 24px;
+            color: var(--fg);
+        }
+
+        .subtitle {
+            font-family: var(--font-sans);
+            font-size: 1.25rem;
+            font-weight: 400;
+            color: var(--gray);
+            margin-bottom: 48px;
+            max-width: 640px;
+        }
+
+        .tagline {
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+            color: var(--gray);
+            margin-bottom: 32px;
+            letter-spacing: 0.05em;
+        }
+
+        /* THE INSTALL BOX */
+        .install-box {
+            position: relative;
+            background: var(--light-gray);
+            border: 1px solid #e5e5e5;
+            border-radius: 9999px;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 24px;
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+
+        .install-box:hover {
+            border-color: #000;
+            transform: scale(1.01);
+        }
+
+        .cmd-text {
+            font-family: var(--font-mono);
+            font-size: 0.95rem;
+            color: var(--fg);
+        }
+
+        .copy-icon {
+            width: 16px;
+            height: 16px;
+            opacity: 0.5;
+        }
+
+        .provider-badges {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 64px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .badge {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            padding: 6px 12px;
+            border: 1px solid #e5e5e5;
+            border-radius: 6px;
+            color: var(--gray);
+        }
+
+        /* THE DEMO TERMINAL */
+        .terminal-window {
+            width: 100%;
+            background: #0a0a0a;
+            border-radius: var(--radius);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+            overflow: hidden;
+            text-align: left;
+            margin-bottom: 80px;
+            border: 1px solid #333;
+        }
+
+        .terminal-header {
+            background: #1a1a1a;
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-bottom: 1px solid #333;
+        }
+
+        .dot { width: 12px; height: 12px; border-radius: 50%; }
+        .red { background: #ff5f56; }
+        .yellow { background: #ffbd2e; }
+        .green { background: #27c93f; }
+
+        .terminal-title {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: #666;
+            margin-left: 12px;
+        }
+
+        .terminal-body {
+            padding: 20px 24px;
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: #d4d4d4;
+            line-height: 1.6;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .terminal-scroll {
+            white-space: pre-wrap;
+            overflow-x: auto;
+        }
+
+        .terminal-line {
+            white-space: pre-wrap;
+        }
+
+        .terminal-input {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding-top: 14px;
+            border-top: 1px solid #222;
+        }
+
+        .terminal-input input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #d4d4d4;
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            outline: none;
+            padding: 0;
+        }
+
+        .terminal-input input::placeholder {
+            color: #555;
+        }
+
+        .terminal-status {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: #666;
+        }
+
+        .t-cyan { color: #51C7DA; }
+        .t-green { color: #87D787; }
+        .t-gray { color: #555; }
+        .t-purple { color: #af87ff; }
+        .t-yellow { color: #e5c07b; }
+        .t-red { color: #e06c75; }
+        .t-orange { color: #d19a66; }
+        .t-dim { color: #444; }
+        .t-white { color: #ffffff; font-weight: 600; }
+
+        /* SECTION HEADERS */
+        .section-header {
+            font-family: var(--font-sans);
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--gray);
+            margin-bottom: 24px;
+            margin-top: 80px;
+        }
+
+        /* HOW IT WORKS */
+        .workflow {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            margin-bottom: 60px;
+        }
+
+        .workflow-step {
+            display: flex;
+            align-items: flex-start;
+            gap: 20px;
+            padding: 24px 0;
+            border-bottom: 1px solid #eee;
+            text-align: left;
+        }
+
+        .workflow-step:last-child {
+            border-bottom: none;
+        }
+
+        .step-num {
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+            color: var(--gray);
+            min-width: 24px;
+        }
+
+        .step-content h3 {
+            font-family: var(--font-sans);
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .step-content p {
+            font-size: 1rem;
+            color: var(--gray);
+        }
+
+        .step-code {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            background: var(--light-gray);
+            padding: 3px 8px;
+            border-radius: 4px;
+            margin-top: 8px;
+            display: inline-block;
+        }
+
+        /* MANIFESTO GRID */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 48px;
+            width: 100%;
+            text-align: left;
+            margin-top: 40px;
+        }
+
+        .card h3 {
+            font-family: var(--font-sans);
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .card p {
+            font-family: var(--font-serif);
+            font-size: 1.05rem;
+            color: var(--gray);
+            line-height: 1.7;
+        }
+
+        /* TOOLS SECTION */
+        .tools-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            width: 100%;
+            margin-top: 24px;
+        }
+
+        .tool-card {
+            background: var(--light-gray);
+            border-radius: 8px;
+            padding: 16px;
+            text-align: left;
+        }
+
+        .tool-card code {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: var(--fg);
+            display: block;
+            margin-bottom: 8px;
+        }
+
+        .tool-card span {
+            font-family: var(--font-sans);
+            font-size: 0.85rem;
+            color: var(--gray);
+        }
+
+        /* BLOG */
+        .blog-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 16px;
+            width: 100%;
+            text-align: left;
+            margin-top: 24px;
+        }
+
+        .blog-card {
+            background: #fff;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            border-radius: 14px;
+            padding: 18px;
+            transition: transform 0.18s ease, border-color 0.18s ease;
+        }
+
+        .blog-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(0, 0, 0, 0.16);
+        }
+
+        .blog-meta {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--gray);
+            letter-spacing: 0.02em;
+            margin-bottom: 10px;
+        }
+
+        .blog-card h3 {
+            font-family: var(--font-sans);
+            font-size: 1rem;
+            font-weight: 650;
+            margin-bottom: 10px;
+        }
+
+        .blog-card p {
+            font-family: var(--font-serif);
+            color: var(--gray);
+            font-size: 1.02rem;
+            line-height: 1.7;
+        }
+
+        /* FOOTER */
+        footer {
+            margin-top: 120px;
+            font-family: var(--font-sans);
+            font-size: 0.9rem;
+            color: var(--gray);
+            display: flex;
+            gap: 24px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        a { color: var(--fg); text-decoration: none; border-bottom: 1px solid transparent; transition: 0.2s;}
+        a:hover { border-bottom: 1px solid var(--fg); }
+
+        /* ANIMATIONS */
+        .fade-in {
+            animation: fadeIn 1s ease-out forwards;
+            opacity: 0;
+        }
+
+        .delay-1 { animation-delay: 0.15s; }
+        .delay-2 { animation-delay: 0.3s; }
+        .delay-3 { animation-delay: 0.45s; }
+        .delay-4 { animation-delay: 0.6s; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @media (max-width: 600px) {
+            h1 { font-size: 3rem; }
+            .install-box { width: 100%; justify-content: center; }
+            .cmd-text { font-size: 0.75rem; }
+            .terminal-body { font-size: 0.7rem; padding: 16px; }
+            .terminal-input input { font-size: 0.7rem; }
+        }
+    </style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <div class="nav-inner">
+        <a class="nav-logo" href="#" aria-label="Eli home">eli</a>
+        <div class="nav-links" aria-label="Site">
+            <a href="#how">How it works</a>
+            <a href="#blog">Blog</a>
+            <a class="nav-cta" href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">
+                <svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                    <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path>
+                </svg>
+                GitHub
+            </a>
+        </div>
+    </div>
+</nav>
+
+<div class="container">
+    <!-- HERO SECTION -->
+    <p class="tagline fade-in">RUST CLI + LLM REASONING + RAW MARKET DATA</p>
+    <h1 class="fade-in delay-1">eli</h1>
+    <p class="subtitle fade-in delay-2">
+        A terminal-first research harness that measures markets with Rust tools,
+        writes Python to verify the math, and uses news only after the numbers move.
+        Runs locally. Uses any LLM.
+    </p>
+
+    <!-- INSTALL COMMAND -->
+    <div class="install-box fade-in delay-3" onclick="copyCmd()">
+        <span class="t-cyan" style="font-family: var(--font-mono); font-weight: bold;">$</span>
+        <span class="cmd-text" id="cmd">cargo install eli-cli</span>
+        <svg class="copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+    </div>
+
+    <div class="provider-badges fade-in delay-3">
+        <span class="badge">OpenRouter</span>
+        <span class="badge">Anthropic</span>
+        <span class="badge">OpenAI</span>
+        <span class="badge">Ollama</span>
+    </div>
+
+    <!-- TERMINAL DEMO - THE ACTUAL WORKFLOW -->
+    <div class="terminal-window fade-in delay-4">
+        <div class="terminal-header">
+            <div class="dot red"></div>
+            <div class="dot yellow"></div>
+            <div class="dot green"></div>
+            <span class="terminal-title">eli ~ mistralai/devstral-2512:free</span>
+        </div>
+        <div class="terminal-body">
+            <div id="terminalTranscript" class="terminal-scroll"><span class="t-cyan">›</span> Analyze the correlation between AMD and INTC over the last 30 days.
+  Identify the single biggest day of DIVERGENCE.
+
+<span class="t-dim">eli[1]</span> <span class="t-gray">→ plan: MODE: READ | APPROVALS: AUTO</span>
+  <span class="t-purple">◆</span> checklist:
+    <span class="t-gray">•</span> Fetch 30d/1h timeseries for AMD and INTC
+    <span class="t-gray">•</span> Compute daily returns and identify divergence
+    <span class="t-gray">•</span> Fetch news for the identified day
+
+<span class="t-green">✓</span> <span class="t-purple">$</span> eli finance timeseries --tickers AMD,INTC --range 30d --granularity 1h
+
+<span class="t-dim">eli[2]</span> <span class="t-gray">→ Writing Python to compute daily returns...</span>
+
+<span class="t-green">✓</span> <span class="t-purple">$</span> cat << 'EOF' > analyze_divergence.py
+<span class="t-yellow">import</span> json
+<span class="t-yellow">from</span> datetime <span class="t-yellow">import</span> datetime
+
+<span class="t-yellow">with</span> <span class="t-cyan">open</span>(<span class="t-green">'amd_intc_30d.json'</span>) <span class="t-yellow">as</span> f:
+    data = json.load(f)
+
+<span class="t-gray"># Compute daily returns and find max divergence</span>
+<span class="t-yellow">for</span> date <span class="t-yellow">in</span> dates:
+    amd_ret = (amd_close / amd_prev - <span class="t-orange">1</span>) * <span class="t-orange">100</span>
+    intc_ret = (intc_close / intc_prev - <span class="t-orange">1</span>) * <span class="t-orange">100</span>
+    divergence = <span class="t-cyan">abs</span>(amd_ret - intc_ret)
+EOF
+python3 analyze_divergence.py
+
+<span class="t-red">✗</span> TypeError: 'str' object cannot be interpreted as an integer
+
+<span class="t-dim">eli[3]</span> <span class="t-gray">→ Fixing timestamp parsing for ISO format...</span>
+
+<span class="t-green">✓</span> <span class="t-purple">$</span> python3 analyze_divergence.py
+    New max divergence: 9.72% on 2026-01-09 (AMD: -0.54%, INTC: +9.18%)
+
+<span class="t-green">✓</span> <span class="t-purple">$</span> eli finance news --ticker INTC --date 2026-01-09
+
+<span class="t-cyan">╭───────────────────────────────────────────────────────────────────╮</span>
+<span class="t-cyan">│</span> <span class="t-purple">◆</span> <b>INTC surged +9.18% while AMD was flat (-0.54%)</b>                <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>                                                                   <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>   <b>Catalysts identified:</b>                                         <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>   • CEO meeting with President Trump                             <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>   • Launch of next-generation AI PCs at CES 2026                 <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>   • Numeric evidence: 9.72% divergence is 3x typical spread      <span class="t-cyan">│</span>
+<span class="t-cyan">╰───────────────────────────────────────────────────────────────────╯</span>
+
+<span class="t-dim">status:</span> <span class="t-green">✓ done</span></div>
+            <div id="terminalLive" class="terminal-scroll" aria-live="polite"></div>
+            <div class="terminal-input" aria-label="Live terminal input">
+                <span class="t-purple" aria-hidden="true">$</span>
+                <input id="terminalInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type: help  (or run python3 demo_server.py for a real demo)" />
+            </div>
+            <div class="terminal-status" id="terminalStatus"></div>
+        </div>
+    </div>
+
+    <!-- HOW IT WORKS -->
+    <div id="how"></div>
+    <p class="section-header">How Eli Works</p>
+    <div class="workflow">
+        <div class="workflow-step">
+            <span class="step-num">01</span>
+            <div class="step-content">
+                <h3>Rust CLI fetches raw data</h3>
+                <p>No web scraping. No hallucinated numbers. OHLCV candles from Yahoo Finance and FRED, cached locally with SHA256 keys.</p>
+                <code class="step-code">eli finance timeseries --tickers GLD,SLV --range 1y --granularity 1d</code>
+            </div>
+        </div>
+        <div class="workflow-step">
+            <span class="step-num">02</span>
+            <div class="step-content">
+                <h3>LLM writes Python to compute</h3>
+                <p>Need correlation? RSI? Daily returns? Eli doesn't estimate. It generates a Python script, executes it, and reads the actual output.</p>
+            </div>
+        </div>
+        <div class="workflow-step">
+            <span class="step-num">03</span>
+            <div class="step-content">
+                <h3>Self-corrects on errors</h3>
+                <p>If the Python throws an exception, Eli reads the traceback, fixes the code, and retries. Autonomous debugging until the math works.</p>
+            </div>
+        </div>
+        <div class="workflow-step">
+            <span class="step-num">04</span>
+            <div class="step-content">
+                <h3>Confirms with news catalysts</h3>
+                <p>Numbers without narrative are noise. Eli fetches news for the exact date of anomaly to confirm the "why" behind the data.</p>
+                <code class="step-code">eli finance news --ticker NVDA --date 2026-01-09</code>
+            </div>
+        </div>
+        <div class="workflow-step">
+            <span class="step-num">05</span>
+            <div class="step-content">
+                <h3>Builds instincts through reflection</h3>
+                <p>After each research session, Eli can record predictions and later compare them to outcomes. Over time, it builds institutional memory.</p>
+                <code class="step-code">instincts/INTC_reflection.md</code>
+            </div>
+        </div>
+    </div>
+
+    <!-- FINANCE TOOLS -->
+    <p class="section-header">Built-In Finance Tools</p>
+    <div class="tools-grid">
+        <div class="tool-card">
+            <code>timeseries</code>
+            <span>OHLCV candles with flexible range and granularity (1m to 5y)</span>
+        </div>
+        <div class="tool-card">
+            <code>snapshot</code>
+            <span>Point-in-time data: price, market cap, shares outstanding, EV</span>
+        </div>
+        <div class="tool-card">
+            <code>fundamentals</code>
+            <span>Quarterly income, balance sheet, and cash flow statements</span>
+        </div>
+        <div class="tool-card">
+            <code>filings</code>
+            <span>SEC filings (8-K, 10-K, 10-Q) with full text extraction</span>
+        </div>
+        <div class="tool-card">
+            <code>news</code>
+            <span>News articles for a specific ticker on a specific date</span>
+        </div>
+        <div class="tool-card">
+            <code>search</code>
+            <span>Find tickers by keyword (e.g., "semiconductors", "gold miners")</span>
+        </div>
+    </div>
+
+    <!-- MANIFESTO / FEATURES -->
+    <p class="section-header">Why This Architecture</p>
+    <div class="grid">
+        <div class="card">
+            <h3>No Web Search = No Hallucination</h3>
+            <p>Web search is disabled by design. Every claim must trace back to structured data from the finance tools. No "I found an article that says..." guessing.</p>
+        </div>
+        <div class="card">
+            <h3>Python Execution = Verified Math</h3>
+            <p>When Eli says the correlation is 0.87, it's because it wrote and ran the numpy calculation. The code is in your working directory. Audit it.</p>
+        </div>
+        <div class="card">
+            <h3>Any LLM, Your Choice</h3>
+            <p>Works with OpenRouter (free models like Devstral), Anthropic, OpenAI, or fully local with Ollama. Bring your own API key. Switch mid-session.</p>
+        </div>
+        <div class="card">
+            <h3>Zoom & Correlate Method</h3>
+            <p>Start with 5-year monthly data for context, zoom to 10-day hourly for the event, add correlated assets, confirm with news. A systematic investigation protocol.</p>
+        </div>
+        <div class="card">
+            <h3>Approval Modes</h3>
+            <p>Run fully autonomous with <code>/auto</code> or require human approval for each command with <code>/plan</code>. Read-only mode for pure research.</p>
+        </div>
+        <div class="card">
+            <h3>Research Artifacts</h3>
+            <p>Every session saves a markdown report to <code>eli_research/</code> with the query, methodology, data sources, and conclusions. Institutional memory built in.</p>
+        </div>
+    </div>
+
+    <!-- BLOG -->
+    <div id="blog"></div>
+    <p class="section-header">Blog</p>
+    <div class="blog-grid" aria-label="Blog posts">
+        <a class="blog-card" href="blog/beyond-the-cutoff.html">
+            <div class="blog-meta">2026-01-13 • Research</div>
+            <h3>Beyond the Cutoff: Tools Beat Memory</h3>
+            <p>Models are stubborn when they can’t measure reality. Eli forces a timeseries-first workflow and uses news only after the numbers move.</p>
+        </a>
+        <a class="blog-card" href="blog/self-repair.html">
+            <div class="blog-meta">2026-01-13 • Emergence</div>
+            <h3>Self-Repair Is an Emergent Feature</h3>
+            <p>Once an agent can run code and apply diffs, it stops “answering” and starts debugging—retrying until the math and data pipeline actually work.</p>
+        </a>
+        <a class="blog-card" href="blog/diffs-as-interface.html">
+            <div class="blog-meta">2026-01-13 • Engineering</div>
+            <h3>Diffs as an Interface</h3>
+            <p>Eli doesn’t paste code. It proposes diffs, applies them, and can undo them. That’s how small models ship real software safely.</p>
+        </a>
+    </div>
+
+    <!-- FOOTER -->
+    <footer>
+        <a href="https://github.com/elifoltyn/eli">GitHub</a>
+        <a href="blog/">Blog</a>
+        <span>Built with Rust</span>
+        <span>v0.1.0</span>
+    </footer>
+</div>
+
+<script>
+    function copyCmd() {
+        const text = document.getElementById('cmd').innerText;
+        navigator.clipboard.writeText(text);
+
+        const original = document.getElementById('cmd').innerText;
+        const el = document.getElementById('cmd');
+        el.innerText = "Copied!";
+        el.style.color = "var(--gray)";
+
+        setTimeout(() => {
+            el.innerText = original;
+            el.style.color = "var(--fg)";
+        }, 1500);
+    }
+
+    (function () {
+        const input = document.getElementById('terminalInput');
+        const live = document.getElementById('terminalLive');
+        const status = document.getElementById('terminalStatus');
+        const terminalBody = document.querySelector('.terminal-body');
+
+        if (!input || !live || !status || !terminalBody) return;
+
+        let history = [];
+        let historyIndex = 0;
+        let busy = false;
+        let liveApi = false;
+        let lastTimeseriesPath = null;
+
+        function escapeHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function stripAnsi(str) {
+            return String(str).replace(/\u001b\[[0-9;]*m/g, '');
+        }
+
+        function appendHtml(html) {
+            const div = document.createElement('div');
+            div.className = 'terminal-line';
+            div.innerHTML = html;
+            live.appendChild(div);
+            input.scrollIntoView({ block: 'nearest' });
+        }
+
+        function appendText(text, extraClass) {
+            const div = document.createElement('div');
+            div.className = 'terminal-line' + (extraClass ? ` ${extraClass}` : '');
+            div.textContent = text;
+            live.appendChild(div);
+            input.scrollIntoView({ block: 'nearest' });
+        }
+
+        function setStatus(msg) {
+            status.textContent = msg;
+        }
+
+        function help() {
+            appendText(
+                [
+                    'Commands:',
+                    '  help',
+                    '  clear',
+                    '  demo',
+                    '  divergence   (after running timeseries)',
+                    '  eli --help',
+                    '  eli --version',
+                    '  eli finance timeseries --tickers AMD,INTC --range 30d --granularity 1h',
+                    '',
+                    'Live mode: run `python3 demo_server.py` in the `eli website/` folder, then open http://127.0.0.1:8000',
+                ].join('\n'),
+            );
+        }
+
+        function clear() {
+            live.innerHTML = '';
+        }
+
+        async function detectLive() {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 700);
+
+            try {
+                const res = await fetch('/api/health', { signal: controller.signal });
+                if (!res.ok) throw new Error('not ok');
+                const data = await res.json();
+                if (!data || !data.ok) throw new Error('bad payload');
+                liveApi = true;
+                setStatus('Live demo connected.');
+            } catch (e) {
+                liveApi = false;
+                setStatus('Offline mode (start the local demo server to run real eli commands).');
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+
+        async function apiRun(cmd) {
+            const res = await fetch('/api/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cmd }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data) {
+                const msg = data && data.error ? data.error : 'request failed';
+                throw new Error(msg);
+            }
+            return data;
+        }
+
+        function tryParseJson(str) {
+            const s = String(str).trim();
+            if (!s) return null;
+            try {
+                return JSON.parse(s);
+            } catch (_) {
+                return null;
+            }
+        }
+
+        async function divergence() {
+            if (!lastTimeseriesPath) {
+                appendText('No timeseries file yet. Run: eli finance timeseries ...');
+                return;
+            }
+
+            const resp = await fetch(lastTimeseriesPath);
+            if (!resp.ok) {
+                appendText(`Failed to fetch ${lastTimeseriesPath}`);
+                return;
+            }
+
+            const data = await resp.json().catch(() => null);
+            if (!data || !data.series || !Array.isArray(data.series) || data.series.length < 2) {
+                appendText('Timeseries JSON not in expected shape.');
+                return;
+            }
+
+            function dayKey(ts) {
+                return String(ts).slice(0, 10);
+            }
+
+            function dailyCloseMap(candles) {
+                const map = new Map();
+                for (const c of candles) {
+                    if (!c || !c.t) continue;
+                    const day = dayKey(c.t);
+                    const prev = map.get(day);
+                    if (!prev || String(c.t) > String(prev.t)) map.set(day, c);
+                }
+                const days = Array.from(map.keys()).sort();
+                const closes = new Map();
+                for (const d of days) {
+                    const c = map.get(d);
+                    if (c && typeof c.c === 'number') closes.set(d, c.c);
+                }
+                return days.filter((d) => closes.has(d)).map((d) => ({ day: d, close: closes.get(d) }));
+            }
+
+            function returnsByDay(daily) {
+                const out = new Map();
+                for (let i = 1; i < daily.length; i++) {
+                    const prev = daily[i - 1].close;
+                    const cur = daily[i].close;
+                    if (!prev) continue;
+                    out.set(daily[i].day, ((cur / prev) - 1) * 100);
+                }
+                return out;
+            }
+
+            const s0 = data.series[0];
+            const s1 = data.series[1];
+            const r0 = returnsByDay(dailyCloseMap(s0.candles || []));
+            const r1 = returnsByDay(dailyCloseMap(s1.candles || []));
+
+            let best = null;
+            for (const [day, a] of r0.entries()) {
+                if (!r1.has(day)) continue;
+                const b = r1.get(day);
+                const div = Math.abs(a - b);
+                if (!best || div > best.divergence) best = { day, a, b, divergence: div };
+            }
+
+            if (!best) {
+                appendText('Not enough overlapping days to compute divergence.');
+                return;
+            }
+
+            appendText(
+                `Max divergence: ${best.divergence.toFixed(2)}% on ${best.day} (${s0.ticker}: ${best.a.toFixed(2)}%, ${s1.ticker}: ${best.b.toFixed(2)}%)`,
+                't-white',
+            );
+        }
+
+        async function runCommand(cmd) {
+            const trimmed = cmd.trim();
+            if (!trimmed) return;
+
+            if (trimmed === 'help') return help();
+            if (trimmed === 'clear') return clear();
+            if (trimmed === 'divergence') return divergence();
+            if (trimmed === 'demo') {
+                appendText('Running demo (timeseries → divergence)...', 't-dim');
+                await runCommand('eli finance timeseries --tickers AMD,INTC --range 30d --granularity 1h');
+                await runCommand('divergence');
+                return;
+            }
+
+            if (!liveApi) {
+                appendText("Offline mode: start `python3 demo_server.py` (in `eli website/`) to run real commands.", 't-dim');
+                return;
+            }
+
+            busy = true;
+            input.disabled = true;
+            try {
+                try {
+                    const result = await apiRun(trimmed);
+                    const stdout = stripAnsi(result.stdout || '');
+                    const stderr = stripAnsi(result.stderr || '');
+
+                    if (stdout.trim()) {
+                        const maybe = tryParseJson(stdout);
+                        if (maybe && maybe.path) lastTimeseriesPath = maybe.path;
+                        appendText(stdout.trimEnd());
+                    }
+                    if (stderr.trim()) appendText(stderr.trimEnd(), 't-red');
+                } catch (e) {
+                    appendText(`error: ${e && e.message ? e.message : String(e)}`, 't-red');
+                }
+            } finally {
+                busy = false;
+                input.disabled = false;
+                input.focus();
+            }
+        }
+
+        input.addEventListener('keydown', async (event) => {
+            if (busy) return;
+
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                const cmd = input.value;
+                input.value = '';
+                if (!cmd.trim()) return;
+
+                history.push(cmd);
+                historyIndex = history.length;
+
+                appendHtml(`<span class="t-purple">$</span> ${escapeHtml(cmd)}`);
+                await runCommand(cmd);
+                return;
+            }
+
+            if (event.key === 'ArrowUp') {
+                event.preventDefault();
+                historyIndex = Math.max(0, historyIndex - 1);
+                input.value = history[historyIndex] || '';
+                return;
+            }
+
+            if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                historyIndex = Math.min(history.length, historyIndex + 1);
+                input.value = historyIndex >= history.length ? '' : (history[historyIndex] || '');
+            }
+        });
+
+        terminalBody.addEventListener('click', () => input.focus());
+
+        detectLive();
+    })();
+</script>
+
+</body>
+</html>

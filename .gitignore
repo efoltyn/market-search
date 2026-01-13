@@ -1,0 +1,9 @@
+.DS_Store
+.claude/
+.gemini/
+.gemini-clipboard/
+__pycache__/
+*.pyc
+.env
+.eli-backup-*
+eli/target-codex/

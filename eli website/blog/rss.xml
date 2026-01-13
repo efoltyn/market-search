@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Eli Blog</title>
+    <link>/blog/</link>
+    <description>Mini whitepapers on tool-using models, verification, and agentic UX.</description>
+    <language>en</language>
+    <item>
+      <title>Beyond the Cutoff: Tools Beat Memory</title>
+      <link>/blog/beyond-the-cutoff.html</link>
+      <guid>/blog/beyond-the-cutoff.html</guid>
+      <pubDate>Tue, 13 Jan 2026 00:00:00 GMT</pubDate>
+      <description>Why Eli starts with timeseries, not headlines—and how tool access turns “knowledge cutoff” into a solvable problem.</description>
+    </item>
+    <item>
+      <title>Self-Repair Is an Emergent Feature</title>
+      <link>/blog/self-repair.html</link>
+      <guid>/blog/self-repair.html</guid>
+      <pubDate>Tue, 13 Jan 2026 00:00:00 GMT</pubDate>
+      <description>Give a model an execution loop and safe diffs, and it begins acting like a debugger.</description>
+    </item>
+    <item>
+      <title>Diffs as an Interface</title>
+      <link>/blog/diffs-as-interface.html</link>
+      <guid>/blog/diffs-as-interface.html</guid>
+      <pubDate>Tue, 13 Jan 2026 00:00:00 GMT</pubDate>
+      <description>Text isn’t an API. Diffs are. Eli uses diffs + undo + approvals so the model can ship code safely.</description>
+    </item>
+  </channel>
+</rss>
+

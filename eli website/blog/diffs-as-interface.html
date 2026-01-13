@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Diffs as an Interface | Eli</title>
+    <meta name="description" content="Text isn’t an API. Diffs are. Eli uses diffs + undo + approvals so the model can ship code without wrecking your repo.">
+    <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="rss.xml">
+    <style>
+        :root {
+            --bg: #ffffff;
+            --fg: #000000;
+            --gray: #666666;
+            --light-gray: #f5f5f7;
+            --radius: 12px;
+            --font-serif: "New York", "Apple Garamond", "Baskerville", "Times New Roman", serif;
+            --font-sans: "SF Pro Text", "Helvetica Neue", sans-serif;
+            --font-mono: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background-color: var(--bg);
+            color: var(--fg);
+            font-family: var(--font-serif);
+            line-height: 1.75;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        a { color: var(--fg); text-decoration: none; border-bottom: 1px solid transparent; transition: 0.2s; }
+        a:hover { border-bottom: 1px solid var(--fg); }
+
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.82);
+            backdrop-filter: saturate(180%) blur(18px);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+        }
+
+        .nav-inner {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 18px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .nav-logo {
+            font-family: var(--font-sans);
+            font-weight: 700;
+            letter-spacing: -0.05em;
+            font-size: 16px;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            font-family: var(--font-sans);
+            font-size: 0.9rem;
+        }
+
+        .nav-cta {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--light-gray);
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            padding: 10px 14px;
+            border-radius: 9999px;
+            font-weight: 600;
+        }
+
+        .nav-cta:hover { border-color: rgba(0, 0, 0, 0.18); }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 56px 24px 80px;
+        }
+
+        article { max-width: 760px; }
+
+        .kicker {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            letter-spacing: 0.08em;
+            color: var(--gray);
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+
+        h1 {
+            font-size: 3rem;
+            font-weight: 500;
+            letter-spacing: -0.04em;
+            line-height: 1.05;
+            margin-bottom: 16px;
+        }
+
+        .meta {
+            font-family: var(--font-sans);
+            color: var(--gray);
+            margin-bottom: 28px;
+        }
+
+        h2 {
+            font-family: var(--font-sans);
+            font-size: 1.25rem;
+            letter-spacing: -0.02em;
+            margin: 36px 0 10px;
+        }
+
+        p { margin: 12px 0; }
+
+        code, pre {
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+        }
+
+        pre {
+            background: var(--light-gray);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            overflow-x: auto;
+            margin: 16px 0;
+        }
+
+        .callout {
+            background: #fff;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            margin: 18px 0;
+        }
+
+        footer {
+            margin-top: 72px;
+            font-family: var(--font-sans);
+            font-size: 0.9rem;
+            color: var(--gray);
+            display: flex;
+            gap: 18px;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 600px) {
+            h1 { font-size: 2.4rem; }
+        }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <div class="nav-inner">
+        <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
+        <div class="nav-links">
+            <a href="./">Blog</a>
+            <a class="nav-cta" href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+        </div>
+    </div>
+</nav>
+
+<main class="container">
+    <article>
+        <p class="kicker">Engineering</p>
+        <h1>Diffs as an Interface</h1>
+        <div class="meta">2026-01-13 • Eli</div>
+
+        <p>Most “coding assistants” paste code. That’s convenient until it isn’t—because the interface is ambiguous. Where should the code go? What changed? What broke?</p>
+
+        <div class="callout">
+            <b>Text is not an API.</b> Diffs are.
+        </div>
+
+        <h2>Why diffs matter</h2>
+        <p>Eli communicates changes as diffs so every edit is:</p>
+        <pre><code>- explicit (what file, what lines)
+- reviewable (preview vs apply)
+- reversible (undo)</code></pre>
+
+        <h2>Guardrails without killing momentum</h2>
+        <p>Eli supports approval modes so you can choose the tradeoff:</p>
+        <pre><code>/plan  → ask before running commands and applying diffs
+/bot   → run commands automatically, ask before diffs
+/yolo  → auto approvals (full speed)</code></pre>
+
+        <h2>The punchline</h2>
+        <p>Once you constrain edits to diffs and add undo, you can let smaller models act aggressively without fear. The harness provides the safety net.</p>
+
+        <footer>
+            <a href="./">← Blog</a>
+            <a href="../">Home</a>
+        </footer>
+    </article>
+</main>
+</body>
+</html>
