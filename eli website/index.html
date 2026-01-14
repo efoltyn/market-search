@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Eli | Terminal-First Financial Research Agent</title>
-    <meta name="description" content="A Rust-powered autonomous agent that fetches raw market data, writes Python to analyze it, and builds instincts through prediction. Local. Private. Free.">
+    <title>Eli | AI Quant Intern for Your Terminal</title>
+    <meta name="description" content="AI quant intern for your terminal. Runs locally. Rust tools fetch raw market data, Python runs the math, and RSS adds news context without web search. Defaults to a free OpenRouter model. Use any LLM.">
+    <link rel="icon" type="image/png" href="assets/logo.png">
     <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="blog/rss.xml">
     <style>
         /*
@@ -28,6 +29,18 @@
             box-sizing: border-box;
             margin: 0;
             padding: 0;
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
         }
 
         body {
@@ -56,7 +69,7 @@
         .nav-inner {
             max-width: 900px;
             margin: 0 auto;
-            padding: 18px 24px;
+            padding: 12px 24px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -64,9 +77,20 @@
 
         .nav-logo {
             font-family: var(--font-sans);
-            font-weight: 700;
-            letter-spacing: -0.05em;
-            font-size: 16px;
+            font-weight: 800;
+            letter-spacing: -0.06em;
+            font-size: clamp(22px, 2.6vw, 32px);
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            padding: 8px 10px;
+            border-radius: 14px;
+            border-bottom: none;
+        }
+
+        .nav-logo:hover {
+            background: rgba(0, 0, 0, 0.04);
+            border-bottom: none;
         }
 
         .nav-links {
@@ -124,6 +148,19 @@
             color: var(--fg);
         }
 
+        .hero-wordmark {
+            display: flex;
+            justify-content: center;
+        }
+
+        .hero-logo {
+            width: 320px;
+            max-width: 82vw;
+            height: auto;
+            border-radius: 22px;
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.14);
+        }
+
         .subtitle {
             font-family: var(--font-sans);
             font-size: 1.25rem;
@@ -161,6 +198,13 @@
             transform: scale(1.01);
         }
 
+        .install-label {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: var(--gray);
+            margin-bottom: 12px;
+        }
+
         .cmd-text {
             font-family: var(--font-mono);
             font-size: 0.95rem;
@@ -171,23 +215,6 @@
             width: 16px;
             height: 16px;
             opacity: 0.5;
-        }
-
-        .provider-badges {
-            display: flex;
-            gap: 12px;
-            margin-bottom: 64px;
-            flex-wrap: wrap;
-            justify-content: center;
-        }
-
-        .badge {
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            padding: 6px 12px;
-            border: 1px solid #e5e5e5;
-            border-radius: 6px;
-            color: var(--gray);
         }
 
         /* THE DEMO TERMINAL */
@@ -219,7 +246,7 @@
         .terminal-title {
             font-family: var(--font-mono);
             font-size: 0.75rem;
-            color: #666;
+            color: #ccc;
             margin-left: 12px;
         }
 
@@ -481,18 +508,19 @@
             .cmd-text { font-size: 0.75rem; }
             .terminal-body { font-size: 0.7rem; padding: 16px; }
             .terminal-input input { font-size: 0.7rem; }
+            .hero-logo { width: 260px; border-radius: 18px; }
         }
     </style>
 </head>
 <body>
 
-<nav class="top-nav">
-    <div class="nav-inner">
-        <a class="nav-logo" href="#" aria-label="Eli home">eli</a>
-        <div class="nav-links" aria-label="Site">
-            <a href="#how">How it works</a>
-            <a href="#blog">Blog</a>
-            <a class="nav-cta" href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">
+	<nav class="top-nav">
+	    <div class="nav-inner">
+	        <a class="nav-logo" href="#" aria-label="Eli home">eli</a>
+	        <div class="nav-links" aria-label="Site">
+	            <a href="#how">How it works</a>
+	            <a href="#blog">Blog</a>
+	            <a class="nav-cta" href="https://github.com/efoltyn/eli" rel="noreferrer noopener" target="_blank">
                 <svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
                     <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path>
                 </svg>
@@ -504,26 +532,22 @@
 
 <div class="container">
     <!-- HERO SECTION -->
-    <p class="tagline fade-in">RUST CLI + LLM REASONING + RAW MARKET DATA</p>
-    <h1 class="fade-in delay-1">eli</h1>
-    <p class="subtitle fade-in delay-2">
-        A terminal-first research harness that measures markets with Rust tools,
-        writes Python to verify the math, and uses news only after the numbers move.
-        Runs locally. Uses any LLM.
-    </p>
+				    <p class="tagline fade-in">financial coding agent</p>
+    <h1 class="hero-wordmark fade-in delay-1">
+        <span class="sr-only">eli</span>
+        <img class="hero-logo" src="assets/logo.png" alt="" aria-hidden="true" decoding="async">
+    </h1>
+		    <p class="subtitle fade-in delay-2">
+		        Any LLM becomes a quant terminal. Fetches real timeseries, writes Python to analyze it,
+		        debugs itself until it works. Headlines are just confirmation—the numbers already told you what moved.
+		    </p>
 
     <!-- INSTALL COMMAND -->
+    <p class="install-label fade-in delay-3">Click to copy, then run <span style="color: var(--fg); font-weight: 600;">eli</span></p>
     <div class="install-box fade-in delay-3" onclick="copyCmd()">
         <span class="t-cyan" style="font-family: var(--font-mono); font-weight: bold;">$</span>
         <span class="cmd-text" id="cmd">cargo install eli-cli</span>
         <svg class="copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
-    </div>
-
-    <div class="provider-badges fade-in delay-3">
-        <span class="badge">OpenRouter</span>
-        <span class="badge">Anthropic</span>
-        <span class="badge">OpenAI</span>
-        <span class="badge">Ollama</span>
     </div>
 
     <!-- TERMINAL DEMO - THE ACTUAL WORKFLOW -->
@@ -572,14 +596,14 @@ python3 analyze_divergence.py
 
 <span class="t-green">✓</span> <span class="t-purple">$</span> eli finance news --ticker INTC --date 2026-01-09
 
-<span class="t-cyan">╭───────────────────────────────────────────────────────────────────╮</span>
-<span class="t-cyan">│</span> <span class="t-purple">◆</span> <b>INTC surged +9.18% while AMD was flat (-0.54%)</b>                <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>                                                                   <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>   <b>Catalysts identified:</b>                                         <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>   • CEO meeting with President Trump                             <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>   • Launch of next-generation AI PCs at CES 2026                 <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>   • Numeric evidence: 9.72% divergence is 3x typical spread      <span class="t-cyan">│</span>
-<span class="t-cyan">╰───────────────────────────────────────────────────────────────────╯</span>
+<span class="t-cyan">╭──────────────────────────────────────────────────────────────╮</span>
+<span class="t-cyan">│</span> <span class="t-purple">◆</span> <b>INTC surged +9.18% while AMD was flat (-0.54%)</b>             <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>                                                              <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>   <b>Catalysts identified:</b>                                      <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>   • CEO meeting with President Trump                         <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>   • Launch of next-generation AI PCs at CES 2026             <span class="t-cyan">│</span>
+<span class="t-cyan">│</span>   • Numeric evidence: 9.72% divergence is 3x typical spread  <span class="t-cyan">│</span>
+<span class="t-cyan">╰──────────────────────────────────────────────────────────────╯</span>
 
 <span class="t-dim">status:</span> <span class="t-green">✓ done</span></div>
             <div id="terminalLive" class="terminal-scroll" aria-live="polite"></div>
@@ -593,47 +617,37 @@ python3 analyze_divergence.py
 
     <!-- HOW IT WORKS -->
     <div id="how"></div>
-    <p class="section-header">How Eli Works</p>
+    <p class="section-header">How It Works</p>
     <div class="workflow">
         <div class="workflow-step">
             <span class="step-num">01</span>
             <div class="step-content">
-                <h3>Rust CLI fetches raw data</h3>
-                <p>No web scraping. No hallucinated numbers. OHLCV candles from Yahoo Finance and FRED, cached locally with SHA256 keys.</p>
-                <code class="step-code">eli finance timeseries --tickers GLD,SLV --range 1y --granularity 1d</code>
+                <h3>Fetch data</h3>
+                <p>Yahoo Finance + FRED via native Rust. OHLCV, fundamentals, SEC filings, macro indicators.</p>
             </div>
         </div>
         <div class="workflow-step">
             <span class="step-num">02</span>
             <div class="step-content">
-                <h3>LLM writes Python to compute</h3>
-                <p>Need correlation? RSI? Daily returns? Eli doesn't estimate. It generates a Python script, executes it, and reads the actual output.</p>
+                <h3>Write code</h3>
+                <p>LLM generates Python for calculations. Executes it. Reads actual output.</p>
             </div>
         </div>
         <div class="workflow-step">
             <span class="step-num">03</span>
             <div class="step-content">
-                <h3>Self-corrects on errors</h3>
-                <p>If the Python throws an exception, Eli reads the traceback, fixes the code, and retries. Autonomous debugging until the math works.</p>
+                <h3>Iterate</h3>
+                <p>Error? Reads traceback, fixes code, retries. Loops until status = DONE.</p>
             </div>
         </div>
-        <div class="workflow-step">
-            <span class="step-num">04</span>
-            <div class="step-content">
-                <h3>Confirms with news catalysts</h3>
-                <p>Numbers without narrative are noise. Eli fetches news for the exact date of anomaly to confirm the "why" behind the data.</p>
-                <code class="step-code">eli finance news --ticker NVDA --date 2026-01-09</code>
-            </div>
-        </div>
-        <div class="workflow-step">
-            <span class="step-num">05</span>
-            <div class="step-content">
-                <h3>Builds instincts through reflection</h3>
-                <p>After each research session, Eli can record predictions and later compare them to outcomes. Over time, it builds institutional memory.</p>
-                <code class="step-code">instincts/INTC_reflection.md</code>
-            </div>
-        </div>
-    </div>
+	        <div class="workflow-step">
+	            <span class="step-num">04</span>
+	            <div class="step-content">
+	                <h3>Add context</h3>
+	                <p>News via Google RSS. Investigate specific dates after the numbers flag what moved.</p>
+	            </div>
+	        </div>
+	    </div>
 
     <!-- FINANCE TOOLS -->
     <p class="section-header">Built-In Finance Tools</p>
@@ -665,31 +679,31 @@ python3 analyze_divergence.py
     </div>
 
     <!-- MANIFESTO / FEATURES -->
-    <p class="section-header">Why This Architecture</p>
-    <div class="grid">
+    <p class="section-header">Why Eli</p>
+	    <div class="grid">
+	        <div class="card">
+	            <h3>Infinite Memory</h3>
+	            <p>Remembers the entire conversation. When tokens get high, it automatically self-compacts history to keep the mission on track.</p>
+	        </div>
+	        <div class="card">
+	            <h3>Rust Data Tools</h3>
+	            <p>Yahoo + FRED in Rust. Cached locally. No scraping. Single binary.</p>
+	        </div>
+	        <div class="card">
+	            <h3>Numbers First</h3>
+	            <p>Price → key days → news/filings by date. No web search. No headlines-first bias.</p>
+	        </div>
         <div class="card">
-            <h3>No Web Search = No Hallucination</h3>
-            <p>Web search is disabled by design. Every claim must trace back to structured data from the finance tools. No "I found an article that says..." guessing.</p>
+            <h3>Real Math</h3>
+            <p>Generates Python. Executes it. Shows the code. Audit it.</p>
         </div>
+	        <div class="card">
+	            <h3>Any LLM</h3>
+	            <p>OpenRouter (free demo model), Anthropic, OpenAI, Ollama. Your choice.</p>
+	        </div>
         <div class="card">
-            <h3>Python Execution = Verified Math</h3>
-            <p>When Eli says the correlation is 0.87, it's because it wrote and ran the numpy calculation. The code is in your working directory. Audit it.</p>
-        </div>
-        <div class="card">
-            <h3>Any LLM, Your Choice</h3>
-            <p>Works with OpenRouter (free models like Devstral), Anthropic, OpenAI, or fully local with Ollama. Bring your own API key. Switch mid-session.</p>
-        </div>
-        <div class="card">
-            <h3>Zoom & Correlate Method</h3>
-            <p>Start with 5-year monthly data for context, zoom to 10-day hourly for the event, add correlated assets, confirm with news. A systematic investigation protocol.</p>
-        </div>
-        <div class="card">
-            <h3>Approval Modes</h3>
-            <p>Run fully autonomous with <code>/auto</code> or require human approval for each command with <code>/plan</code>. Read-only mode for pure research.</p>
-        </div>
-        <div class="card">
-            <h3>Research Artifacts</h3>
-            <p>Every session saves a markdown report to <code>eli_research/</code> with the query, methodology, data sources, and conclusions. Institutional memory built in.</p>
+            <h3>Reproducible</h3>
+            <p>Sessions logged to JSONL. Reports saved to <code>eli_research/</code>.</p>
         </div>
     </div>
 
@@ -700,12 +714,12 @@ python3 analyze_divergence.py
         <a class="blog-card" href="blog/beyond-the-cutoff.html">
             <div class="blog-meta">2026-01-13 • Research</div>
             <h3>Beyond the Cutoff: Tools Beat Memory</h3>
-            <p>Models are stubborn when they can’t measure reality. Eli forces a timeseries-first workflow and uses news only after the numbers move.</p>
+            <p>How open-source Rust tools replace expensive web search. By fetching raw data first, even cheap models (1/100th the cost of Sonnet) can read the news with the numbers in mind.</p>
         </a>
         <a class="blog-card" href="blog/self-repair.html">
             <div class="blog-meta">2026-01-13 • Emergence</div>
             <h3>Self-Repair Is an Emergent Feature</h3>
-            <p>Once an agent can run code and apply diffs, it stops “answering” and starts debugging—retrying until the math and data pipeline actually work.</p>
+            <p>Once an agent can run code and apply diffs, it stops “answering” and starts debugging. It retries until the math and data pipeline actually work.</p>
         </a>
         <a class="blog-card" href="blog/diffs-as-interface.html">
             <div class="blog-meta">2026-01-13 • Engineering</div>
@@ -716,7 +730,7 @@ python3 analyze_divergence.py
 
     <!-- FOOTER -->
     <footer>
-        <a href="https://github.com/elifoltyn/eli">GitHub</a>
+        <a href="https://github.com/efoltyn/eli">GitHub</a>
         <a href="blog/">Blog</a>
         <span>Built with Rust</span>
         <span>v0.1.0</span>
