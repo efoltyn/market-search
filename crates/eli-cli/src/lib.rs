@@ -223,12 +223,104 @@ fn build_processing_footer_lines(
 
     let top_status_raw = format!(
         "{} {spinner} {phase}{queue_indicator} {elapsed_display}{}",
-        style::DARK_GRAY,
+        style::BLUE,
         style::RESET
     );
     let top_status = truncate_to_visible_width(&top_status_raw, width + 10);
 
     let bottom_status_raw = format!("{} {total_tokens} tokens{}", style::DARK_GRAY, style::RESET);
+    let bottom_status = truncate_to_visible_width(&bottom_status_raw, width + 10);
+
+    let input_lines_raw = wrap_with_prefix(input_buffer, " → ", "   ", inner_width);
+    let mut input_lines: Vec<String> = Vec::with_capacity(input_lines_raw.len());
+    for raw in input_lines_raw {
+        let text = truncate_to_visible_width(&raw, inner_width);
+        let visible = text.width().min(inner_width);
+        let pad = " ".repeat(inner_width.saturating_sub(visible));
+        input_lines.push(format!(
+            "{}{}{}{}{}{}{}{}",
+            style::BLUE,
+            style::V,
+            style::RESET,
+            text,
+            pad,
+            style::BLUE,
+            style::V,
+            style::RESET
+        ));
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(top_status);
+    lines.push(top);
+    lines.extend(input_lines);
+    lines.push(bottom);
+    lines.push(bottom_status);
+    lines
+}
+
+fn build_prompt_footer_lines(
+    spinner: usize,
+    queue_len: usize,
+    phase: &str,
+    elapsed: Duration,
+    input_buffer: &str,
+    total_tokens: u32,
+    prompt_history_len: usize,
+    history_cursor: Option<usize>,
+) -> Vec<String> {
+    let (width, _) = terminal_size();
+    let spinner = style::SPINNER[spinner % style::SPINNER.len()];
+    let elapsed_display = format!("[{}s]", elapsed.as_secs());
+    let queue_indicator = if queue_len > 0 {
+        format!(" [{}Q]", queue_len)
+    } else {
+        String::new()
+    };
+
+    if width < 12 {
+        let line_raw =
+            format!("{spinner} {phase}{queue_indicator} {elapsed_display}  tokens:{total_tokens}");
+        let line = truncate_to_visible_width(&line_raw, width.saturating_sub(1));
+        return vec![line];
+    }
+
+    let inner_width = width.saturating_sub(2).max(1);
+    let h = "─".repeat(inner_width);
+    let top = format!("{}{}{}{}{}", style::BLUE, style::TL, h, style::TR, style::RESET);
+    let bottom = format!("{}{}{}{}{}", style::BLUE, style::BL, h, style::BR, style::RESET);
+
+    let input_tokens_est = input_buffer.len().saturating_div(4);
+    let input_tokens_est = if input_buffer.trim().is_empty() {
+        0
+    } else {
+        input_tokens_est.max(1)
+    };
+    let history_hint = match history_cursor {
+        Some(idx) => format!("  hist:{}/{}", idx + 1, prompt_history_len),
+        None => String::new(),
+    };
+
+    let top_status_raw = format!(
+        "{} {spinner} {phase}{queue_indicator} {elapsed_display}{}",
+        style::BLUE,
+        style::RESET
+    );
+    let top_status = truncate_to_visible_width(&top_status_raw, width + 10);
+
+    let bottom_status_raw = if input_tokens_est > 0 {
+        format!(
+            "{} tokens:{total_tokens}  input:~{input_tokens_est}{history_hint}{}",
+            style::DARK_GRAY,
+            style::RESET
+        )
+    } else {
+        format!(
+            "{} tokens:{total_tokens}{history_hint}{}",
+            style::DARK_GRAY,
+            style::RESET
+        )
+    };
     let bottom_status = truncate_to_visible_width(&bottom_status_raw, width + 10);
 
     let input_lines_raw = wrap_with_prefix(input_buffer, " → ", "   ", inner_width);
@@ -2041,178 +2133,47 @@ async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()>
 }
 
 fn read_line_boxed(state: &mut SessionState, queue_len: usize) -> Result<Option<String>> {
-    use std::io::Write;
-
-    let prompt_history = &state.prompt_history;
-    let total_tokens = state.total_usage.total_tokens;
-
     let mut input_buffer = std::mem::take(&mut state.input_buffer);
     let mut history_cursor = state.history_cursor;
-
-    // Start with a single-line input box and grow as the user types (wrapping).
-    let mut reserved_lines: usize = 5;
-    for _ in 0..reserved_lines.saturating_sub(1) {
-        println!();
-    }
-    std::io::stdout().flush().ok();
-
-    crossterm::terminal::enable_raw_mode().ok();
-    // Hide cursor while we render a "fake" input line.
-    print!("\x1b[?25l");
-    std::io::stdout().flush().ok();
 
     let start = Instant::now();
     let mut dots = 0usize;
     let mut last_anim = Instant::now();
 
-    let needed_lines = |input: &str| -> usize {
-        let (width, _) = terminal_size();
-        if width < 12 {
-            return 1;
-        }
-        let inner_width = width.saturating_sub(2).max(1);
-        let input_lines = wrap_with_prefix(input, " → ", "   ", inner_width).len().max(1);
-        input_lines + 4 // top_status + top + input lines + bottom + bottom_status
-    };
-
-    let render = |reserved_lines: usize,
-                  dots: usize,
-                  phase: &str,
-                  input_buffer: &str,
-                  history_cursor: Option<usize>|
-     -> String {
-        let (width, _) = terminal_size();
-        let spinner = style::SPINNER[dots];
-        let elapsed_display = format!("[{}s]", start.elapsed().as_secs());
-        let queue_indicator = if queue_len > 0 {
-            format!(" [{}Q]", queue_len)
-        } else {
-            String::new()
-        };
-
-        if width < 12 {
-            let line_raw = format!("{spinner} {phase}{queue_indicator} {elapsed_display}  tokens:{total_tokens}");
-            let line = truncate_to_visible_width(&line_raw, width.saturating_sub(1));
-
-            let top_padding = reserved_lines.saturating_sub(1);
-            let mut lines: Vec<String> = Vec::with_capacity(reserved_lines);
-            for _ in 0..top_padding {
-                lines.push(String::new());
-            }
-            lines.push(line);
-
-            let up = reserved_lines.saturating_sub(1);
-            let mut out = format!("\r\x1b[{up}A");
-            for (idx, l) in lines.iter().enumerate() {
-                out.push_str("\x1b[K");
-                out.push_str(l);
-                if idx + 1 < lines.len() {
-                    out.push_str("\r\n");
-                }
-            }
-            return out;
-        }
-
-        let inner_width = width.saturating_sub(2).max(1);
-        let h = "─".repeat(inner_width);
-        let top = format!("{}{}{}{}{}", style::BLUE, style::TL, h, style::TR, style::RESET);
-        let bottom =
-            format!("{}{}{}{}{}", style::BLUE, style::BL, h, style::BR, style::RESET);
-
-        let input_tokens_est = input_buffer.len().saturating_div(4);
-        let input_tokens_est = if input_buffer.trim().is_empty() {
-            0
-        } else {
-            input_tokens_est.max(1)
-        };
-        let history_hint = match history_cursor {
-            Some(idx) => format!("  hist:{}/{}", idx + 1, prompt_history.len()),
-            None => String::new(),
-        };
-
-        // Top status: spinner + phase + time (Dark Gray)
-        let top_status_raw = format!("{} {spinner} {phase}{queue_indicator} {elapsed_display}{}", style::DARK_GRAY, style::RESET);
-        let top_status = truncate_to_visible_width(&top_status_raw, width + 10); // +10 for ansi
-
-        // Bottom status: tokens (Dark Gray)
-        let bottom_status_raw = if input_tokens_est > 0 {
-            format!("{} tokens:{total_tokens}  input:~{input_tokens_est}{history_hint}{}", style::DARK_GRAY, style::RESET)
-        } else {
-            format!("{} tokens:{total_tokens}{history_hint}{}", style::DARK_GRAY, style::RESET)
-        };
-        let bottom_status = truncate_to_visible_width(&bottom_status_raw, width + 10);
-
-        let input_lines_raw = wrap_with_prefix(input_buffer, " → ", "   ", inner_width);
-        let mut input_lines: Vec<String> = Vec::with_capacity(input_lines_raw.len());
-        for raw in input_lines_raw {
-            let text = truncate_to_visible_width(&raw, inner_width);
-            let visible = text.width().min(inner_width);
-            let pad = " ".repeat(inner_width.saturating_sub(visible));
-            input_lines.push(format!(
-                "{}{}{}{}{}{}{}{}",
-                style::BLUE,
-                style::V,
-                style::RESET,
-                text,
-                pad,
-                style::BLUE,
-                style::V,
-                style::RESET
-            ));
-        }
-
-        let mut all_lines: Vec<String> = Vec::new();
-        all_lines.push(top_status);
-        all_lines.push(top);
-        all_lines.extend(input_lines);
-        all_lines.push(bottom);
-        all_lines.push(bottom_status);
-
-        let top_padding = reserved_lines.saturating_sub(all_lines.len());
-        let mut lines: Vec<String> = Vec::with_capacity(reserved_lines);
-        for _ in 0..top_padding {
-            lines.push(String::new());
-        }
-        lines.extend(all_lines);
-
-        let up = reserved_lines.saturating_sub(1);
-        let mut out = format!("\r\x1b[{up}A");
-        for (idx, l) in lines.iter().enumerate() {
-            out.push_str("\x1b[K");
-            out.push_str(l);
-            if idx + 1 < lines.len() {
-                out.push_str("\r\n");
-            }
-        }
-        out
-    };
-
-    // Initial render.
-    let initial_needed = needed_lines(&input_buffer);
-    if initial_needed > reserved_lines {
-        for _ in 0..(initial_needed - reserved_lines) {
-            println!();
-        }
-        std::io::stdout().flush().ok();
-        reserved_lines = initial_needed;
-    }
-    print!("{}", render(reserved_lines, 0, "ready", &input_buffer, history_cursor));
-    std::io::stdout().flush().ok();
+    let prompt_history = &state.prompt_history;
+    let prompt_history_len = state.prompt_history.len();
+    let mut sticky_footer: Option<StickyFooter> = None;
+    render_processing_footer(
+        &mut sticky_footer,
+        build_prompt_footer_lines(
+            dots,
+            queue_len,
+            "ready",
+            start.elapsed(),
+            &input_buffer,
+            state.total_usage.total_tokens,
+            prompt_history_len,
+            history_cursor,
+        ),
+    );
 
     let maybe_line = loop {
         // Lightweight idle animation so the box feels alive.
         if last_anim.elapsed() > Duration::from_millis(120) {
             dots = (dots + 1) % style::SPINNER.len();
-            let n = needed_lines(&input_buffer);
-            if n > reserved_lines {
-                for _ in 0..(n - reserved_lines) {
-                    println!();
-                }
-                std::io::stdout().flush().ok();
-                reserved_lines = n;
-            }
-            print!("{}", render(reserved_lines, dots, "ready", &input_buffer, history_cursor));
-            std::io::stdout().flush().ok();
+            render_processing_footer(
+                &mut sticky_footer,
+                build_prompt_footer_lines(
+                    dots,
+                    queue_len,
+                    "ready",
+                    start.elapsed(),
+                    &input_buffer,
+                    state.total_usage.total_tokens,
+                    prompt_history_len,
+                    history_cursor,
+                ),
+            );
             last_anim = Instant::now();
         }
 
@@ -2220,7 +2181,27 @@ fn read_line_boxed(state: &mut SessionState, queue_len: usize) -> Result<Option<
             continue;
         }
 
-        let Ok(CtEvent::Key(key)) = ct_event::read() else {
+        let event = match ct_event::read() {
+            Ok(ev) => ev,
+            Err(_) => continue,
+        };
+
+        let CtEvent::Key(key) = event else {
+            if matches!(event, CtEvent::Resize(_, _)) {
+                render_processing_footer(
+                    &mut sticky_footer,
+                    build_prompt_footer_lines(
+                        dots,
+                        queue_len,
+                        "ready",
+                        start.elapsed(),
+                        &input_buffer,
+                        state.total_usage.total_tokens,
+                        prompt_history_len,
+                        history_cursor,
+                    ),
+                );
+            }
             continue;
         };
         if key.kind != KeyEventKind::Press {
@@ -2233,9 +2214,13 @@ fn read_line_boxed(state: &mut SessionState, queue_len: usize) -> Result<Option<
                 CtKeyCode::Char('c') => {
                     input_buffer.clear();
                     history_cursor = None;
+                    drop(sticky_footer.take());
                     break Some(String::new());
                 }
-                CtKeyCode::Char('d') => break None,
+                CtKeyCode::Char('d') => {
+                    drop(sticky_footer.take());
+                    break None
+                }
                 _ => {}
             }
         }
@@ -2284,32 +2269,30 @@ fn read_line_boxed(state: &mut SessionState, queue_len: usize) -> Result<Option<
                 let line = input_buffer.clone();
                 history_cursor = None;
                 input_buffer.clear();
+                drop(sticky_footer.take());
                 break Some(line);
             }
             _ => {}
         }
 
         // Re-render immediately after input changes.
-        let n = needed_lines(&input_buffer);
-        if n > reserved_lines {
-            for _ in 0..(n - reserved_lines) {
-                println!();
-            }
-            std::io::stdout().flush().ok();
-            reserved_lines = n;
-        }
-        print!("{}", render(reserved_lines, dots, "ready", &input_buffer, history_cursor));
-        std::io::stdout().flush().ok();
+        render_processing_footer(
+            &mut sticky_footer,
+            build_prompt_footer_lines(
+                dots,
+                queue_len,
+                "ready",
+                start.elapsed(),
+                &input_buffer,
+                state.total_usage.total_tokens,
+                prompt_history_len,
+                history_cursor,
+            ),
+        );
     };
 
     state.input_buffer = input_buffer;
     state.history_cursor = history_cursor;
-
-    // Clear the footer box before returning to normal printing.
-    let up = reserved_lines.saturating_sub(1);
-    print!("\r\x1b[{up}A\x1b[J\x1b[?25h");
-    std::io::stdout().flush().ok();
-    crossterm::terminal::disable_raw_mode().ok();
 
     Ok(maybe_line)
 }
@@ -3811,15 +3794,21 @@ async fn run_agent_steps(
 fn print_banner(chat: &eli_core::config::ChatConfig, project_root: &Path, state: &SessionState) {
     use style::*;
 
-    // ASCII art logo with gradient
+    // ASCII art logo with monochrome gradient (white → gray)
+    const W1: &str = "\x1b[38;5;255m";  // bright white
+    const W2: &str = "\x1b[38;5;252m";  // light gray
+    const W3: &str = "\x1b[38;5;249m";  // medium light
+    const W4: &str = "\x1b[38;5;246m";  // medium gray
+    const W5: &str = "\x1b[38;5;243m";  // darker gray
+    const W6: &str = "\x1b[38;5;240m";  // dark gray
     let logo = format!(
         r#"
-{CYAN}{BOLD}  ███████╗██╗     ██╗{RESET}
-{BLUE}{BOLD}  ██╔════╝██║     ██║{RESET}     {WHITE}financial coding agent{RESET}
-{PURPLE}{BOLD}  █████╗  ██║     ██║{RESET}     {GRAY}v0.1.0{RESET}
-{PINK}{BOLD}  ██╔══╝  ██║     ██║{RESET}
-{CYAN}{BOLD}  ███████╗███████╗██║{RESET}
-{BLUE}{BOLD}  ╚══════╝╚══════╝╚═╝{RESET}
+{W1}{BOLD}  ███████╗██╗     ██╗{RESET}
+{W2}{BOLD}  ██╔════╝██║     ██║{RESET}     {WHITE}financial coding agent{RESET}
+{W3}{BOLD}  █████╗  ██║     ██║{RESET}     {GRAY}v0.1.0{RESET}
+{W4}{BOLD}  ██╔══╝  ██║     ██║{RESET}
+{W5}{BOLD}  ███████╗███████╗██║{RESET}
+{W6}{BOLD}  ╚══════╝╚══════╝╚═╝{RESET}
 "#
     );
     println!("{}", logo);
@@ -4622,6 +4611,7 @@ fn looks_like_quant_query(prompt: &str) -> bool {
 
     for tok in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
         match tok {
+            // Core finance nouns
             "stock"
             | "stocks"
             | "ticker"
@@ -4632,6 +4622,23 @@ fn looks_like_quant_query(prompt: &str) -> bool {
             | "dividends"
             | "etf"
             | "etfs"
+            // FX / macro / commodities
+            | "fx"
+            | "forex"
+            | "currency"
+            | "currencies"
+            | "exchange"
+            | "conversion"
+            | "yen"
+            | "jpy"
+            | "usd"
+            | "eur"
+            | "gbp"
+            | "cny"
+            | "yuan"
+            | "aud"
+            | "cad"
+            | "chf"
             | "sp500"
             | "nasdaq"
             | "dow" => return true,
@@ -4651,6 +4658,7 @@ fn looks_like_quant_query(prompt: &str) -> bool {
     }
 
     lower.contains("=f")
+        || lower.contains("=x")
         || lower.contains("-usd")
         || prompt
             .split_whitespace()
@@ -5301,4 +5309,22 @@ fn estimate_cost(usage: &eli_core::types::Usage, model: &str) -> f64 {
     let input_cost = (usage.prompt_tokens as f64 / 1_000_000.0) * input_rate;
     let output_cost = (usage.completion_tokens as f64 / 1_000_000.0) * output_rate;
     input_cost + output_cost
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_quant_query;
+
+    #[test]
+    fn quant_detection_matches_forex_queries() {
+        assert!(looks_like_quant_query("what happened with yen today"));
+        assert!(looks_like_quant_query("USD/JPY"));
+        assert!(looks_like_quant_query("JPY=X"));
+        assert!(looks_like_quant_query("forex rates"));
+    }
+
+    #[test]
+    fn quant_detection_does_not_match_pricing_page_work() {
+        assert!(!looks_like_quant_query("fix the pricing page on the website"));
+    }
 }
