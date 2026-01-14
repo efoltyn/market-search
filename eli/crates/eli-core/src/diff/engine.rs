@@ -31,9 +31,33 @@ impl DiffEngine {
         Ok(Self { project_root })
     }
 
+    /// Redirect artifact files to eli_research subdirectories.
+    /// - .py files → eli_research/scripts/
+    /// - .json files → eli_research/data/
+    /// Only redirects files that are in the project root (not already in a subdirectory).
+    fn redirect_artifact_path(&self, path: &Path) -> PathBuf {
+        // Only redirect files directly in project root (no directory component)
+        let has_dir = path.parent().map(|p| p != Path::new("")).unwrap_or(false);
+        if has_dir {
+            return path.to_path_buf();
+        }
+
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            return path.to_path_buf();
+        };
+
+        let filename = path.file_name().unwrap_or_default();
+        match ext {
+            "py" => Path::new("eli_research/scripts").join(filename),
+            "json" => Path::new("eli_research/data").join(filename),
+            _ => path.to_path_buf(),
+        }
+    }
+
     pub fn apply_diff(&self, diff: &FileDiff, dry_run: bool) -> DiffResult {
-        let path = Path::new(diff.path.trim());
-        let resolved = match safe_join(&self.project_root, path) {
+        let original_path = Path::new(diff.path.trim());
+        let path = self.redirect_artifact_path(original_path);
+        let resolved = match safe_join(&self.project_root, &path) {
             Ok(p) => p,
             Err(e) => {
                 return DiffResult {

@@ -1183,6 +1183,22 @@ async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
     }
 }
 
+/// Redirect JSON output files to eli_research/data/ if they're in the project root.
+fn redirect_finance_output(path: std::path::PathBuf) -> std::path::PathBuf {
+    // Only redirect if it's a bare filename (no directory component)
+    if path.parent().map(|p| p == std::path::Path::new("") || p == std::path::Path::new(".")).unwrap_or(true) {
+        if let Some(filename) = path.file_name() {
+            let target = std::path::Path::new("eli_research/data").join(filename);
+            // Ensure directory exists
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            return target;
+        }
+    }
+    path
+}
+
 async fn cmd_finance_macro(args: FinanceMacroArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
@@ -1206,7 +1222,8 @@ async fn cmd_finance_macro(args: FinanceMacroArgs) -> Result<()> {
     let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
 
     if let Some(out_path) = args.out {
-        std::fs::write(out_path, &json).context("write output file")?;
+        let out_path = redirect_finance_output(out_path);
+        std::fs::write(&out_path, &json).context("write output file")?;
     }
 
     println!("{json}");
@@ -1225,6 +1242,7 @@ async fn cmd_finance_news(args: FinanceNewsArgs) -> Result<()> {
     let json = serde_json::to_string_pretty(&resp)?;
 
     if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -1273,6 +1291,7 @@ async fn cmd_finance_snapshot(args: FinanceSnapshotArgs) -> Result<()> {
     let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
 
     if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -1303,6 +1322,7 @@ async fn cmd_finance_fundamentals(args: FinanceFundamentalsArgs) -> Result<()> {
     let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
 
     if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -1333,6 +1353,7 @@ async fn cmd_finance_search(args: FinanceSearchArgs) -> Result<()> {
     let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
 
     if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -1388,6 +1409,7 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
     let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
 
     if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -1471,6 +1493,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
 
     if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
