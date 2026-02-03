@@ -20,7 +20,13 @@ impl Memory {
     }
 
     pub fn max_messages_for(mem_steps: usize) -> usize {
-        mem_steps.saturating_mul(6).max(24)
+        // "Infinite" memory: rely on compaction instead of hard-delete trim.
+        // Use a very high cap when mem_steps is 0 to avoid trimming.
+        if mem_steps == 0 {
+            return 1_000_000;
+        }
+        // The compaction trigger (usually mem_steps * 5) will fire way before this.
+        mem_steps.saturating_mul(200).max(2000)
     }
 
     pub fn set_system(&mut self, content: impl Into<String>) {

@@ -7,11 +7,24 @@ use anyhow::{anyhow, Context, Result};
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 
-const SUMMARY_SYSTEM_PROMPT: &str = "You compact Eli's memory. Produce a concise, durable summary.\n\
-Include: decisions, constraints, files/paths touched, key commands/results, open questions, next steps.\n\
-Plain text, tight bullets, no JSON.";
-const SUMMARY_INPUT_MAX_CHARS: usize = 12_000;
-const SUMMARY_OUTPUT_MAX_CHARS: usize = 4_000;
+const SUMMARY_SYSTEM_PROMPT: &str = "YOU ARE COMPACTING ELI'S MEMORY FOR A HANDOFF.\n\
+\n\
+SUMMARIZE THE USER'S IDEA IN DEPTH. DO NOT OVER-COMPRESS.\n\
+\n\
+BE CLEAR WHERE YOU ARE LEAVING OFF.\n\
+BE EXPLICIT ABOUT WHAT HAS ACTUALLY BEEN DONE VS WHAT IS NOT DONE YET.\n\
+DO NOT IMPLY WORK HAPPENED IF IT DIDN'T.\n\
+\n\
+GIVE THE NEXT STEPS (CONCRETE, ACTIONABLE).\n\
+BE CONFIDENT: PICK A DEFAULT PATH FORWARD INSTEAD OF LISTING OPTIONS.\n\
+BE CRITICAL: STATE THE BIGGEST RISK/FAILURE MODE AND THE FASTEST WAY TO VERIFY OR DE-RISK IT.\n\
+\n\
+DO NOT ASK THE USER QUESTIONS.\n\
+PLAIN TEXT ONLY. NO JSON.\n\
+USE AS MUCH SPACE AS NEEDED UP TO THE LIMIT.";
+const SUMMARY_INPUT_MAX_CHARS: usize = 200_000;
+const SUMMARY_OUTPUT_MAX_CHARS: usize = 50_000;
+const SUMMARY_MAX_TOKENS: u32 = 8192;
 const SUBAGENT_CONTEXT_MESSAGES: usize = 6;
 
 #[derive(Clone, Debug)]
@@ -36,15 +49,34 @@ pub async fn maybe_compact_memory(
         return Ok(None);
     }
 
-    let trigger = cfg.resolved_compact_trigger();
-    let (older, keep_last, existing_summary) = {
+    let trigger_tokens = cfg.resolved_compact_trigger_tokens();
+    if let Some(token_trigger) = trigger_tokens {
+        let estimated = estimate_prompt_tokens(&memory.context());
+        if estimated < token_trigger {
+            return Ok(None);
+        }
+    } else {
+        let trigger = cfg.resolved_compact_trigger();
         if memory.len() < trigger {
             return Ok(None);
         }
-        let mut keep_last = cfg.resolved_compact_keep();
-        if keep_last >= trigger {
-            keep_last = trigger.saturating_sub(1).max(1);
+    }
+
+    let (older, keep_last, existing_summary) = {
+        let total = memory.len();
+        let mut keep_last = cfg.resolved_compact_keep().min(total);
+
+        // Never drop the most recent message in the live chat loop; the caller expects a user/assistant
+        // turn to remain in-context. (If the last message is enormous, handle it before inserting it.)
+        if keep_last == 0 && total > 0 {
+            keep_last = 1;
         }
+
+        // Ensure there are actually older messages to summarize.
+        if keep_last >= total {
+            keep_last = total.saturating_sub(1);
+        }
+
         let older = memory.older_messages(keep_last);
         if older.is_empty() {
             return Ok(None);
@@ -63,6 +95,54 @@ pub async fn maybe_compact_memory(
         summary,
         dropped,
     }))
+}
+
+pub async fn compact_memory_now(
+    adapter: Arc<dyn LlmAdapter>,
+    cfg: &ChatConfig,
+    memory: &mut Memory,
+) -> Result<Option<CompactionResult>> {
+    let (older, keep_last, existing_summary) = {
+        let total = memory.len();
+        if total == 0 {
+            return Ok(None);
+        }
+
+        let mut keep_last = cfg.resolved_compact_keep().min(total);
+        if keep_last == 0 && total > 0 {
+            keep_last = 1;
+        }
+
+        // Ensure there are actually older messages to summarize.
+        if keep_last >= total {
+            keep_last = total.saturating_sub(1);
+        }
+
+        let older = memory.older_messages(keep_last);
+        if older.is_empty() {
+            return Ok(None);
+        }
+        let existing_summary = memory.summary().map(|s| s.to_string());
+        (older, keep_last, existing_summary)
+    };
+
+    let summary_model = cfg.resolved_summary_model().to_string();
+    let dropped = older.len();
+    let summary = summarize(adapter, summary_model, existing_summary, older).await?;
+    memory.drop_older(keep_last);
+    memory.set_summary(Some(summary.clone()));
+
+    Ok(Some(CompactionResult { summary, dropped }))
+}
+
+pub async fn summarize_for_compaction(
+    adapter: Arc<dyn LlmAdapter>,
+    cfg: &ChatConfig,
+    existing_summary: Option<String>,
+    transcript: Vec<ChatMessage>,
+) -> Result<String> {
+    let summary_model = cfg.resolved_summary_model().to_string();
+    summarize(adapter, summary_model, existing_summary, transcript).await
 }
 
 pub async fn run_subagents(
@@ -125,6 +205,7 @@ async fn run_one_subagent(
         ],
         temperature: task.temperature.or(cfg.temperature).or(Some(0.2)),
         max_tokens: task.max_tokens.or(Some(800)),
+        response_format: None,
         stream: false,
     };
 
@@ -168,20 +249,31 @@ async fn summarize(
     existing_summary: Option<String>,
     messages: Vec<ChatMessage>,
 ) -> Result<String> {
-    let mut transcript = String::new();
+    let mut existing_block = String::new();
     if let Some(summary) = existing_summary {
-        transcript.push_str("Existing summary:\n");
-        transcript.push_str(&summary);
-        transcript.push_str("\n\n");
+        existing_block.push_str("Existing summary:\n");
+        existing_block.push_str(&summary);
+        existing_block.push_str("\n\n");
     }
 
-    transcript.push_str("Transcript:\n");
+    let mut transcript_block = String::new();
+    transcript_block.push_str("Transcript (most recent last):\n");
     for msg in messages {
         let role = format_role(&msg);
-        transcript.push_str(&format!("{role}: {content}\n", role = role, content = msg.content));
+        transcript_block.push_str(&format!(
+            "{role}: {content}\n",
+            role = role,
+            content = msg.content
+        ));
     }
 
-    let content = truncate_chars(&transcript, SUMMARY_INPUT_MAX_CHARS);
+    let content = if existing_block.len() >= SUMMARY_INPUT_MAX_CHARS {
+        truncate_chars(&existing_block, SUMMARY_INPUT_MAX_CHARS)
+    } else {
+        let remaining = SUMMARY_INPUT_MAX_CHARS.saturating_sub(existing_block.len());
+        let tail = tail_chars(&transcript_block, remaining);
+        format!("{existing_block}{tail}")
+    };
 
     let req = ChatRequest {
         model: summary_model,
@@ -190,7 +282,8 @@ async fn summarize(
             ChatMessage::user(content),
         ],
         temperature: Some(0.2),
-        max_tokens: Some(800),
+        max_tokens: Some(SUMMARY_MAX_TOKENS),
+        response_format: None,
         stream: false,
     };
 
@@ -237,4 +330,38 @@ fn truncate_chars(input: &str, max: usize) -> String {
     }
     let remaining = input.len().saturating_sub(out.len());
     format!("{out}... [truncated {remaining} bytes]")
+}
+
+fn tail_chars(input: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if input.len() <= max {
+        return input.to_string();
+    }
+    let start_target = input.len().saturating_sub(max);
+    let start = input
+        .char_indices()
+        .find(|(idx, _)| *idx >= start_target)
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    input[start..].to_string()
+}
+
+fn estimate_prompt_tokens(messages: &[ChatMessage]) -> usize {
+    // Rough cross-provider token estimate:
+    // - Most LLM tokenizers average ~4 bytes/token on English-ish text.
+    // - We intentionally overcount slightly via a small per-message overhead.
+    let mut bytes: usize = 0;
+    for msg in messages {
+        bytes = bytes.saturating_add(msg.content.as_bytes().len());
+        bytes = bytes.saturating_add(16);
+        for img in &msg.images {
+            bytes = bytes.saturating_add(img.as_bytes().len());
+        }
+        if let Some(name) = &msg.name {
+            bytes = bytes.saturating_add(name.as_bytes().len());
+        }
+    }
+    (bytes + 3) / 4
 }

@@ -126,7 +126,7 @@ impl DiffEngine {
             message: "file created".to_string(),
             backup_path: None,
             preview: false,
-            diff: None,
+            diff: Some(render_diff("", content, path)),
         }
     }
 
@@ -193,7 +193,7 @@ impl DiffEngine {
             message: "file replaced".to_string(),
             backup_path: backup.map(|p| p.display().to_string()),
             preview: false,
-            diff: None,
+            diff: Some(render_diff(&original, content, path)),
         }
     }
 
@@ -304,7 +304,7 @@ impl DiffEngine {
             message: "file deleted".to_string(),
             backup_path: backup.map(|p| p.display().to_string()),
             preview: false,
-            diff: None,
+            diff: Some(render_diff(&original, "", path)),
         }
     }
 }

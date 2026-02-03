@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use eli_core::adapter::{AdapterError, ChatStream, LlmAdapter};
-use eli_core::types::{ChatMessage, ChatRequest, ChatStreamEvent, ProviderKind};
+use eli_core::types::{ChatMessage, ChatRequest, ChatStreamEvent, ProviderKind, ResponseFormat};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde_json::json;
@@ -37,7 +37,7 @@ impl OpenAiCompatibleAdapter {
             provider,
             model,
             base_url,
-            api_key,
+            api_key: api_key.trim().to_string(),
             client,
         })
     }
@@ -92,6 +92,91 @@ impl OpenAiCompatibleAdapter {
         }
         out
     }
+
+    fn openrouter_response_format() -> serde_json::Value {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "plan",
+                "checklist",
+                "focus",
+                "status",
+                "commands",
+                "commands_parallel",
+                "screen",
+                "diffs",
+                "notes",
+                "subagents"
+            ],
+            "properties": {
+                "plan": { "type": "string" },
+                "checklist": { "type": "array", "items": { "type": "string" } },
+                "focus": { "type": "string" },
+                "status": { "type": "string", "enum": ["KEEP_WORKING", "DONE"] },
+                "commands": { "type": "array", "items": { "type": "string" } },
+                "commands_parallel": { "type": "boolean" },
+                "screen": { "type": "array", "items": {} },
+                "diffs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "path": { "type": "string" },
+                            "op": { "type": "string", "enum": ["create", "replace", "patch", "delete"] },
+                            "before_sha256": { "type": "string" },
+                            "after_text": { "type": "string" },
+                            "patch": { "type": "string" }
+                        },
+                        "oneOf": [
+                            { "required": ["path", "op", "after_text"], "properties": { "op": { "const": "create" } } },
+                            { "required": ["path", "op", "after_text"], "properties": { "op": { "const": "replace" } } },
+                            { "required": ["path", "op", "patch"], "properties": { "op": { "const": "patch" } } },
+                            { "required": ["path", "op"], "properties": { "op": { "const": "delete" } } }
+                        ]
+                    }
+                },
+                "notes": { "type": "string" },
+                "synthesis": {
+                    "type": ["object", "null"],
+                    "additionalProperties": false,
+                    "required": ["summary", "answer", "next_steps"],
+                    "properties": {
+                        "summary": { "type": "array", "items": { "type": "string" } },
+                        "answer": { "type": "string" },
+                        "next_steps": { "type": "array", "items": { "type": "string" } }
+                    }
+                },
+                "ask_user": { "type": ["string", "null"] },
+                "subagents": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name", "task"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "task": { "type": "string" },
+                            "model": { "type": ["string", "null"] },
+                            "temperature": { "type": ["number", "null"] },
+                            "max_tokens": { "type": ["integer", "null"] }
+                        }
+                    }
+                }
+            }
+        });
+
+        json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "eli_response",
+                "description": "Eli tool contract response",
+                "schema": schema,
+                "strict": true
+            }
+        })
+    }
 }
 
 #[async_trait]
@@ -111,7 +196,7 @@ impl LlmAdapter for OpenAiCompatibleAdapter {
         }
 
         let url = self.endpoint("chat/completions");
-        let body = json!({
+        let mut body = json!({
             "model": req.model,
             "messages": req.messages.iter().map(Self::to_openai_message).collect::<Vec<_>>(),
             "stream": true,
@@ -119,18 +204,40 @@ impl LlmAdapter for OpenAiCompatibleAdapter {
             "temperature": req.temperature,
             "max_tokens": req.max_tokens,
         });
+        if self.provider == ProviderKind::OpenRouter
+            && req.response_format == Some(ResponseFormat::EliContractJsonSchema)
+        {
+            body["response_format"] = Self::openrouter_response_format();
+        }
 
         debug!(provider = %self.provider, url = %url, "sending openai-compatible streaming request");
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(&self.api_key)
+        let mut request = self.client.post(url).bearer_auth(&self.api_key);
+        // OpenRouter recommends (and sometimes requires) app identification headers.
+        if self.provider == ProviderKind::OpenRouter {
+            request = request
+                .header("HTTP-Referer", "https://github.com/efoltyn/eli")
+                .header("X-Title", "eli");
+        }
+
+        let response = request
             .json(&body)
             .send()
             .await
-            .map_err(|e| AdapterError::Http(e.to_string()))?
-            .error_for_status()
             .map_err(|e| AdapterError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let provider = self.provider.as_str();
+            let mut msg = format!("HTTP status {status} for provider={provider}");
+            if status.as_u16() == 401 {
+                msg.push_str(" (unauthorized: check your API key)");
+            }
+            if !body.trim().is_empty() {
+                msg.push_str(&format!(": {body}"));
+            }
+            return Err(AdapterError::Http(msg));
+        }
 
         let byte_stream: BoxStream<'static, std::result::Result<Vec<u8>, reqwest::Error>> = response
             .bytes_stream()

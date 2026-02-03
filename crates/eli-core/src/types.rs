@@ -52,6 +52,13 @@ pub enum Role {
     Tool,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// Enforce Eli's tool-contract JSON schema (supported by some providers, e.g. OpenRouter).
+    EliContractJsonSchema,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
@@ -122,6 +129,10 @@ pub struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
 
+    /// Optional provider-specific response format enforcement (e.g. JSON schema).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+
     #[serde(default)]
     pub stream: bool,
 }
@@ -139,4 +150,3 @@ pub enum ChatStreamEvent {
     Usage(Usage),
     Done,
 }
-

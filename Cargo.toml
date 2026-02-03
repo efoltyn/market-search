@@ -3,75 +3,58 @@ name = "eli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-authors.workspace = true
-description.workspace = true
+description = "financial coding agent"
 
 [dependencies]
-anyhow.workspace = true
 tokio.workspace = true
-eli-cli = { path = "crates/eli-cli" }
+anyhow.workspace = true
+eli-cli.workspace = true
 
 [workspace]
-members = ["crates/*"]
+members = [
+  "crates/eli-adapters",
+  "crates/eli-cli",
+  "crates/eli-core",
+  "crates/eli-screen",
+  "crates/eli-tui",
+]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-authors = ["Eli Foltyn"]
-description = "A terminal CLI coding agent"
+repository = "https://github.com/efoltyn/eli"
 
 [workspace.dependencies]
-# Async runtime
-tokio = { version = "1.40", features = ["full"] }
+anyhow = "1.0"
 async-trait = "0.1"
-futures = "0.3"
-
-# CLI & TUI
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
-ratatui = "0.29"
+console = "0.15"
 crossterm = "0.28"
+directories = "5.0"
+futures = "0.3"
+ratatui = "0.26"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "stream"] }
 rustyline = "14.0"
-
-# HTTP & Streaming
-reqwest = { version = "0.12", features = ["json", "stream"] }
-reqwest-eventsource = "0.6"
-
-# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
-
-# File operations
-similar = "2.6"
 sha2 = "0.10"
-walkdir = "2.5"
-directories = "5.0"
-
-# Error handling
-thiserror = "2.0"
-anyhow = "1.0"
-
-# Logging
+similar = "2.5"
+termimad = "0.30"
+textwrap = "0.16"
+thiserror = "1.0"
+tokio = { version = "1.37", features = ["full"] }
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.7", features = ["v4", "serde"] }
+walkdir = "2.5"
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 
-
-# Utils
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.11", features = ["v4"] }
-yahoo_finance_api = "2.3"
-html-escape = "0.2"
-
-# Internal crates
-eli-core = { path = "crates/eli-core" }
-eli-adapters = { path = "crates/eli-adapters" }
-eli-screen = { path = "crates/eli-screen" }
-eli-tui = { path = "crates/eli-tui" }
-
-[profile.release]
-lto = true
-codegen-units = 1
-strip = true
-panic = "abort"
+eli-adapters = { path = "crates/eli-adapters", version = "0.1.0" }
+eli-cli = { path = "crates/eli-cli", version = "0.1.0" }
+eli-core = { path = "crates/eli-core", version = "0.1.0" }
+eli-screen = { path = "crates/eli-screen", version = "0.1.0" }
+eli-tui = { path = "crates/eli-tui", version = "0.1.0" }

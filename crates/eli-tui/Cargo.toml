@@ -10,6 +10,5 @@ ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true
 eli-core.workspace = true
-eli-adapters.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

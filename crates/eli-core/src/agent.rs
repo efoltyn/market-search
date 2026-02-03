@@ -101,6 +101,7 @@ impl Agent {
                 messages: self.memory.context(),
                 temperature: self.cfg.temperature,
                 max_tokens: self.cfg.max_tokens,
+                response_format: Some(crate::types::ResponseFormat::EliContractJsonSchema),
                 stream: true,
             };
 
