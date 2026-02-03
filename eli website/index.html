@@ -3,10 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Eli | AI Quant Intern for Your Terminal</title>
-    <meta name="description" content="AI quant intern for your terminal. Runs locally. Rust tools fetch raw market data, Python runs the math, and RSS adds news context without web search. Defaults to a free OpenRouter model. Use any LLM.">
+    <title>Eli | Free Market Data Tools for AI Agents</title>
+    <meta name="description" content="Free market data CLI for AI agents. Timeseries, snapshots, options chains, Kalshi prediction markets, macro indicators. Works with Claude Code, Codex, any CLI. No paid APIs.">
+    <meta property="og:title" content="Eli | Connect Your AI to the Market">
+    <meta property="og:description" content="Free CLI that gives AI agents access to real market data. Timeseries, options, prediction markets, macro. Works with Claude Code, Codex, any CLI.">
+    <meta property="og:type" content="website">
     <link rel="icon" type="image/png" href="assets/logo.png">
     <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="blog/rss.xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
     <style>
         /*
            THE ELI DESIGN SYSTEM
@@ -14,15 +20,23 @@
         */
 
         :root {
-            --bg: #ffffff;
-            --fg: #000000;
-            --gray: #666666;
-            --light-gray: #f5f5f7;
-            --accent: #000000;
+            --bg: #050607;
+            --fg: #f4f7ff;
+            --gray: rgba(244, 247, 255, 0.72);
+            --light-gray: rgba(255, 255, 255, 0.08);
+            --accent: #5cf2c2;
             --radius: 12px;
-            --font-serif: "New York", "Apple Garamond", "Baskerville", "Times New Roman", serif;
-            --font-sans: "SF Pro Text", "Helvetica Neue", sans-serif;
-            --font-mono: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+            --font-main: "Instrument Sans", "Segoe UI", sans-serif;
+            --font-display: "Playfair Display", "Times New Roman", serif;
+            --font-mono: var(--font-main);
+            --hero-bg: #050607;
+            --hero-fg: #f4f7ff;
+            --hero-muted: rgba(244, 247, 255, 0.72);
+            --hero-card: rgba(255, 255, 255, 0.06);
+            --hero-border: rgba(255, 255, 255, 0.14);
+            --hero-accent: #5cf2c2;
+            --hero-accent2: #7aa7ff;
+            --hero-terminal-offset: -18px;
         }
 
         * {
@@ -46,7 +60,7 @@
         body {
             background-color: var(--bg);
             color: var(--fg);
-            font-family: var(--font-serif);
+            font-family: var(--font-main);
             line-height: 1.6;
             -webkit-font-smoothing: antialiased;
             overflow-x: hidden;
@@ -57,12 +71,12 @@
             position: sticky;
             top: 0;
             z-index: 1000;
-            background: rgba(255, 255, 255, 0.82);
+            background: rgba(5, 6, 7, 0.62);
             backdrop-filter: saturate(180%) blur(18px);
-            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         }
 
-        #how, #blog {
+        #how, #demos {
             scroll-margin-top: 96px;
         }
 
@@ -76,7 +90,7 @@
         }
 
         .nav-logo {
-            font-family: var(--font-sans);
+            font-family: var(--font-main);
             font-weight: 800;
             letter-spacing: -0.06em;
             font-size: clamp(22px, 2.6vw, 32px);
@@ -86,10 +100,11 @@
             padding: 8px 10px;
             border-radius: 14px;
             border-bottom: none;
+            color: var(--hero-fg);
         }
 
         .nav-logo:hover {
-            background: rgba(0, 0, 0, 0.04);
+            background: rgba(255, 255, 255, 0.06);
             border-bottom: none;
         }
 
@@ -97,12 +112,12 @@
             display: flex;
             align-items: center;
             gap: 18px;
-            font-family: var(--font-sans);
+            font-family: var(--font-main);
             font-size: 0.9rem;
         }
 
         .nav-links a {
-            color: var(--fg);
+            color: var(--hero-fg);
             border-bottom: 1px solid transparent;
         }
 
@@ -110,15 +125,16 @@
             display: inline-flex;
             align-items: center;
             gap: 8px;
-            background: var(--light-gray);
-            border: 1px solid rgba(0, 0, 0, 0.08);
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.14);
             padding: 10px 14px;
             border-radius: 9999px;
             font-weight: 600;
+            color: var(--hero-fg);
         }
 
         .nav-cta:hover {
-            border-color: rgba(0, 0, 0, 0.18);
+            border-color: rgba(255, 255, 255, 0.22);
         }
 
         .gh-mark {
@@ -140,30 +156,110 @@
 
         /* TYPOGRAPHY */
         h1 {
-            font-size: 4.5rem;
-            font-weight: 500;
+            font-family: var(--font-main);
+            font-size: clamp(48px, 7vw, 92px);
+            font-weight: 800;
             letter-spacing: -0.04em;
-            line-height: 1;
+            line-height: 0.95;
             margin-bottom: 24px;
             color: var(--fg);
+            text-transform: uppercase;
         }
 
-        .hero-wordmark {
-            display: flex;
-            justify-content: center;
+        /* HERO */
+        .hero-shell {
+            background:
+                radial-gradient(1200px 800px at 20% 10%, rgba(122, 167, 255, 0.18), transparent 60%),
+                radial-gradient(900px 700px at 80% 0%, rgba(92, 242, 194, 0.16), transparent 60%),
+                var(--hero-bg);
+            color: var(--hero-fg);
+            padding: 54px 0 44px;
         }
 
-        .hero-logo {
-            width: 320px;
-            max-width: 82vw;
-            height: auto;
-            border-radius: 22px;
-            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.14);
+        .hero-inner {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        .hero {
+            padding: 18px 0 22px;
+            text-align: left;
+        }
+
+        .hero-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 24px;
+            align-items: center;
+        }
+
+        .hero-kicker {
+            font-family: var(--font-main);
+            font-size: 0.85rem;
+            opacity: 0.72;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            margin-bottom: 14px;
+        }
+
+        .hero-shell h1 {
+            color: var(--hero-fg);
+        }
+
+        .hero-bridge {
+            font-family: var(--font-main);
+            font-size: clamp(16px, 1.5vw, 20px);
+            color: var(--accent);
+            margin-bottom: 16px;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+        }
+
+        .hero-lede {
+            font-family: var(--font-main);
+            font-size: clamp(20px, 3vw, 24px);
+            color: var(--hero-muted);
+            font-weight: 400;
+            line-height: 1.4;
+            margin: 0 0 18px;
+            max-width: 62ch;
+        }
+
+        .hero-card {
+            border-radius: 18px;
+            border: 1px solid var(--hero-border);
+            background: var(--hero-card);
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+            padding: 16px;
+            overflow: hidden;
+        }
+
+        .hero-term {
+            font-family: var(--font-mono);
+            font-size: 0.92rem;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+            color: rgba(244, 247, 255, 0.84);
+        }
+
+        .hero-term .ok { color: rgba(92, 242, 194, 0.95); }
+        .hero-term .dim { color: rgba(244, 247, 255, 0.58); }
+
+        .hero-shell .install-container {
+            justify-content: flex-start;
+            margin-bottom: 0;
+        }
+
+        .hero-follow {
+            margin-top: 18px;
+            text-align: left;
         }
 
         .subtitle {
-            font-family: var(--font-sans);
-            font-size: 1.25rem;
+            font-family: var(--font-main);
+            font-size: 1.5rem;
             font-weight: 400;
             color: var(--gray);
             margin-bottom: 48px;
@@ -171,67 +267,76 @@
         }
 
         .tagline {
-            font-family: var(--font-mono);
+            font-family: var(--font-main);
             font-size: 0.9rem;
             color: var(--gray);
             margin-bottom: 32px;
             letter-spacing: 0.05em;
         }
 
-        /* THE INSTALL BOX */
-        .install-box {
-            position: relative;
-            background: var(--light-gray);
-            border: 1px solid #e5e5e5;
-            border-radius: 9999px;
-            padding: 16px 24px;
+        /* THE INSTALL PILL */
+        .install-container {
             display: flex;
+            justify-content: center;
+            margin-bottom: 84px;
+        }
+
+        .install-pill {
+            appearance: none;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 9999px;
+            padding: 12px 24px;
+            display: inline-flex;
             align-items: center;
             gap: 16px;
-            margin-bottom: 24px;
             transition: all 0.2s ease;
             cursor: pointer;
+            font: inherit;
         }
 
-        .install-box:hover {
-            border-color: #000;
-            transform: scale(1.01);
+        .install-pill:hover {
+            border-color: rgba(255, 255, 255, 0.22);
+            transform: scale(1.02);
         }
 
-        .install-label {
+        .install-pill:focus-visible {
+            outline: 2px solid rgba(255, 255, 255, 0.45);
+            outline-offset: 4px;
+        }
+
+        .install-pill code {
             font-family: var(--font-mono);
-            font-size: 0.8rem;
-            color: var(--gray);
-            margin-bottom: 12px;
+            font-size: 16px;
+            color: var(--hero-fg);
         }
 
-        .cmd-text {
-            font-family: var(--font-mono);
-            font-size: 0.95rem;
-            color: var(--fg);
-        }
-
-        .copy-icon {
-            width: 16px;
-            height: 16px;
-            opacity: 0.5;
+        .copy-label {
+            font-family: var(--font-main);
+            font-size: 12px;
+            font-weight: 600;
+            color: #ffffff;
+            background: linear-gradient(135deg, rgba(92, 242, 194, 0.9), rgba(122, 167, 255, 0.75));
+            padding: 4px 10px;
+            border-radius: 9999px;
+            line-height: 1;
         }
 
         /* THE DEMO TERMINAL */
         .terminal-window {
             width: 100%;
-            background: #0a0a0a;
-            border-radius: var(--radius);
-            box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+            background: #000;
+            border-radius: 20px;
+            box-shadow: 0 40px 80px -20px rgba(0,0,0,0.3);
             overflow: hidden;
             text-align: left;
-            margin-bottom: 80px;
-            border: 1px solid #333;
+            margin: var(--hero-terminal-offset) 0 80px;
+            border: 1px solid rgba(255,255,255,0.15);
         }
 
         .terminal-header {
-            background: #1a1a1a;
-            padding: 12px 16px;
+            background: #1c1c1e;
+            padding: 14px 18px;
             display: flex;
             align-items: center;
             gap: 8px;
@@ -245,20 +350,46 @@
 
         .terminal-title {
             font-family: var(--font-mono);
-            font-size: 0.75rem;
-            color: #ccc;
+            font-size: 12px;
+            color: #666;
             margin-left: 12px;
         }
 
         .terminal-body {
-            padding: 20px 24px;
+            padding: 32px;
             font-family: var(--font-mono);
-            font-size: 0.8rem;
-            color: #d4d4d4;
+            font-size: 13px;
+            color: #d1d1d1;
             line-height: 1.6;
             display: flex;
             flex-direction: column;
             gap: 14px;
+            height: auto;
+            overflow-y: visible;
+        }
+
+        .terminal-summary {
+            border-radius: 14px;
+            padding: 12px 14px;
+            background: rgba(92, 242, 194, 0.08);
+            border: 1px solid rgba(92, 242, 194, 0.28);
+            color: #e6fff7;
+            font-size: 12.5px;
+            line-height: 1.5;
+        }
+
+        .terminal-summary strong {
+            color: #ffffff;
+        }
+
+        .terminal-summary .label {
+            color: rgba(92, 242, 194, 0.95);
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-size: 11px;
+            display: inline-block;
+            margin-bottom: 6px;
         }
 
         .terminal-scroll {
@@ -274,17 +405,17 @@
             display: flex;
             align-items: center;
             gap: 10px;
-            padding-top: 14px;
-            border-top: 1px solid #222;
+            padding-top: 15px;
+            border-top: 1px solid #333;
         }
 
         .terminal-input input {
             flex: 1;
             background: transparent;
             border: none;
-            color: #d4d4d4;
+            color: #fff;
             font-family: var(--font-mono);
-            font-size: 0.8rem;
+            font-size: 13px;
             outline: none;
             padding: 0;
         }
@@ -295,23 +426,23 @@
 
         .terminal-status {
             font-family: var(--font-mono);
-            font-size: 0.75rem;
+            font-size: 12px;
             color: #666;
         }
 
-        .t-cyan { color: #51C7DA; }
-        .t-green { color: #87D787; }
+        .t-cyan { color: #64d2ff; }
+        .t-green { color: #30d158; }
         .t-gray { color: #555; }
-        .t-purple { color: #af87ff; }
-        .t-yellow { color: #e5c07b; }
-        .t-red { color: #e06c75; }
-        .t-orange { color: #d19a66; }
-        .t-dim { color: #444; }
+        .t-purple { color: #bf5af2; }
+        .t-yellow { color: #ffd60a; }
+        .t-red { color: #ff453a; }
+        .t-orange { color: #ff9f0a; }
+        .t-dim { color: #666; }
         .t-white { color: #ffffff; font-weight: 600; }
 
         /* SECTION HEADERS */
         .section-header {
-            font-family: var(--font-sans);
+            font-family: var(--font-main);
             font-size: 0.75rem;
             font-weight: 600;
             letter-spacing: 0.1em;
@@ -321,112 +452,91 @@
             margin-top: 80px;
         }
 
-        /* HOW IT WORKS */
-        .workflow {
+        /* MANIFESTO GRID */
+        .manifesto-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 28px;
             width: 100%;
-            display: flex;
-            flex-direction: column;
-            gap: 0;
+            text-align: left;
             margin-bottom: 60px;
         }
 
-        .workflow-step {
-            display: flex;
-            align-items: flex-start;
-            gap: 20px;
-            padding: 24px 0;
-            border-bottom: 1px solid #eee;
-            text-align: left;
+        .manifesto-item {
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            padding: 18px;
+            background: rgba(255, 255, 255, 0.04);
         }
 
-        .workflow-step:last-child {
-            border-bottom: none;
-        }
-
-        .step-num {
-            font-family: var(--font-mono);
-            font-size: 0.9rem;
-            color: var(--gray);
-            min-width: 24px;
-        }
-
-        .step-content h3 {
-            font-family: var(--font-sans);
-            font-size: 1rem;
-            font-weight: 600;
-            margin-bottom: 4px;
-        }
-
-        .step-content p {
-            font-size: 1rem;
-            color: var(--gray);
-        }
-
-        .step-code {
-            font-family: var(--font-mono);
-            font-size: 0.85rem;
-            background: var(--light-gray);
-            padding: 3px 8px;
-            border-radius: 4px;
-            margin-top: 8px;
-            display: inline-block;
-        }
-
-        /* MANIFESTO GRID */
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 48px;
-            width: 100%;
-            text-align: left;
-            margin-top: 40px;
-        }
-
-        .card h3 {
-            font-family: var(--font-sans);
-            font-size: 1.1rem;
-            font-weight: 600;
-            margin-bottom: 12px;
-        }
-
-        .card p {
-            font-family: var(--font-serif);
-            font-size: 1.05rem;
-            color: var(--gray);
-            line-height: 1.7;
-        }
-
-        /* TOOLS SECTION */
-        .tools-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            width: 100%;
-            margin-top: 24px;
-        }
-
-        .tool-card {
-            background: var(--light-gray);
-            border-radius: 8px;
-            padding: 16px;
-            text-align: left;
-        }
-
-        .tool-card code {
-            font-family: var(--font-mono);
+        .manifesto-num {
+            font-family: var(--font-main);
             font-size: 0.8rem;
-            color: var(--fg);
-            display: block;
+            letter-spacing: 0.08em;
+            color: var(--accent);
+            display: inline-block;
+            margin-bottom: 10px;
+        }
+
+        .manifesto-title {
+            font-size: 1rem;
+            font-weight: 700;
             margin-bottom: 8px;
         }
 
-        .tool-card span {
-            font-family: var(--font-sans);
-            font-size: 0.85rem;
+        .manifesto-item p {
+            font-size: 0.98rem;
             color: var(--gray);
+            line-height: 1.6;
         }
 
-        /* BLOG */
+        /* TOOLS SECTION */
+        .tools-banner {
+            background: rgba(92, 242, 194, 0.08);
+            border: 1px solid rgba(92, 242, 194, 0.28);
+            border-radius: 12px;
+            padding: 12px 14px;
+            font-size: 0.75rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--gray);
+            margin-bottom: 16px;
+        }
+
+        .tools-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+            text-align: left;
+        }
+
+        .tools-table th {
+            font-size: 0.7rem;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--gray);
+            padding: 8px 0 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+        }
+
+        .tools-table td {
+            padding: 14px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 0.95rem;
+            color: var(--gray);
+            vertical-align: top;
+        }
+
+        .tools-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .tools-table .tool-name {
+            font-family: var(--font-mono);
+            color: var(--accent);
+        }
+
+        /* DEMOS */
         .blog-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -437,44 +547,48 @@
         }
 
         .blog-card {
-            background: #fff;
-            border: 1px solid rgba(0, 0, 0, 0.08);
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 14px;
             padding: 18px;
-            transition: transform 0.18s ease, border-color 0.18s ease;
+            transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
         }
 
         .blog-card:hover {
             transform: translateY(-2px);
-            border-color: rgba(0, 0, 0, 0.16);
+            border-color: #fff;
         }
 
         .blog-meta {
             font-family: var(--font-mono);
             font-size: 0.75rem;
-            color: var(--gray);
-            letter-spacing: 0.02em;
+            color: var(--accent);
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
             margin-bottom: 10px;
         }
 
         .blog-card h3 {
-            font-family: var(--font-sans);
-            font-size: 1rem;
-            font-weight: 650;
-            margin-bottom: 10px;
+            font-family: var(--font-mono);
+            font-size: 0.92rem;
+            font-weight: 600;
+            background: var(--light-gray);
+            display: inline-block;
+            padding: 6px 8px;
+            border-radius: 8px;
+            margin-bottom: 12px;
         }
 
         .blog-card p {
-            font-family: var(--font-serif);
             color: var(--gray);
-            font-size: 1.02rem;
-            line-height: 1.7;
+            font-size: 0.98rem;
+            line-height: 1.6;
         }
 
         /* FOOTER */
         footer {
             margin-top: 120px;
-            font-family: var(--font-sans);
+            font-family: var(--font-main);
             font-size: 0.9rem;
             color: var(--gray);
             display: flex;
@@ -503,12 +617,18 @@
         }
 
         @media (max-width: 600px) {
-            h1 { font-size: 3rem; }
-            .install-box { width: 100%; justify-content: center; }
-            .cmd-text { font-size: 0.75rem; }
-            .terminal-body { font-size: 0.7rem; padding: 16px; }
-            .terminal-input input { font-size: 0.7rem; }
-            .hero-logo { width: 260px; border-radius: 18px; }
+            .hero { padding-top: 28px; }
+            .install-container { width: 100%; }
+            .install-pill { width: 100%; justify-content: center; flex-wrap: wrap; }
+            .install-pill code { font-size: 14px; }
+            .terminal-body { font-size: 12px; padding: 18px; height: 520px; }
+            .terminal-input input { font-size: 12px; }
+            .terminal-window { margin: 0 0 70px; }
+        }
+
+        @media (max-width: 920px) {
+            .hero-grid { grid-template-columns: 1fr; }
+            .hero { text-align: left; }
         }
     </style>
 </head>
@@ -518,8 +638,8 @@
 	    <div class="nav-inner">
 	        <a class="nav-logo" href="#" aria-label="Eli home">eli</a>
 	        <div class="nav-links" aria-label="Site">
-	            <a href="#how">How it works</a>
-	            <a href="#blog">Blog</a>
+            <a href="#how">How it works</a>
+            <a href="#demos">Demos</a>
 	            <a class="nav-cta" href="https://github.com/efoltyn/eli" rel="noreferrer noopener" target="_blank">
                 <svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
                     <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path>
@@ -530,82 +650,50 @@
     </div>
 </nav>
 
-<div class="container">
-    <!-- HERO SECTION -->
-				    <p class="tagline fade-in">financial coding agent</p>
-    <h1 class="hero-wordmark fade-in delay-1">
-        <span class="sr-only">eli</span>
-        <img class="hero-logo" src="assets/logo.png" alt="" aria-hidden="true" decoding="async">
-    </h1>
-		    <p class="subtitle fade-in delay-2">
-		        Any LLM becomes a quant terminal. Fetches real timeseries, writes Python to analyze it,
-		        debugs itself until it works. Headlines are just confirmation. The numbers already told you what moved.
-		    </p>
+<!-- HERO + DEMO -->
+<section class="hero-shell" aria-label="Eli hero">
+    <div class="hero-inner">
+        <header class="hero">
+            <div class="hero-grid">
+                <div>
+                    <h1 class="fade-in delay-2">Connect your AI<br>to the market.</h1>
+                    <div class="install-container fade-in delay-3">
+                        <button class="install-pill" type="button" onclick="copyCmd()" aria-label="Copy install command">
+                            <code id="cmd">cargo install eli-cli</code>
+                            <span class="copy-label" id="copyLabel">Copy</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
 
-    <!-- INSTALL COMMAND -->
-    <p class="install-label fade-in delay-3">Click to copy, then run <span style="color: var(--fg); font-weight: 600;">eli</span></p>
-    <div class="install-box fade-in delay-3" onclick="copyCmd()">
-        <span class="t-cyan" style="font-family: var(--font-mono); font-weight: bold;">$</span>
-        <span class="cmd-text" id="cmd">cargo install eli-cli</span>
-        <svg class="copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
-    </div>
-
-    <!-- TERMINAL DEMO - THE ACTUAL WORKFLOW -->
-    <div class="terminal-window fade-in delay-4">
+        <div class="terminal-window fade-in delay-4">
         <div class="terminal-header">
             <div class="dot red"></div>
             <div class="dot yellow"></div>
             <div class="dot green"></div>
-            <span class="terminal-title">eli ~ mistralai/devstral-2512:free</span>
+            <span class="terminal-title">eli tui</span>
         </div>
         <div class="terminal-body">
-            <div id="terminalTranscript" class="terminal-scroll"><span class="t-cyan">›</span> Analyze the correlation between AMD and INTC over the last 30 days.
-  Identify the single biggest day of DIVERGENCE.
+            <div id="terminalTranscript" class="terminal-scroll"><span class="t-cyan">›</span> <span class="t-white">SILVER CRASHED 30% - WHAT HAPPENED AND WHAT DO PREDICTION MARKETS SAY?</span>
 
-<span class="t-dim">eli[1]</span> <span class="t-gray">→ plan: MODE: READ | APPROVALS: AUTO</span>
-  <span class="t-purple">◆</span> checklist:
-    <span class="t-gray">•</span> Fetch 30d/1h timeseries for AMD and INTC
-    <span class="t-gray">•</span> Compute daily returns and identify divergence
-    <span class="t-gray">•</span> Fetch news for the identified day
+<span class="t-purple">$</span> eli finance timeseries --tickers SLV --range 5d --granularity 1h
+<span class="t-green">✓</span> SLV: $109.53 (Jan 29 14:00) → $68.26 (Feb 2 low) → $72.44 current
 
-<span class="t-green">✓</span> <span class="t-purple">$</span> eli finance timeseries --tickers AMD,INTC --range 30d --granularity 1h
+<span class="t-purple">$</span> eli finance options --ticker SLV --summary
+<span class="t-green">✓</span> ATM IV: 147% calls / 126% puts — extreme fear, ±15% weekly moves priced
 
-<span class="t-dim">eli[2]</span> <span class="t-gray">→ Writing Python to compute daily returns...</span>
+<span class="t-purple">$</span> eli finance odds --series KXRATECUTCOUNT --list-markets
+<span class="t-green">✓</span> Fed cuts 2026: 2 cuts (25%), 3 cuts (22%), 0 cuts (8%)
 
-<span class="t-green">✓</span> <span class="t-purple">$</span> cat << 'EOF' > analyze_divergence.py
-<span class="t-yellow">import</span> json
-<span class="t-yellow">from</span> datetime <span class="t-yellow">import</span> datetime
+<span class="t-purple">$</span> eli finance snapshot --tickers SPY,TLT,BTC-USD
+<span class="t-green">✓</span> SPY $695.41 (+0.5%) | TLT $86.80 (flat) | BTC $78,677 (flat)
 
-<span class="t-yellow">with</span> <span class="t-cyan">open</span>(<span class="t-green">'amd_intc_30d.json'</span>) <span class="t-yellow">as</span> f:
-    data = json.load(f)
+<span class="t-cyan">•</span> Silver's 30% drop is a margin-call liquidation, not macro crisis.
+  Equities flat, bonds flat, crypto flat. SLV IV at 147% = overdone.
+  Kalshi prices 2-3 Fed cuts. Bounce to $78-85 likely this week.
 
-<span class="t-gray"># Compute daily returns and find max divergence</span>
-<span class="t-yellow">for</span> date <span class="t-yellow">in</span> dates:
-    amd_ret = (amd_close / amd_prev - <span class="t-orange">1</span>) * <span class="t-orange">100</span>
-    intc_ret = (intc_close / intc_prev - <span class="t-orange">1</span>) * <span class="t-orange">100</span>
-    divergence = <span class="t-cyan">abs</span>(amd_ret - intc_ret)
-EOF
-python3 analyze_divergence.py
-
-<span class="t-red">✗</span> TypeError: 'str' object cannot be interpreted as an integer
-
-<span class="t-dim">eli[3]</span> <span class="t-gray">→ Fixing timestamp parsing for ISO format...</span>
-
-<span class="t-green">✓</span> <span class="t-purple">$</span> python3 analyze_divergence.py
-    New max divergence: 9.72% on 2026-01-09 (AMD: -0.54%, INTC: +9.18%)
-
-<span class="t-green">✓</span> <span class="t-purple">$</span> eli finance news --ticker INTC --date 2026-01-09
-
-<span class="t-cyan">╭──────────────────────────────────────────────────────────────╮</span>
-<span class="t-cyan">│</span> <span class="t-purple">◆</span> <b>INTC surged +9.18% while AMD was flat (-0.54%)</b>             <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>                                                              <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>   <b>Catalysts identified:</b>                                      <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>   • CEO meeting with President Trump                         <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>   • Launch of next-generation AI PCs at CES 2026             <span class="t-cyan">│</span>
-<span class="t-cyan">│</span>   • Numeric evidence: 9.72% divergence is 3x typical spread  <span class="t-cyan">│</span>
-<span class="t-cyan">╰──────────────────────────────────────────────────────────────╯</span>
-
-<span class="t-dim">status:</span> <span class="t-green">✓ done</span></div>
+<span class="t-dim">ready</span> <span class="t-green">[AUTO]</span> <span class="t-dim">12s</span> <span class="t-dim">• 4,821 tokens</span></div>
             <div id="terminalLive" class="terminal-scroll" aria-live="polite"></div>
             <div class="terminal-input" aria-label="Live terminal input">
                 <span class="t-purple" aria-hidden="true">$</span>
@@ -613,125 +701,138 @@ python3 analyze_divergence.py
             </div>
             <div class="terminal-status" id="terminalStatus"></div>
         </div>
-    </div>
+</div>
 
-    <!-- HOW IT WORKS -->
+        <div class="hero-follow fade-in delay-3">
+            <div class="hero-bridge">
+                Free market data for AI agents.
+            </div>
+            <p class="hero-lede">
+                Ask a question. Your AI pulls the data, runs the analysis, gives you an answer. Timeseries, snapshots, options, prediction markets, macro, SEC filings. Works with Claude Code, Codex, Gemini CLI, or eli tui with OpenRouter.
+            </p>
+        </div>
+
+    </div>
+</section>
+
+<div class="container">
+    <!-- WHY ELI -->
     <div id="how"></div>
-    <p class="section-header">How It Works</p>
-    <div class="workflow">
-        <div class="workflow-step">
-            <span class="step-num">01</span>
-            <div class="step-content">
-                <h3>Fetch data</h3>
-                <p>Yahoo Finance + FRED via native Rust. OHLCV, fundamentals, SEC filings, macro indicators.</p>
-            </div>
+    <p class="section-header">Why Eli</p>
+    <div class="manifesto-grid">
+        <div class="manifesto-item">
+            <div class="manifesto-num">01</div>
+            <div class="manifesto-title">Raw Data First.</div>
+            <p>Timeseries, not summaries. If Yahoo says $72.44, the model works from that number. No hallucinated prices.</p>
         </div>
-        <div class="workflow-step">
-            <span class="step-num">02</span>
-            <div class="step-content">
-                <h3>Write code</h3>
-                <p>LLM generates Python for calculations. Executes it. Reads actual output.</p>
-            </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">02</div>
+            <div class="manifesto-title">Compute Locally.</div>
+            <p>LLMs can't do math. Eli fetches with Rust, writes Python to calculate correlations and returns, executes it locally.</p>
         </div>
-        <div class="workflow-step">
-            <span class="step-num">03</span>
-            <div class="step-content">
-                <h3>Iterate</h3>
-                <p>Error? Reads traceback, fixes code, retries. Loops until status = DONE.</p>
-            </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">03</div>
+            <div class="manifesto-title">Options as Signal.</div>
+            <p>IV at 147% tells you more than price. Put/call ratios, skew, max pain—positioning data that news doesn't capture.</p>
         </div>
-	        <div class="workflow-step">
-	            <span class="step-num">04</span>
-	            <div class="step-content">
-	                <h3>Add context</h3>
-	                <p>News via Google RSS. Investigate specific dates after the numbers flag what moved.</p>
-	            </div>
-	        </div>
-	    </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">04</div>
+            <div class="manifesto-title">Prediction Markets.</div>
+            <p>Kalshi odds are forward-looking. "56% Japan recession" beats yesterday's headlines. Read the future, not the past.</p>
+        </div>
+    </div>
 
     <!-- FINANCE TOOLS -->
-    <p class="section-header">Built-In Finance Tools</p>
-    <div class="tools-grid">
-        <div class="tool-card">
-            <code>timeseries</code>
-            <span>OHLCV candles with flexible range and granularity (1m to 5y)</span>
-        </div>
-        <div class="tool-card">
-            <code>snapshot</code>
-            <span>Point-in-time data: price, market cap, shares outstanding, EV</span>
-        </div>
-        <div class="tool-card">
-            <code>fundamentals</code>
-            <span>Quarterly income, balance sheet, and cash flow statements</span>
-        </div>
-        <div class="tool-card">
-            <code>filings</code>
-            <span>SEC filings (8-K, 10-K, 10-Q) with full text extraction</span>
-        </div>
-        <div class="tool-card">
-            <code>news</code>
-            <span>News articles for a specific ticker on a specific date</span>
-        </div>
-        <div class="tool-card">
-            <code>search</code>
-            <span>Find tickers by keyword (e.g., "semiconductors", "gold miners")</span>
-        </div>
-    </div>
+    <p class="section-header">Standard Library</p>
+    <p class="section-sub">Core finance tools that fetch raw data and keep the math local.</p>
+    <div class="tools-banner">FREE FOREVER • NO PAID APIs • WORKS WITH CLAUDE CODE / CODEX / ANY CLI</div>
+    <table class="tools-table" aria-label="Standard library tools">
+        <thead>
+            <tr>
+                <th>Tool</th>
+                <th>Function</th>
+                <th>Source</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td class="tool-name">timeseries</td>
+                <td>OHLCV candles with precise range and granularity.</td>
+                <td>Yahoo</td>
+            </tr>
+            <tr>
+                <td class="tool-name">snapshot</td>
+                <td>Point-in-time price, cap, shares, EV.</td>
+                <td>Yahoo</td>
+            </tr>
+            <tr>
+                <td class="tool-name">balance</td>
+                <td>Quarterly income, balance sheet, cash flow.</td>
+                <td>Yahoo</td>
+            </tr>
+            <tr>
+                <td class="tool-name">filings</td>
+                <td>SEC filings with full text.</td>
+                <td>SEC EDGAR</td>
+            </tr>
+            <tr>
+                <td class="tool-name">news</td>
+                <td>Date-specific headlines.</td>
+                <td>Google News RSS</td>
+            </tr>
+            <tr>
+                <td class="tool-name">odds</td>
+                <td>Prediction market prices and orderbook depth.</td>
+                <td>Kalshi</td>
+            </tr>
+            <tr>
+                <td class="tool-name">options</td>
+                <td>Options chains with IV/skew summaries.</td>
+                <td>Yahoo</td>
+            </tr>
+            <tr>
+                <td class="tool-name">macro</td>
+                <td>CPI, unemployment, Fed funds, yield curve, M2.</td>
+                <td>FRED</td>
+            </tr>
+            <tr>
+                <td class="tool-name">search</td>
+                <td>Ticker and macro ID lookup.</td>
+                <td>Yahoo + FRED</td>
+            </tr>
+        </tbody>
+    </table>
 
-    <!-- MANIFESTO / FEATURES -->
-    <p class="section-header">Why Eli</p>
-	    <div class="grid">
-	        <div class="card">
-	            <h3>Infinite Memory</h3>
-	            <p>Remembers the entire conversation. When tokens get high, it automatically self-compacts history to keep the mission on track.</p>
-	        </div>
-	        <div class="card">
-	            <h3>Rust Data Tools</h3>
-	            <p>Yahoo + FRED in Rust. Cached locally. No scraping. Single binary.</p>
-	        </div>
-	        <div class="card">
-	            <h3>Numbers First</h3>
-	            <p>Price → key days → news/filings by date. No web search. No headlines-first bias.</p>
-	        </div>
-        <div class="card">
-            <h3>Real Math</h3>
-            <p>Generates Python. Executes it. Shows the code. Audit it.</p>
-        </div>
-	        <div class="card">
-	            <h3>Any LLM</h3>
-	            <p>OpenRouter (free demo model), Anthropic, OpenAI, Ollama. Your choice.</p>
-	        </div>
-        <div class="card">
-            <h3>Reproducible</h3>
-            <p>Sessions logged to JSONL. Reports saved to <code>eli_research/</code>.</p>
-        </div>
-    </div>
-
-    <!-- BLOG -->
-    <div id="blog"></div>
-    <p class="section-header">Blog</p>
-    <div class="blog-grid" aria-label="Blog posts">
+    <!-- DEMOS -->
+    <div id="demos"></div>
+    <p class="section-header">What You Can Build</p>
+    <div class="blog-grid" aria-label="Demo sessions">
         <a class="blog-card" href="blog/beyond-the-cutoff.html">
-            <div class="blog-meta">2026-01-13 • Research</div>
-            <h3>Beyond the Cutoff: Tools Beat Memory</h3>
-            <p>How open-source Rust tools replace expensive web search. By fetching raw data first, even cheap models (1/100th the cost of Sonnet) can read the news with the numbers in mind.</p>
+            <div class="blog-meta">cross-asset</div>
+            <h3>Silver crashed 30%—is it macro or positioning?</h3>
+            <p>Pull SLV timeseries, options IV (147%), SPY/TLT/BTC snapshots, Kalshi Fed odds. Synthesize into a market call with cited numbers.</p>
         </a>
         <a class="blog-card" href="blog/self-repair.html">
-            <div class="blog-meta">2026-01-13 • Emergence</div>
-            <h3>Self-Repair Is an Emergent Feature</h3>
-            <p>Once an agent can run code and apply diffs, it stops “answering” and starts debugging. It retries until the math and data pipeline actually work.</p>
+            <div class="blog-meta">correlation</div>
+            <h3>AMD vs INTC: find the divergence day</h3>
+            <p>Fetch hourly candles, write Python to compute returns, identify when correlation broke down. Math runs locally.</p>
         </a>
         <a class="blog-card" href="blog/diffs-as-interface.html">
-            <div class="blog-meta">2026-01-13 • Engineering</div>
-            <h3>Diffs as an Interface</h3>
-            <p>Eli doesn’t paste code. It proposes diffs, applies them, and can undo them. That’s how small models ship real software safely.</p>
+            <div class="blog-meta">prediction markets</div>
+            <h3>What does Kalshi price for Fed cuts?</h3>
+            <p>Pull live odds: 2 cuts (25%), 3 cuts (22%), 0 cuts (8%). Forward-looking signal, not stale news.</p>
+        </a>
+        <a class="blog-card" href="blog/intel-proof.html">
+            <div class="blog-meta">options flow</div>
+            <h3>Is the put/call ratio bearish on SPY?</h3>
+            <p>Get options summary: P/C ratio 1.40, max pain $673, ATM IV 12%. Institutional positioning in one call.</p>
         </a>
     </div>
 
     <!-- FOOTER -->
     <footer>
         <a href="https://github.com/efoltyn/eli">GitHub</a>
-        <a href="blog/">Blog</a>
+        <a href="blog/">Demos</a>
         <span>Built with Rust</span>
         <span>v0.1.0</span>
     </footer>
@@ -739,17 +840,30 @@ python3 analyze_divergence.py
 
 <script>
     function copyCmd() {
-        const text = document.getElementById('cmd').innerText;
+        const cmdEl = document.getElementById('cmd');
+        if (!cmdEl) return;
+        const text = cmdEl.innerText;
         navigator.clipboard.writeText(text);
 
-        const original = document.getElementById('cmd').innerText;
-        const el = document.getElementById('cmd');
-        el.innerText = "Copied!";
-        el.style.color = "var(--gray)";
+        const labelEl = document.getElementById('copyLabel');
+        const original = cmdEl.innerText;
+        const labelOriginal = labelEl ? labelEl.innerText : null;
+        const labelBgOriginal = labelEl ? labelEl.style.background : null;
+
+        cmdEl.innerText = "Copied!";
+        cmdEl.style.color = "var(--gray)";
+        if (labelEl) {
+            labelEl.innerText = "Copied";
+            labelEl.style.background = "var(--gray)";
+        }
 
         setTimeout(() => {
-            el.innerText = original;
-            el.style.color = "var(--fg)";
+            cmdEl.innerText = original;
+            cmdEl.style.color = "var(--fg)";
+            if (labelEl) {
+                labelEl.innerText = labelOriginal || "Copy";
+                labelEl.style.background = labelBgOriginal || "var(--fg)";
+            }
         }, 1500);
     }
 
