@@ -12,9 +12,23 @@ Works with Claude Code, Codex, Gemini CLI, or `eli tui` with OpenRouter.
 
 ## What is Eli?
 
-Eli is a Rust CLI that gives AI agents access to real market data. Instead of web search (summaries of summaries), your AI gets the raw data: timeseries, snapshots, options chains, prediction markets, macro indicators, SEC filings.
+Eli is a data layer for AI agents. It works alongside your web search tool, not instead of it.
 
-**Web search looks backward.** Articles explain yesterday's move. Eli lets your AI look forward (prediction markets), backward (timeseries), and at the present (snapshots) — all from structured data, not journalist narratives.
+**Web search is great for the past.** Articles, context, narratives, human sentiment. But it's inefficient for what's happening NOW and what's EXPECTED to happen. You burn tokens parsing HTML articles that describe yesterday's move.
+
+**Eli handles present and future:**
+- **Present** — What IS the price right now? `eli finance snapshot`
+- **Future** — What does the market EXPECT? `eli finance odds` (Kalshi, Polymarket)
+- **Structured past** — What ACTUALLY happened? `eli finance timeseries` (not a journalist's summary)
+
+**Use both.** Eli gives you prices, options IV, prediction market odds, macro data. Web search gives you the human narrative — why people think something happened, political context, sentiment. Your AI synthesizes both into a complete picture.
+
+Example: "What's happening with silver?"
+- **Eli** → SLV dropped 30%, IV at 147%, SPY/TLT/BTC flat, Kalshi prices 2 Fed cuts
+- **Web search** → Government shutdown context, margin call rumors, analyst takes
+- **AI synthesizes** → "Margin-call liquidation, not macro crisis. Bounce likely."
+
+One tool for hard data. One tool for human context. Your AI connects them.
 
 ---
 
