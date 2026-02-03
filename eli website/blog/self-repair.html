@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Self-Repair Is an Emergent Feature | Eli</title>
-    <meta name="description" content="Give a model an execution loop and safe diffs, and it begins acting like a debugger. That behavior falls out naturally.">
+    <meta name="description" content="Execution loops turn an LLM into a debugger, not a narrator.">
+    <link rel="icon" type="image/png" href="../assets/logo.png">
     <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="rss.xml">
     <style>
         :root {
@@ -51,9 +52,20 @@
 
         .nav-logo {
             font-family: var(--font-sans);
-            font-weight: 700;
-            letter-spacing: -0.05em;
-            font-size: 16px;
+            font-weight: 800;
+            letter-spacing: -0.06em;
+            font-size: 18px;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 8px;
+            border-radius: 12px;
+            border-bottom: none;
+        }
+
+        .nav-logo:hover {
+            background: rgba(0, 0, 0, 0.04);
+            border-bottom: none;
         }
 
         .nav-links {
@@ -117,10 +129,7 @@
 
         p { margin: 12px 0; }
 
-        code, pre {
-            font-family: var(--font-mono);
-            font-size: 0.9rem;
-        }
+        code, pre { font-family: var(--font-mono); font-size: 0.9rem; }
 
         pre {
             background: var(--light-gray);
@@ -148,54 +157,57 @@
             flex-wrap: wrap;
         }
 
-        @media (max-width: 600px) {
-            h1 { font-size: 2.4rem; }
-        }
+        @media (max-width: 600px) { h1 { font-size: 2.4rem; } }
     </style>
 </head>
 <body>
-<nav class="top-nav">
-    <div class="nav-inner">
-        <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
-        <div class="nav-links">
-            <a href="./">Blog</a>
-            <a class="nav-cta" href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+    <nav class="top-nav">
+        <div class="nav-inner">
+            <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
+            <div class="nav-links">
+                <a href="./">Blog</a>
+                <a class="nav-cta" href="https://github.com/efoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+            </div>
         </div>
-    </div>
-</nav>
+    </nav>
 
-<main class="container">
-    <article>
-        <p class="kicker">Emergence</p>
-        <h1>Self-Repair Is an Emergent Feature</h1>
-        <div class="meta">2026-01-13 • Eli</div>
+    <main class="container">
+        <article>
+            <p class="kicker">Emergence</p>
+            <h1>Self-Repair Is an Emergent Feature</h1>
+            <div class="meta">2026-01-13 • Eli</div>
 
-        <p>We built Eli so a model could fetch time series data, write Python, run it, and show the result. That alone makes “math” trustworthy.</p>
-        <p>Then something unexpected happened: once the harness could execute code and apply diffs, the model began fixing its own mistakes automatically.</p>
+            <p>“Fixing itself” sounds like magic until you look at the interface. Self-repair doesn’t come from a smarter paragraph. It comes from <i>closing the loop</i> between intent and reality.</p>
 
-        <div class="callout">
-            <b>It stopped acting like a chatbot.</b> It started acting like a debugger: run → fail → inspect → patch → rerun.
-        </div>
+            <div class="callout">
+                <b>Models don’t debug text.</b> They debug feedback.
+            </div>
 
-        <h2>Why it emerges</h2>
-        <p>If the only output channel is text, models learn to “explain around” errors. But if the environment returns an error and you keep the loop open, the cheapest path is to repair.</p>
+            <h2>The loop that creates repair</h2>
+            <p>Eli doesn’t just ask the model for an answer. It asks for a plan, commands to run, and diffs to apply — then it runs them and feeds the outputs back in.</p>
+            <pre><code>plan → run → fail → observe → patch → run → pass</code></pre>
 
-        <h2>The minimal loop</h2>
-        <p>This is the core behavior Eli enforces:</p>
-        <pre><code>1) fetch data (timeseries, snapshot)
-2) write code (python)
-3) run code (local)
-4) read stderr/stdout
-5) patch and retry until it works</code></pre>
+            <h2>Why “failure” is the ingredient</h2>
+            <p>When a model is constrained to tools, it can’t hand-wave a result. It either produces data and code that runs, or it gets an error. That error is the training signal at inference time.</p>
+            <p>Most assistants avoid failure by avoiding execution. The output looks smooth — and stays wrong.</p>
 
-        <h2>Why it matters</h2>
-        <p>Once self-repair exists, cheap models become useful. The harness supplies the missing reliability by turning failures into feedback the model can act on.</p>
+            <h2>Diffs make fixes precise</h2>
+            <p>Repairs work because the surface area is small: a diff is a concrete edit in a concrete file. That lets the model iterate without “forgetting” what it changed.</p>
+            <p>Undo also matters. If a patch makes things worse, you don’t argue about it — you revert it.</p>
 
-        <footer>
-            <a href="./">← Blog</a>
-            <a href="../">Home</a>
-        </footer>
-    </article>
-</main>
+            <h2>Finance is a brutal teacher</h2>
+            <p>Markets are adversarial. If you ask “is this bullish?”, you can write a persuasive story either way. But if you ask “what happened to returns after the earnings print?” you need prices, timestamps, and arithmetic.</p>
+            <p>That’s why Eli’s finance tools exist: pull raw numbers first, then interpret them.</p>
+
+            <h2>The punchline</h2>
+            <p>Self-repair isn’t a feature you bolt onto an LLM. It’s what you get when the system can execute, observe, and edit with a tight feedback loop.</p>
+            <p>Once the loop exists, smaller models start behaving like debuggers.</p>
+
+            <footer>
+                <a href="./">← Blog</a>
+                <a href="../">Home</a>
+            </footer>
+        </article>
+    </main>
 </body>
 </html>

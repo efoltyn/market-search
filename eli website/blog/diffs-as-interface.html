@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Diffs as an Interface | Eli</title>
-    <meta name="description" content="Text isn’t an API. Diffs are. Eli uses diffs + undo + approvals so the model can ship code without wrecking your repo.">
+    <meta name="description" content="Why diffs, approvals, and undo are the safest interface for models.">
+    <link rel="icon" type="image/png" href="../assets/logo.png">
     <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="rss.xml">
     <style>
         :root {
@@ -51,9 +52,20 @@
 
         .nav-logo {
             font-family: var(--font-sans);
-            font-weight: 700;
-            letter-spacing: -0.05em;
-            font-size: 16px;
+            font-weight: 800;
+            letter-spacing: -0.06em;
+            font-size: 18px;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 8px;
+            border-radius: 12px;
+            border-bottom: none;
+        }
+
+        .nav-logo:hover {
+            background: rgba(0, 0, 0, 0.04);
+            border-bottom: none;
         }
 
         .nav-links {
@@ -154,13 +166,13 @@
     </style>
 </head>
 <body>
-<nav class="top-nav">
-    <div class="nav-inner">
-        <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
-        <div class="nav-links">
-            <a href="./">Blog</a>
-            <a class="nav-cta" href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
-        </div>
+	<nav class="top-nav">
+	    <div class="nav-inner">
+	        <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
+	        <div class="nav-links">
+	            <a href="./">Blog</a>
+	            <a class="nav-cta" href="https://github.com/efoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+	        </div>
     </div>
 </nav>
 
@@ -182,6 +194,9 @@
 - reviewable (preview vs apply)
 - reversible (undo)</code></pre>
 
+        <h2>Why this matters for finance</h2>
+        <p>When the model writes analysis code, diffs make every assumption visible. You can see exactly how returns, volatility, or correlations were computed.</p>
+
         <h2>Guardrails without killing momentum</h2>
         <p>Eli supports approval modes so you can choose the tradeoff:</p>
         <pre><code>/plan  → ask before running commands and applying diffs
@@ -190,6 +205,7 @@
 
         <h2>The punchline</h2>
         <p>Once you constrain edits to diffs and add undo, you can let smaller models act aggressively without fear. The harness provides the safety net.</p>
+        <p>That same constraint makes financial analysis auditable instead of hand-wavy.</p>
 
         <footer>
             <a href="./">← Blog</a>

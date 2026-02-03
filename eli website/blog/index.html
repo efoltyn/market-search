@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Eli Blog</title>
-    <meta name="description" content="Short essays on tool-using models, verified research, and agentic UX.">
+    <title>Blog | Eli</title>
+    <meta name="description" content="Mini whitepapers on tool-using models, verification, and agentic UX.">
+    <link rel="icon" type="image/png" href="../assets/logo.png">
     <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="rss.xml">
     <style>
         :root {
@@ -12,7 +13,7 @@
             --fg: #000000;
             --gray: #666666;
             --light-gray: #f5f5f7;
-            --radius: 12px;
+            --radius: 14px;
             --font-serif: "New York", "Apple Garamond", "Baskerville", "Times New Roman", serif;
             --font-sans: "SF Pro Text", "Helvetica Neue", sans-serif;
             --font-mono: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
@@ -24,7 +25,7 @@
             background-color: var(--bg);
             color: var(--fg);
             font-family: var(--font-serif);
-            line-height: 1.65;
+            line-height: 1.75;
             -webkit-font-smoothing: antialiased;
         }
 
@@ -41,7 +42,7 @@
         }
 
         .nav-inner {
-            max-width: 900px;
+            max-width: 980px;
             margin: 0 auto;
             padding: 18px 24px;
             display: flex;
@@ -51,9 +52,20 @@
 
         .nav-logo {
             font-family: var(--font-sans);
-            font-weight: 700;
-            letter-spacing: -0.05em;
-            font-size: 16px;
+            font-weight: 800;
+            letter-spacing: -0.06em;
+            font-size: 18px;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 8px;
+            border-radius: 12px;
+            border-bottom: none;
+        }
+
+        .nav-logo:hover {
+            background: rgba(0, 0, 0, 0.04);
+            border-bottom: none;
         }
 
         .nav-links {
@@ -78,15 +90,12 @@
         .nav-cta:hover { border-color: rgba(0, 0, 0, 0.18); }
 
         .container {
-            max-width: 900px;
+            max-width: 980px;
             margin: 0 auto;
-            padding: 64px 24px 80px;
+            padding: 56px 24px 96px;
         }
 
-        .hero {
-            text-align: left;
-            margin-bottom: 40px;
-        }
+        header { max-width: 760px; }
 
         .kicker {
             font-family: var(--font-mono);
@@ -102,58 +111,56 @@
             font-weight: 500;
             letter-spacing: -0.04em;
             line-height: 1.05;
-            margin-bottom: 16px;
+            margin-bottom: 12px;
         }
 
-        .subtitle {
+        .sub {
             font-family: var(--font-sans);
-            font-size: 1.1rem;
             color: var(--gray);
-            max-width: 680px;
+            max-width: 52ch;
+            margin-top: 6px;
         }
 
-        .posts {
+        .grid {
+            margin-top: 34px;
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 16px;
-            margin-top: 24px;
         }
 
-        .post-card {
-            background: #fff;
+        .card {
             border: 1px solid rgba(0, 0, 0, 0.08);
-            border-radius: 14px;
-            padding: 18px;
-            transition: transform 0.18s ease, border-color 0.18s ease;
+            background: #fff;
+            border-radius: var(--radius);
+            padding: 18px 18px 16px;
+            transition: 0.18s;
+            border-bottom: none;
         }
 
-        .post-card:hover {
-            transform: translateY(-2px);
-            border-color: rgba(0, 0, 0, 0.16);
-        }
+        .card:hover { border-color: rgba(0, 0, 0, 0.18); transform: translateY(-1px); }
 
-        .post-meta {
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            color: var(--gray);
-            margin-bottom: 10px;
-        }
-
-        .post-card h2 {
+        .meta {
             font-family: var(--font-sans);
-            font-size: 1rem;
-            font-weight: 650;
-            margin-bottom: 10px;
+            font-size: 0.9rem;
+            color: var(--gray);
+            margin-bottom: 8px;
         }
 
-        .post-card p {
+        .title {
+            font-size: 1.25rem;
+            letter-spacing: -0.02em;
+            line-height: 1.2;
+            margin-bottom: 8px;
+        }
+
+        .desc {
+            font-family: var(--font-sans);
             color: var(--gray);
-            font-size: 1.02rem;
-            line-height: 1.7;
+            line-height: 1.6;
         }
 
         footer {
-            margin-top: 80px;
+            margin-top: 62px;
             font-family: var(--font-sans);
             font-size: 0.9rem;
             color: var(--gray);
@@ -162,53 +169,60 @@
             flex-wrap: wrap;
         }
 
+        @media (max-width: 860px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+
         @media (max-width: 600px) {
             h1 { font-size: 2.4rem; }
-            .container { padding-top: 48px; }
         }
     </style>
 </head>
 <body>
-<nav class="top-nav">
-    <div class="nav-inner">
-        <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
-        <div class="nav-links">
-            <a href="./">Blog</a>
-            <a class="nav-cta" href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+    <nav class="top-nav">
+        <div class="nav-inner">
+            <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
+            <div class="nav-links">
+                <a href="./">Blog</a>
+                <a class="nav-cta" href="https://github.com/efoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+            </div>
         </div>
-    </div>
-</nav>
+    </nav>
 
-<main class="container">
-    <header class="hero">
-        <p class="kicker">Blog</p>
-        <h1>Notes from the harness.</h1>
-        <p class="subtitle">Mini whitepapers on tool-using models, verification, and the UI that makes “agentic” feel real.</p>
-    </header>
+    <main class="container">
+        <header>
+            <p class="kicker">Mini whitepapers</p>
+            <h1>Blog</h1>
+            <p class="sub">Tools, verification, and agentic UX — written for people who care about building systems that actually run.</p>
+        </header>
 
-    <section class="posts" aria-label="Posts">
-        <a class="post-card" href="beyond-the-cutoff.html">
-            <div class="post-meta">2026-01-13 • Research</div>
-            <h2>Beyond the Cutoff: Tools Beat Memory</h2>
-            <p>Why Eli starts with timeseries, not headlines—and how tool access turns “knowledge cutoff” into a solvable problem.</p>
-        </a>
-        <a class="post-card" href="self-repair.html">
-            <div class="post-meta">2026-01-13 • Emergence</div>
-            <h2>Self-Repair Is an Emergent Feature</h2>
-            <p>Give a model an execution loop and safe diffs, and it begins acting like a debugger. That behavior falls out naturally.</p>
-        </a>
-        <a class="post-card" href="diffs-as-interface.html">
-            <div class="post-meta">2026-01-13 • Engineering</div>
-            <h2>Diffs as an Interface</h2>
-            <p>Text isn’t an API. Diffs are. Eli uses diffs + undo + approvals so the model can ship code without wrecking your repo.</p>
-        </a>
-    </section>
+        <section class="grid" aria-label="Blog posts">
+            <a class="card" href="intel-proof.html">
+                <div class="meta">2026-01-18 • Case Study</div>
+                <div class="title">Intel: Proof of Work</div>
+                <div class="desc">A real session: filings, timeseries, and a clean, critical gap analysis backed by numbers.</div>
+            </a>
+            <a class="card" href="beyond-the-cutoff.html">
+                <div class="meta">2026-01-13 • Research</div>
+                <div class="title">Beyond the Cutoff: Tools Beat Memory</div>
+                <div class="desc">Why raw numbers come first, and how Eli turns cutoff into a solvable problem with tools.</div>
+            </a>
+            <a class="card" href="self-repair.html">
+                <div class="meta">2026-01-13 • Emergence</div>
+                <div class="title">Self-Repair Is an Emergent Feature</div>
+                <div class="desc">Execution loops create real debugging behavior instead of hand-wavy answers.</div>
+            </a>
+            <a class="card" href="diffs-as-interface.html">
+                <div class="meta">2026-01-13 • Engineering</div>
+                <div class="title">Diffs as an Interface</div>
+                <div class="desc">Why diffs, approvals, and undo turn an LLM into a safe coder.</div>
+            </a>
+        </section>
 
-    <footer>
-        <a href="../">Home</a>
-        <a href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
-        <span>v0.1.0</span>
-    </footer>
-</main>
+        <footer>
+            <a href="../">Home</a>
+            <a href="rss.xml">RSS</a>
+        </footer>
+    </main>
 </body>
 </html>

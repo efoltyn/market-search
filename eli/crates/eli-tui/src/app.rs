@@ -1,10 +1,11 @@
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use eli_core::agent::AgentEvent;
+use eli_core::contract;
 use eli_core::config::{ApprovalMode, RunMode};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -40,6 +41,10 @@ pub struct App {
     pub tool_log: Vec<String>,
     pub last_input_tokens: usize,
     pub total_tokens: usize,
+    pub queued_inputs: Vec<String>,
+    pub sources: Vec<String>,
+    pub last_tool_ok: Option<bool>,
+    pub last_run_secs: u64,
 }
 
 pub struct UIMessage {
@@ -77,6 +82,10 @@ impl App {
             tool_log: Vec::new(),
             last_input_tokens: 0,
             total_tokens: 0,
+            queued_inputs: Vec::new(),
+            sources: Vec::new(),
+            last_tool_ok: None,
+            last_run_secs: 0,
         }
     }
 
@@ -97,7 +106,7 @@ impl App {
                                 self.should_quit = true;
                             }
                             KeyCode::Enter => {
-                                if !self.input.trim().is_empty() && !self.is_processing {
+                                if !self.input.trim().is_empty() {
                                     let msg = self.input.drain(..).collect::<String>();
                                     self.cursor_pos = 0;
                                     // Rough token estimate: ~4 chars per token
@@ -107,9 +116,15 @@ impl App {
                                         role: "You".to_string(),
                                         content: msg.clone(),
                                     });
-                                    self.is_processing = true;
-                                    self.processing_start = Some(std::time::Instant::now());
-                                    let _ = self.action_tx.send(Action::UserInput(msg)).await;
+                                    if self.is_processing {
+                                        self.queued_inputs.push(msg);
+                                    } else {
+                                        self.sources.clear();
+                                        self.last_tool_ok = None;
+                                        self.is_processing = true;
+                                        self.processing_start = Some(std::time::Instant::now());
+                                        let _ = self.action_tx.send(Action::UserInput(msg)).await;
+                                    }
                                 }
                             }
                             KeyCode::Char(c) => {
@@ -174,9 +189,27 @@ impl App {
                             });
                         }
                     }
-                    AgentEvent::MessageComplete(_) => {
+                    AgentEvent::MessageComplete(raw) => {
+                        if let Some(parsed) = render_model_response(&raw) {
+                            if let Some(last) = self.messages.last_mut() {
+                                if last.role == "Eli" {
+                                    last.content = parsed;
+                                }
+                            }
+                        }
+                        if let Some(started) = self.processing_start {
+                            self.last_run_secs = started.elapsed().as_secs();
+                        }
                         self.is_processing = false;
                         self.processing_start = None;
+                        if let Some(next) = self.queued_inputs.first().cloned() {
+                            self.queued_inputs.remove(0);
+                            self.sources.clear();
+                            self.last_tool_ok = None;
+                            self.is_processing = true;
+                            self.processing_start = Some(std::time::Instant::now());
+                            let _ = self.action_tx.send(Action::UserInput(next)).await;
+                        }
                     }
                     AgentEvent::Plan { plan, focus, status } => {
                         let mut iter = plan.lines();
@@ -204,18 +237,38 @@ impl App {
                             let drop = self.tool_log.len() - 6;
                             self.tool_log.drain(0..drop);
                         }
+                        for src in infer_sources(&name, &output) {
+                            self.add_source(&src);
+                        }
+                        if let Some(ok) = parse_tool_ok(&output) {
+                            self.last_tool_ok = Some(ok);
+                        }
                     }
                     AgentEvent::Error(e) => {
                         self.messages.push(UIMessage {
                             role: "Error".to_string(),
                             content: e,
                         });
+                        if let Some(started) = self.processing_start {
+                            self.last_run_secs = started.elapsed().as_secs();
+                        }
                         self.is_processing = false;
                         self.processing_start = None;
                     }
                     AgentEvent::Done => {
+                        if let Some(started) = self.processing_start {
+                            self.last_run_secs = started.elapsed().as_secs();
+                        }
                         self.is_processing = false;
                         self.processing_start = None;
+                        if let Some(next) = self.queued_inputs.first().cloned() {
+                            self.queued_inputs.remove(0);
+                            self.sources.clear();
+                            self.last_tool_ok = None;
+                            self.is_processing = true;
+                            self.processing_start = Some(std::time::Instant::now());
+                            let _ = self.action_tx.send(Action::UserInput(next)).await;
+                        }
                     }
                 }
             }
@@ -228,64 +281,39 @@ impl App {
     }
 
     fn ui(&self, f: &mut Frame) {
-        let area = f.area();
+        let area = f.size();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),  // Header (smaller)
                 Constraint::Min(5),     // Body
                 Constraint::Length(3),  // Input box
-                Constraint::Length(1),  // Status footer
+                Constraint::Length(1),  // Status line
+                Constraint::Length(1),  // Sources footer
             ])
             .split(area);
 
-        self.render_header(f, chunks[0]);
-
-        let body = chunks[1];
-        if body.width >= 100 {
-            let body_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
-                .split(body);
-            self.render_chat(f, body_chunks[0]);
-            self.render_sidebar(f, body_chunks[1]);
-        } else {
-            // Narrow terminal - stack vertically
-            self.render_chat(f, body);
-        }
-
-        self.render_input(f, chunks[2]);
-        self.render_footer(f, chunks[3]);
+        let body = chunks[0];
+        self.render_chat(f, body);
+        self.render_input(f, chunks[1]);
+        self.render_status(f, chunks[2]);
+        self.render_sources(f, chunks[3]);
     }
 
-    fn render_header(&self, f: &mut Frame, area: Rect) {
-        let header_line = Line::from(vec![
-            Span::styled(
-                "eli",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{}/{}", self.ui.provider, self.ui.model),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("mode:{}", format_mode(self.ui.mode)),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-
-        let header = Paragraph::new(header_line);
-        f.render_widget(header, area);
+    fn add_source(&mut self, source: &str) {
+        let trimmed = source.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if !self.sources.iter().any(|s| s.eq_ignore_ascii_case(trimmed)) {
+            self.sources.push(trimmed.to_string());
+        }
     }
 
     fn render_chat(&self, f: &mut Frame, area: Rect) {
         let mut lines: Vec<Line> = Vec::new();
 
         for msg in &self.messages {
+            let mut rendered = false;
             match msg.role.as_str() {
                 "You" => {
                     // User messages: › prefix, bold
@@ -296,9 +324,9 @@ impl App {
                             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
                         ),
                     ]));
+                    rendered = true;
                 }
                 "Eli" => {
-                    // AI messages: • prefix for main content, - for sub-items
                     for (i, content_line) in msg.content.lines().enumerate() {
                         let trimmed = content_line.trim();
                         if trimmed.is_empty() {
@@ -306,57 +334,27 @@ impl App {
                             continue;
                         }
 
-                        // Check if it's a sub-item (starts with - or *)
-                        let is_subitem = trimmed.starts_with('-') || trimmed.starts_with('*');
-
-                        if is_subitem {
-                            // Sub-item: indent with -
-                            let content = trimmed.trim_start_matches('-').trim_start_matches('*').trim();
-                            lines.push(Line::from(vec![
-                                Span::styled("  - ", Style::default().fg(Color::DarkGray)),
-                                Span::styled(content, Style::default().fg(Color::Gray)),
-                            ]));
-                        } else if i == 0 {
-                            // First line: • bullet
+                        if i == 0 {
                             lines.push(Line::from(vec![
                                 Span::styled("• ", Style::default().fg(Color::Cyan)),
                                 Span::styled(content_line, Style::default().fg(Color::White)),
                             ]));
                         } else {
-                            // Continuation lines: indent to align
                             lines.push(Line::from(vec![
                                 Span::raw("  "),
                                 Span::styled(content_line, Style::default().fg(Color::White)),
                             ]));
                         }
                     }
-                }
-                "Error" => {
-                    lines.push(Line::from(vec![
-                        Span::styled("✗ ", Style::default().fg(Color::Red)),
-                        Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(Color::Red),
-                        ),
-                    ]));
-                }
-                "System" => {
-                    lines.push(Line::from(vec![
-                        Span::styled("· ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-                        ),
-                    ]));
+                    rendered = true;
                 }
                 _ => {
-                    lines.push(Line::from(Span::styled(
-                        msg.content.clone(),
-                        Style::default().fg(Color::Gray),
-                    )));
+                    // Only render user + AI in the main view.
                 }
             }
-            lines.push(Line::from("")); // Spacing between messages
+            if rendered {
+                lines.push(Line::from("")); // Spacing between messages
+            }
         }
 
         // Auto-scroll: calculate offset to show latest messages
@@ -374,66 +372,8 @@ impl App {
         f.render_widget(chat, area);
     }
 
-    fn render_sidebar(&self, f: &mut Frame, area: Rect) {
-        let mut lines = Vec::new();
-        lines.push(Line::from(Span::styled(
-            "Status",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(format!(
-            "state: {}",
-            if self.is_processing { "thinking" } else { "idle" }
-        )));
-        lines.push(Line::from(format!(
-            "mode: {}",
-            format_mode(self.ui.mode)
-        )));
-        lines.push(Line::from(format!(
-            "approvals: {}",
-            format_approvals(self.ui.approvals)
-        )));
-        lines.push(Line::from(format!("auto: {}", if self.ui.auto { "on" } else { "off" })));
-        lines.push(Line::from(format!(
-            "parallel: cmd {} / sub {}",
-            self.ui.parallel_commands, self.ui.parallel_subagents
-        )));
-        lines.push(Line::from(""));
-
-        if let Some(plan) = &self.plan {
-            lines.push(Line::from(Span::styled(
-                "Plan",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )));
-            if !plan.line1.is_empty() {
-                lines.push(Line::from(plan.line1.clone()));
-            }
-            if !plan.line2.is_empty() {
-                lines.push(Line::from(plan.line2.clone()));
-            }
-            if !plan.focus.is_empty() {
-                lines.push(Line::from(format!("focus: {}", plan.focus)));
-            }
-            lines.push(Line::from(format!("status: {}", plan.status)));
-            lines.push(Line::from(""));
-        }
-
-        if !self.tool_log.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "Tools",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )));
-            for item in &self.tool_log {
-                lines.push(Line::from(item.clone()));
-            }
-        }
-
-        let sidebar = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Status"))
-            .wrap(Wrap { trim: true });
-        f.render_widget(sidebar, area);
-    }
-
     fn render_input(&self, f: &mut Frame, area: Rect) {
+        f.render_widget(Clear, area);
         // Build input display with cursor
         let (before_cursor, after_cursor) = self.input.split_at(self.cursor_pos.min(self.input.len()));
 
@@ -477,61 +417,129 @@ impl App {
         f.render_widget(input, area);
     }
 
-    fn render_footer(&self, f: &mut Frame, area: Rect) {
-        let mut parts: Vec<Span> = Vec::new();
-
-        // Show working status with time if processing
-        if self.is_processing {
-            let elapsed = self.processing_start
-                .map(|s| s.elapsed().as_secs())
-                .unwrap_or(0);
-            parts.push(Span::styled(
-                format!("• Working ({}s · esc to interrupt)", elapsed),
-                Style::default().fg(Color::Yellow),
+    fn render_sources(&self, f: &mut Frame, area: Rect) {
+        f.render_widget(Clear, area);
+        let mut spans: Vec<Span> = Vec::new();
+        if let Some(ok) = self.last_tool_ok {
+            let (symbol, color) = if ok { ("✓", Color::Green) } else { ("✗", Color::Red) };
+            spans.push(Span::styled(
+                format!("{symbol} "),
+                Style::default().fg(color),
             ));
+        }
+
+        spans.push(Span::styled(
+            "Sources: ",
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        if self.sources.is_empty() {
+            spans.push(Span::styled("—", Style::default().fg(Color::DarkGray)));
         } else {
-            parts.push(Span::styled(
-                "• Ready",
-                Style::default().fg(Color::Green),
+            spans.push(Span::styled(
+                self.sources.join(", "),
+                Style::default().fg(Color::Gray),
             ));
         }
 
-        parts.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
-
-        // Token count display
-        parts.push(Span::styled(
-            format!("~{} tokens", self.total_tokens),
-            Style::default().fg(Color::DarkGray),
-        ));
-
-        if self.last_input_tokens > 0 {
-            parts.push(Span::styled(
-                format!(" (+{})", self.last_input_tokens),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-
-        parts.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
-        parts.push(Span::styled(
-            "ctrl-c quit · ? help",
-            Style::default().fg(Color::DarkGray),
-        ));
-
-        let footer = Paragraph::new(Line::from(parts));
+        let footer = Paragraph::new(Line::from(spans));
         f.render_widget(footer, area);
     }
-}
 
-fn format_mode(mode: RunMode) -> &'static str {
-    match mode {
-        RunMode::Read => "read",
-        RunMode::Work => "work",
+    fn render_status(&self, f: &mut Frame, area: Rect) {
+        f.render_widget(Clear, area);
+        if self.is_processing {
+            return;
+        }
+
+        let mode_chip = if self.ui.auto {
+            "[AUTO]"
+        } else if matches!(self.ui.approvals, ApprovalMode::Ask) {
+            "[ASK]"
+        } else {
+            "[PLAN]"
+        };
+
+        let line = format!(
+            "ready {mode_chip} [{}s] t:{} ────",
+            self.last_run_secs, self.total_tokens
+        );
+        let status = Paragraph::new(Line::from(vec![Span::styled(
+            line,
+            Style::default().fg(Color::DarkGray),
+        )]));
+        f.render_widget(status, area);
     }
 }
 
-fn format_approvals(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::Auto => "auto",
+fn render_model_response(raw: &str) -> Option<String> {
+    let model = match contract::validate_model_response(raw) {
+        Ok(model) => model,
+        Err(_) => return None,
+    };
+
+    if let Some(synthesis) = &model.synthesis {
+        if !synthesis.answer.trim().is_empty() {
+            return Some(synthesis.answer.trim().to_string());
+        }
     }
+
+    if !model.notes.trim().is_empty() {
+        return Some(model.notes.trim().to_string());
+    }
+
+    if let Some(ask) = &model.ask_user {
+        if !ask.trim().is_empty() {
+            return Some(ask.trim().to_string());
+        }
+    }
+
+    Some(String::new())
+}
+
+fn infer_sources(name: &str, output: &str) -> Vec<String> {
+    let mut sources = Vec::new();
+    if name == "shell" {
+        if let Some(cmd) = output.split("Cmd: ").nth(1) {
+            let cmd = cmd.split(" (code=").next().unwrap_or(cmd).trim();
+            let cmd_lower = cmd.to_ascii_lowercase();
+
+            if cmd_lower.contains("eli finance") {
+                if cmd_lower.contains("--provider fred") {
+                    sources.push("FRED".to_string());
+                } else if cmd_lower.contains("--provider mock") {
+                    sources.push("Mock".to_string());
+                } else {
+                    sources.push("Yahoo Finance".to_string());
+                }
+            }
+
+            if cmd_lower.contains("python") {
+                sources.push("Python".to_string());
+            } else if cmd_lower.contains("node") || cmd_lower.contains("npm") {
+                sources.push("Node".to_string());
+            }
+        }
+    }
+
+    sources
+}
+
+fn parse_tool_ok(output: &str) -> Option<bool> {
+    if let Some(code_part) = output.split("code=").nth(1) {
+        let code_str = code_part
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>();
+        if let Ok(code) = code_str.parse::<i32>() {
+            return Some(code == 0);
+        }
+    }
+
+    let lower = output.to_ascii_lowercase();
+    if lower.contains("error:") || lower.contains("failed") {
+        return Some(false);
+    }
+
+    None
 }

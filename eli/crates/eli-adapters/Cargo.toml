@@ -3,16 +3,13 @@ name = "eli-adapters"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "LLM provider adapters for eli"
+description = "Provider adapters for eli coding agent"
 
 [dependencies]
-tokio.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 reqwest.workspace = true
-reqwest-eventsource.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 eli-core.workspace = true

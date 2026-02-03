@@ -1,17 +1,25 @@
 #![forbid(unsafe_code)]
 
+mod chat_ui;
+
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
-use eli_adapters::LlmAdapter;
+use clap::{CommandFactory, Parser, Subcommand};
 use eli_core::config::{self, ApprovalMode, AutoMode, ConfigFile, DisplayMode, Paths, RunMode};
 use eli_core::contract::{self, StepStatus};
 use eli_core::diff::engine::{DiffEngine, DiffResult};
 use eli_core::diff::engine::UndoManager;
 use eli_core::executor::command_runner::{CommandResult, CommandRunner};
-use eli_core::orchestrator::{maybe_compact_memory, run_subagents, SubagentResult};
+use eli_core::orchestrator::{compact_memory_now, maybe_compact_memory, run_subagents, SubagentResult};
 use eli_core::persistence::{EventKind, SessionEvent, SessionStore};
 use eli_core::types::{ChatMessage, ChatRequest, ProviderKind};
+use eli_core::LlmAdapter;
 use futures::StreamExt;
+use console::Term as ConsoleTerm;
+use crossterm::cursor;
+use crossterm::event::{self as ct_event, Event as CtEvent, KeyCode as CtKeyCode, KeyEventKind, KeyModifiers as CtKeyModifiers};
+use crossterm::queue;
+use crossterm::style::{Attribute, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor};
+use crossterm::terminal::{self};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -22,12 +30,21 @@ use rustyline::{
     EventHandler, Helper, KeyCode, KeyEvent, Modifiers, 
 };
 use rustyline::validate::Validator;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::prelude::Widget;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use serde::Serialize;
+use termimad::MadSkin;
+use textwrap::{wrap, Options as WrapOptions};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
-use crossterm::event::{self as ct_event, Event as CtEvent, KeyCode as CtKeyCode, KeyEventKind, KeyModifiers as CtKeyModifiers};
 
 #[derive(Clone, Debug)]
 struct ResearchArtifact {
@@ -38,15 +55,53 @@ struct ResearchArtifact {
     answer_hint: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+struct ToolInfoArgCount {
+    min: usize,
+    max: usize,
+}
+
+#[derive(Clone, Serialize)]
+struct ToolInfoArg {
+    name: String,
+    long: Option<String>,
+    short: Option<String>,
+    help: Option<String>,
+    required: bool,
+    value_type: String,
+    num_args: Option<ToolInfoArgCount>,
+    value_names: Option<Vec<String>>,
+    possible_values: Option<Vec<String>>,
+    default_values: Option<Vec<String>>,
+}
+
+#[derive(Clone, Serialize)]
+struct ToolInfoSubcommand {
+    name: String,
+    about: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct ToolInfoResponse {
+    command: String,
+    about: Option<String>,
+    args: Vec<ToolInfoArg>,
+    subcommands: Vec<ToolInfoSubcommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    available_subcommands: Option<Vec<ToolInfoSubcommand>>,
+}
+
 /// Runtime session state (not persisted to config)
 struct SessionState {
     display_mode: DisplayMode,
     auto_mode: AutoMode,
     total_work_time: Duration,
     step_count: u32,
-    last_run_was_research: bool,
     prompt_queue: Vec<String>,
     input_buffer: String,
+    cursor_pos: usize,
     prompt_history: Vec<String>,
     history_cursor: Option<usize>,
     recent_research: Vec<ResearchArtifact>,
@@ -54,404 +109,190 @@ struct SessionState {
     last_usage: Option<eli_core::types::Usage>,
 }
 
-struct RawModeGuard {
+const FOOTER_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+struct FooterUi {
+    height: u16,
     active: bool,
+    term_width: usize,
+    term_height: usize,
 }
 
-impl RawModeGuard {
+impl FooterUi {
     fn enable() -> Self {
-        use std::io::Write;
-
-        crossterm::terminal::enable_raw_mode().ok();
-        // Hide cursor while we render our own input UI.
-        print!("\x1b[?25l");
-        std::io::stdout().flush().ok();
-        Self { active: true }
+        terminal::enable_raw_mode().ok();
+        let mut out = std::io::stdout();
+        queue!(out, cursor::Hide).ok();
+        out.flush().ok();
+        let (w, h) = terminal_size();
+        let mut this = Self {
+            height: 3,
+            active: true,
+            term_width: w,
+            term_height: h,
+        };
+        // Clear footer area before setting up scroll region
+        this.clear_footer_rows(&mut out);
+        this.apply_scroll_region();
+        this
     }
 
     fn disable(&mut self) {
         if !self.active {
             return;
         }
-        use std::io::Write;
-
         self.active = false;
-        // Always restore cursor visibility.
-        print!("\x1b[?25h");
-        std::io::stdout().flush().ok();
-        crossterm::terminal::disable_raw_mode().ok();
+        // Clear footer area before resetting scroll region
+        let mut out = std::io::stdout();
+        self.clear_footer_rows(&mut out);
+        self.reset_scroll_region();
+        queue!(out, cursor::Show).ok();
+        out.flush().ok();
+        terminal::disable_raw_mode().ok();
+    }
+
+    fn clear_footer_rows(&self, out: &mut std::io::Stdout) {
+        // Reset scroll region temporarily so we can write anywhere
+        write!(out, "\x1b[r").ok();
+        let footer_top = self.term_height.saturating_sub(self.height as usize);
+        for row in footer_top..self.term_height {
+            write!(out, "\x1b[{};1H\x1b[2K", row + 1).ok();
+        }
+        out.flush().ok();
+    }
+
+    fn apply_scroll_region(&mut self) {
+        let bottom = self
+            .term_height
+            .saturating_sub(self.height as usize)
+            .max(1);
+        let mut out = std::io::stdout();
+        // DECSTBM: set scroll region to exclude footer rows.
+        write!(out, "\x1b[1;{}r", bottom).ok();
+        // Keep cursor in scrollable region.
+        write!(out, "\x1b[{};1H", bottom).ok();
+        out.flush().ok();
+    }
+
+    fn reset_scroll_region(&self) {
+        let mut out = std::io::stdout();
+        write!(out, "\x1b[r").ok();
+        out.flush().ok();
+    }
+
+    fn render(&mut self, title: &str, input: &str, cursor_pos: usize) {
+        let (width, height) = terminal_size();
+        if width != self.term_width || height != self.term_height {
+            let mut out = std::io::stdout();
+
+            // 1. Reset scroll region so we can clear anywhere
+            write!(out, "\x1b[r").ok();
+
+            // 2. Save cursor, clear from old footer to end of screen using ED command
+            let old_footer_top = self.term_height.saturating_sub(self.height as usize);
+            let new_footer_top = height.saturating_sub(self.height as usize);
+            let clear_from = old_footer_top.min(new_footer_top);
+
+            // Move to the earliest possible footer position and clear to end of screen
+            write!(out, "\x1b[{};1H", clear_from + 1).ok();  // Move to row
+            write!(out, "\x1b[J").ok();  // Clear from cursor to end of screen (ED0)
+            out.flush().ok();
+
+            // 3. Update dimensions and apply new scroll region
+            self.term_width = width;
+            self.term_height = height;
+            self.apply_scroll_region();
+        }
+        let footer_top = height.saturating_sub(self.height as usize);
+        let rect = Rect::new(0, 0, width as u16, self.height);
+        let mut buf = Buffer::empty(rect);
+
+        // TUI-style cursor rendering
+        let inner_width = width.saturating_sub(4).max(1); // Account for borders and prompt
+        let prompt = "› ";
+        let cursor_pos = cursor_pos.min(input.len());
+        let (before_cursor, after_cursor) = input.split_at(cursor_pos);
+
+        // Get character at cursor (or space if at end)
+        let cursor_char = after_cursor.chars().next().unwrap_or(' ');
+        let rest = if after_cursor.len() > cursor_char.len_utf8() {
+            &after_cursor[cursor_char.len_utf8()..]
+        } else {
+            ""
+        };
+
+        // Build styled line with block cursor
+        let line = Line::from(vec![
+            Span::styled(prompt, Style::default().fg(Color::Cyan)),
+            Span::styled(before_cursor, Style::default().fg(Color::White)),
+            Span::styled(
+                cursor_char.to_string(),
+                Style::default().fg(Color::Black).bg(Color::White),
+            ),
+            Span::styled(rest, Style::default().fg(Color::White)),
+        ]);
+
+        Clear.render(rect, &mut buf);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(Color::Cyan))
+            .title_style(Style::new().fg(Color::Cyan))
+            .title(title);
+        let paragraph = Paragraph::new(line).block(block);
+        paragraph.render(rect, &mut buf);
+
+        let mut out = std::io::stdout();
+        flush_buffer(&mut out, &buf, rect, footer_top as u16);
+        let scroll_y = footer_top.saturating_sub(1);
+        queue!(out, cursor::MoveTo(0, scroll_y as u16)).ok();
+        out.flush().ok();
     }
 }
 
-impl Drop for RawModeGuard {
+impl Drop for FooterUi {
     fn drop(&mut self) {
         self.disable();
     }
 }
 
-struct StickyFooter {
-    #[allow(dead_code)]
-    raw: RawModeGuard,
-    width: usize,
-    height: usize,
-    footer_lines: usize,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptMode {
+    Ask,
+    Plan,
+    Auto,
 }
 
-impl StickyFooter {
-    fn enable(footer_lines: usize) -> Self {
-        let raw = RawModeGuard::enable();
-        let (width, height) = terminal_size();
-        let this = Self {
-            raw,
-            width,
-            height,
-            footer_lines: footer_lines.max(1),
-        };
-        this.apply_scroll_region();
-        this
-    }
+fn prompt_mode(state: &SessionState, chat: &eli_core::config::ChatConfig) -> PromptMode {
+    let _ = (state, chat);
+    PromptMode::Auto
+}
 
-    fn apply_scroll_region(&self) {
-        use std::io::Write;
-        let bottom = self.scroll_bottom();
-        // Set scroll region to exclude the footer area at the bottom.
-        // 1-based rows: [1, bottom] scroll; [bottom+1, height] fixed footer.
-        print!("\x1b[1;{bottom}r");
-        // Keep the cursor in the scrollable region so normal println! output doesn't overwrite the footer.
-        print!("\x1b[{bottom};1H");
-        std::io::stdout().flush().ok();
-    }
+fn print_history_block(lines: Vec<String>) {
+    use std::io::Write;
 
-    fn reset_scroll_region(&self) {
-        use std::io::Write;
-        // Reset scroll region to full screen.
-        print!("\x1b[r");
-        std::io::stdout().flush().ok();
-    }
-
-    fn scroll_bottom(&self) -> usize {
-        // Ensure there is always at least 1 scrollable row.
-        self.height.saturating_sub(self.footer_lines).max(1)
-    }
-
-    fn footer_top(&self) -> usize {
-        self.scroll_bottom().saturating_add(1)
-    }
-
-    fn update_layout(&mut self, footer_lines: usize) {
-        let (width, height) = terminal_size();
-        let footer_lines = footer_lines.max(1);
-        if width == self.width && height == self.height && footer_lines == self.footer_lines {
-            return;
-        }
-        self.width = width;
-        self.height = height;
-        self.footer_lines = footer_lines;
-        self.apply_scroll_region();
-    }
-
-    fn render(&mut self, lines: &[String]) {
-        use std::io::Write;
-
-        let top = self.footer_top();
-        let mut row = top;
-
-        for line in lines {
-            if row > self.height {
-                break;
-            }
-            print!("\x1b[{row};1H\x1b[K{line}", row = row, line = line);
-            row += 1;
-        }
-
-        // Clear any remaining footer rows (when the footer shrinks).
-        while row <= self.height {
-            print!("\x1b[{row};1H\x1b[K", row = row);
-            row += 1;
-        }
-
-        // Return cursor to bottom of scroll region for normal printing.
-        let bottom = self.scroll_bottom();
-        print!("\x1b[{bottom};1H", bottom = bottom);
+    let out = format_indented_block(&lines);
+    if !out.is_empty() {
+        print!("{}", out);
         std::io::stdout().flush().ok();
     }
 }
 
-impl Drop for StickyFooter {
-    fn drop(&mut self) {
-        use std::io::Write;
-
-        // Clear the footer region so we don't leave a stale box on screen when returning to normal output.
-        let top = self.footer_top();
-        for row in top..=self.height {
-            print!("\x1b[{row};1H\x1b[K", row = row);
-        }
-        self.reset_scroll_region();
-        std::io::stdout().flush().ok();
-        // `RawModeGuard` drop restores cursor + raw mode.
-    }
+fn print_history_line(line: String) {
+    print_history_block(vec![line]);
 }
 
-fn build_processing_footer_lines(
-    spinner: usize,
-    queue_len: usize,
-    phase: &str,
-    elapsed: Duration,
-    input_buffer: &str,
-    usage: &eli_core::types::Usage,
-) -> Vec<String> {
-    let (width, _) = terminal_size();
-    let spinner = style::SPINNER[spinner % style::SPINNER.len()];
-    let elapsed_display = format!("[{}s]", elapsed.as_secs());
-    let queue_indicator = if queue_len > 0 {
-        format!(" [{}Q]", queue_len)
-    } else {
-        String::new()
-    };
-    let total_tokens = usage.total_tokens;
-
-    if width < 12 {
-        let line_raw = format!("{spinner} {phase}{queue_indicator} {elapsed_display}  t:{total_tokens}");
-        let line = truncate_to_visible_width(&line_raw, width.saturating_sub(1));
-        return vec![line];
-    }
-
-    let inner_width = width.saturating_sub(2).max(1);
-    let h = "─".repeat(inner_width);
-    let top = format!("{}{}{}{}{}", style::BLUE, style::TL, h, style::TR, style::RESET);
-    let bottom = format!("{}{}{}{}{}", style::BLUE, style::BL, h, style::BR, style::RESET);
-
-    let top_status_raw = format!(
-        "{} {spinner} {phase}{queue_indicator} {elapsed_display}{}",
-        style::BLUE,
-        style::RESET
-    );
-    let top_status = truncate_to_visible_width(&top_status_raw, width + 10);
-
-    let bottom_status_raw = format!("{} {total_tokens} tokens{}", style::DARK_GRAY, style::RESET);
-    let bottom_status = truncate_to_visible_width(&bottom_status_raw, width + 10);
-
-    let input_lines_raw = wrap_with_prefix(input_buffer, " → ", "   ", inner_width);
-    let mut input_lines: Vec<String> = Vec::with_capacity(input_lines_raw.len());
-    for raw in input_lines_raw {
-        let text = truncate_to_visible_width(&raw, inner_width);
-        let visible = text.width().min(inner_width);
-        let pad = " ".repeat(inner_width.saturating_sub(visible));
-        input_lines.push(format!(
-            "{}{}{}{}{}{}{}{}",
-            style::BLUE,
-            style::V,
-            style::RESET,
-            text,
-            pad,
-            style::BLUE,
-            style::V,
-            style::RESET
-        ));
-    }
-
-    let mut lines: Vec<String> = Vec::new();
-    lines.push(top_status);
-    lines.push(top);
-    lines.extend(input_lines);
-    lines.push(bottom);
-    lines.push(bottom_status);
-    lines
+fn apply_prompt_mode(_mode: PromptMode, state: &mut SessionState, chat: &mut eli_core::config::ChatConfig) {
+    state.auto_mode = AutoMode::Autonomous;
+    chat.approvals = ApprovalMode::Auto;
+    chat.approvals_commands = None;
+    chat.approvals_diffs = None;
+    chat.auto_mode = state.auto_mode;
 }
 
-fn build_prompt_footer_lines(
-    spinner: usize,
-    queue_len: usize,
-    phase: &str,
-    elapsed: Duration,
-    input_buffer: &str,
-    total_tokens: u32,
-    prompt_history_len: usize,
-    history_cursor: Option<usize>,
-) -> Vec<String> {
-    let (width, _) = terminal_size();
-    let spinner = style::SPINNER[spinner % style::SPINNER.len()];
-    let elapsed_display = format!("[{}s]", elapsed.as_secs());
-    let queue_indicator = if queue_len > 0 {
-        format!(" [{}Q]", queue_len)
-    } else {
-        String::new()
-    };
-
-    if width < 12 {
-        let line_raw =
-            format!("{spinner} {phase}{queue_indicator} {elapsed_display}  tokens:{total_tokens}");
-        let line = truncate_to_visible_width(&line_raw, width.saturating_sub(1));
-        return vec![line];
-    }
-
-    let inner_width = width.saturating_sub(2).max(1);
-    let h = "─".repeat(inner_width);
-    let top = format!("{}{}{}{}{}", style::BLUE, style::TL, h, style::TR, style::RESET);
-    let bottom = format!("{}{}{}{}{}", style::BLUE, style::BL, h, style::BR, style::RESET);
-
-    let input_tokens_est = input_buffer.len().saturating_div(4);
-    let input_tokens_est = if input_buffer.trim().is_empty() {
-        0
-    } else {
-        input_tokens_est.max(1)
-    };
-    let history_hint = match history_cursor {
-        Some(idx) => format!("  hist:{}/{}", idx + 1, prompt_history_len),
-        None => String::new(),
-    };
-
-    let top_status_raw = format!(
-        "{} {spinner} {phase}{queue_indicator} {elapsed_display}{}",
-        style::BLUE,
-        style::RESET
-    );
-    let top_status = truncate_to_visible_width(&top_status_raw, width + 10);
-
-    let bottom_status_raw = if input_tokens_est > 0 {
-        format!(
-            "{} tokens:{total_tokens}  input:~{input_tokens_est}{history_hint}{}",
-            style::DARK_GRAY,
-            style::RESET
-        )
-    } else {
-        format!(
-            "{} tokens:{total_tokens}{history_hint}{}",
-            style::DARK_GRAY,
-            style::RESET
-        )
-    };
-    let bottom_status = truncate_to_visible_width(&bottom_status_raw, width + 10);
-
-    let input_lines_raw = wrap_with_prefix(input_buffer, " → ", "   ", inner_width);
-    let mut input_lines: Vec<String> = Vec::with_capacity(input_lines_raw.len());
-    for raw in input_lines_raw {
-        let text = truncate_to_visible_width(&raw, inner_width);
-        let visible = text.width().min(inner_width);
-        let pad = " ".repeat(inner_width.saturating_sub(visible));
-        input_lines.push(format!(
-            "{}{}{}{}{}{}{}{}",
-            style::BLUE,
-            style::V,
-            style::RESET,
-            text,
-            pad,
-            style::BLUE,
-            style::V,
-            style::RESET
-        ));
-    }
-
-    let mut lines: Vec<String> = Vec::new();
-    lines.push(top_status);
-    lines.push(top);
-    lines.extend(input_lines);
-    lines.push(bottom);
-    lines.push(bottom_status);
-    lines
+fn cycle_prompt_mode(state: &mut SessionState, chat: &mut eli_core::config::ChatConfig) {
+    apply_prompt_mode(PromptMode::Auto, state, chat);
 }
 
-fn render_processing_footer(footer: &mut Option<StickyFooter>, lines: Vec<String>) {
-    if footer.is_none() {
-        *footer = Some(StickyFooter::enable(lines.len()));
-    }
-    if let Some(footer) = footer.as_mut() {
-        footer.update_layout(lines.len());
-        footer.render(&lines);
-    }
-}
-
-fn drain_run_key_events(
-    state: &mut SessionState,
-    interrupted: &mut bool,
-    interrupted_by_esc: &mut bool,
-) -> bool {
-    let mut changed = false;
-    while ct_event::poll(Duration::from_millis(0)).unwrap_or(false) {
-        let Ok(CtEvent::Key(key)) = ct_event::read() else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        match key.code {
-            CtKeyCode::Char(c) => {
-                state.input_buffer.push(c);
-                changed = true;
-            }
-            CtKeyCode::Backspace => {
-                state.input_buffer.pop();
-                changed = true;
-            }
-            CtKeyCode::Enter => {
-                let trimmed = state.input_buffer.trim().to_string();
-                if !trimmed.is_empty() {
-                    if trimmed == "/stop" || trimmed == "/interrupt" {
-                        *interrupted = true;
-                        state.input_buffer.clear();
-                        changed = true;
-                        break;
-                    }
-
-                    println!("{}  ›{} {}", style::CYAN, style::RESET, trimmed);
-                    state.queue_prompt(trimmed.clone());
-                    state.prompt_history.push(trimmed);
-                    state.input_buffer.clear();
-                    changed = true;
-                }
-            }
-            CtKeyCode::Esc => {
-                *interrupted = true;
-                *interrupted_by_esc = true;
-                state.input_buffer.clear();
-                changed = true;
-                break;
-            }
-            _ => {}
-        }
-    }
-    changed
-}
-
-fn drain_run_key_events_queue_only(state: &mut SessionState) -> bool {
-    let mut changed = false;
-    while ct_event::poll(Duration::from_millis(0)).unwrap_or(false) {
-        let Ok(CtEvent::Key(key)) = ct_event::read() else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        match key.code {
-            CtKeyCode::Char(c) => {
-                state.input_buffer.push(c);
-                changed = true;
-            }
-            CtKeyCode::Backspace => {
-                state.input_buffer.pop();
-                changed = true;
-            }
-            CtKeyCode::Enter => {
-                let trimmed = state.input_buffer.trim().to_string();
-                if !trimmed.is_empty() {
-                    println!("{}  ›{} {}", style::CYAN, style::RESET, trimmed);
-                    state.queue_prompt(trimmed.clone());
-                    state.prompt_history.push(trimmed);
-                    state.input_buffer.clear();
-                    changed = true;
-                }
-            }
-            CtKeyCode::Esc => {
-                state.input_buffer.clear();
-                changed = true;
-            }
-            _ => {}
-        }
-    }
-    changed
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AgentProfile {
@@ -466,9 +307,9 @@ impl SessionState {
             auto_mode: cfg.auto_mode,
             total_work_time: Duration::ZERO,
             step_count: 0,
-            last_run_was_research: false,
             prompt_queue: Vec::new(),
             input_buffer: String::new(),
+            cursor_pos: 0,
             prompt_history: Vec::new(),
             history_cursor: None,
             recent_research: Vec::new(),
@@ -566,28 +407,16 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         desc: "full output (tools, history, details)",
     },
     SlashCommand {
+        name: "/debug",
+        desc: "debug output (raw request/response + tool output + observation)",
+    },
+    SlashCommand {
         name: "/standard",
         desc: "brief output (recent stream, summary)",
     },
     SlashCommand {
         name: "/brief",
         desc: "alias for /standard",
-    },
-    SlashCommand {
-        name: "/plan",
-        desc: "require human approval for plans",
-    },
-    SlashCommand {
-        name: "/auto",
-        desc: "autonomous: AI self-reviews until done",
-    },
-    SlashCommand {
-        name: "/autonomous",
-        desc: "alias for /auto",
-    },
-    SlashCommand {
-        name: "/normal",
-        desc: "default execution mode",
     },
     SlashCommand {
         name: "/mode",
@@ -608,10 +437,6 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/yolo",
         desc: "work mode; auto approvals",
-    },
-    SlashCommand {
-        name: "/quant",
-        desc: "market/time-series research",
     },
     SlashCommand {
         name: "/model",
@@ -650,8 +475,20 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         desc: "alias for /status",
     },
     SlashCommand {
+        name: "/compact",
+        desc: "summarize older context (reduce tokens)",
+    },
+    SlashCommand {
         name: "/reset",
         desc: "clear conversation",
+    },
+    SlashCommand {
+        name: "/new",
+        desc: "alias for /reset",
+    },
+    SlashCommand {
+        name: "/tip",
+        desc: "toggle tips (standard mode)",
     },
     SlashCommand {
         name: "/undo",
@@ -857,7 +694,7 @@ enum Command {
 
     /// Print or set config values
     Config {
-        /// Set a config value: provider, model, mem_steps, key, compact, compact_trigger, compact_keep, summary_model, parallel_commands, parallel_subagents
+        /// Set a config value: provider, model, mem_steps, key, sec_user_agent, compact, compact_trigger, compact_keep, summary_model, parallel_commands, parallel_subagents, scrollback_max_lines
         #[arg(long)]
         set: Option<String>,
 
@@ -866,10 +703,24 @@ enum Command {
         value: Option<String>,
     },
 
+    /// Emit JSON schema for a CLI subcommand (hidden)
+    #[command(hide = true)]
+    ToolInfo {
+        /// Subcommand path (e.g., finance timeseries)
+        #[arg(value_name = "PATH", num_args = 0..)]
+        path: Vec<String>,
+    },
+
     /// Chat in a readline loop (default)
     Chat,
 
-    /// One-shot quantitative research loop (no web; data via finance tool)
+    /// Chat in debug mode (raw request/response + full tool output + observation)
+    Debug,
+
+    /// Chat in raw mode (no extra dumps)
+    Raw,
+
+    /// One-shot quantitative research loop
     Research {
         /// Research question/prompt (quote it)
         query: String,
@@ -882,6 +733,12 @@ enum Command {
     Finance {
         #[command(subcommand)]
         cmd: FinanceCommand,
+    },
+
+    /// Web tools (crawl, search, read)
+    Web {
+        #[command(subcommand)]
+        cmd: WebCommand,
     },
 }
 
@@ -903,6 +760,96 @@ enum FinanceCommand {
     News(FinanceNewsArgs),
     /// Fetch key macro economic indicators (CPI, Unemployment, GDP, etc).
     Macro(FinanceMacroArgs),
+    /// Latest spot prices from Pyth Hermes (REST).
+    Prices(FinancePricesArgs),
+    /// Prediction market discovery + pricing (Kalshi default; falls back to Polymarket).
+    Odds(FinanceOddsArgs),
+    /// Listed options chains with IV/skew summaries (Yahoo Finance).
+    Options(FinanceOptionsArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum WebCommand {
+    /// Crawl a website and extract content from all discovered pages.
+    Crawl(WebCrawlArgs),
+    /// Search the web using DuckDuckGo.
+    Search(WebSearchArgs),
+    /// Read and extract content from a single URL.
+    Read(WebReadArgs),
+    /// Extract key facts from content (URL, file, or text).
+    Extract(WebExtractArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct WebCrawlArgs {
+    /// URL to start crawling from.
+    #[arg(long)]
+    url: String,
+
+    /// Maximum number of pages to crawl (default: 50).
+    #[arg(long, default_value = "50")]
+    max_pages: usize,
+
+    /// Respect robots.txt (default: true).
+    #[arg(long, default_value = "true")]
+    respect_robots: bool,
+
+    /// Include subdomains in crawl (default: false).
+    #[arg(long, default_value = "false")]
+    subdomains: bool,
+
+    /// Output file path (JSON).
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct WebSearchArgs {
+    /// Search query.
+    #[arg(long)]
+    query: String,
+
+    /// Output file path (JSON).
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct WebReadArgs {
+    /// URL to read content from.
+    #[arg(long)]
+    url: String,
+
+    /// Output file path (JSON).
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct WebExtractArgs {
+    /// URL to fetch and extract from.
+    #[arg(long)]
+    url: Option<String>,
+
+    /// File path to extract from.
+    #[arg(long)]
+    file: Option<PathBuf>,
+
+    /// Inline text to extract from (use heredoc for large content).
+    #[arg(long)]
+    text: Option<String>,
+
+    /// Number of bullet points to extract (default: 10).
+    #[arg(long, default_value = "10")]
+    bullets: usize,
+
+    /// Focus extraction on specific topic.
+    #[arg(long)]
+    focus: Option<String>,
+
+    /// Output file path (JSON).
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -918,10 +865,11 @@ pub struct FinanceMacroArgs {
     pub out: Option<PathBuf>,
 }
 
+
 #[derive(clap::Args, Debug)]
 struct FinanceNewsArgs {
     /// Ticker to search for.
-    #[arg(long)]
+    #[arg(long, visible_alias = "tickers")]
     ticker: String,
 
     /// Date of interest (YYYY-MM-DD).
@@ -936,7 +884,7 @@ struct FinanceNewsArgs {
 #[derive(clap::Args, Debug)]
 struct FinanceSnapshotArgs {
     /// Tickers to fetch (repeatable or comma-separated).
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, visible_alias = "ticker", value_delimiter = ',')]
     tickers: Vec<String>,
 
     /// Optional file with tickers (one per line).
@@ -959,7 +907,7 @@ struct FinanceSnapshotArgs {
 #[derive(clap::Args, Debug)]
 struct FinanceFundamentalsArgs {
     /// Ticker to fetch fundamentals for.
-    #[arg(long)]
+    #[arg(long, visible_alias = "tickers")]
     ticker: String,
 
     /// Output format (currently: json).
@@ -987,9 +935,141 @@ struct FinanceSearchArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct FinancePricesArgs {
+    /// Discover price feeds by query (e.g. "pepe").
+    #[arg(long)]
+    query: Option<String>,
+
+    /// Asset type filter (e.g. crypto, equity, fx, metal, rates).
+    #[arg(long)]
+    asset_type: Option<String>,
+
+    /// Explicit Pyth price feed IDs (repeatable or comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    ids: Vec<String>,
+
+    /// Output format (currently: json).
+    #[arg(long, default_value = "json")]
+    format: String,
+
+    /// Write full JSON output to a file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct FinanceOddsArgs {
+    /// Data source: kalshi (default), polymarket, or auto (kalshi then polymarket).
+    #[arg(long)]
+    provider: Option<String>,
+    /// Kalshi series ticker.
+    #[arg(long)]
+    series: Option<String>,
+
+    /// Event ticker.
+    #[arg(long)]
+    event: Option<String>,
+
+    /// Market ticker.
+    #[arg(long)]
+    market: Option<String>,
+
+    /// Filter by status (e.g. open).
+    #[arg(long)]
+    status: Option<String>,
+
+    /// Page size limit.
+    #[arg(long)]
+    limit: Option<usize>,
+
+    /// Pagination cursor.
+    #[arg(long)]
+    cursor: Option<String>,
+
+    /// Max pages to fetch (Kalshi list endpoints).
+    #[arg(long)]
+    max_pages: Option<usize>,
+
+    /// List series (Kalshi only).
+    #[arg(long)]
+    list_series: bool,
+
+    /// List events.
+    #[arg(long)]
+    list_events: bool,
+
+    /// List markets.
+    #[arg(long)]
+    list_markets: bool,
+
+    /// List tags (Polymarket only).
+    #[arg(long)]
+    list_tags: bool,
+
+    /// Category filter (Kalshi list endpoints).
+    #[arg(long)]
+    category: Option<String>,
+
+    /// Case-insensitive literal substring match (titles/tickers/slugs).
+    #[arg(long)]
+    search: Option<String>,
+
+    /// Include orderbook depth (heavier call; Polymarket orderbook supported).
+    #[arg(long)]
+    orderbook: bool,
+
+    /// Orderbook depth (levels).
+    #[arg(long)]
+    depth: Option<usize>,
+
+    /// Output format (currently: json).
+    #[arg(long, default_value = "json")]
+    format: String,
+
+    /// Write full JSON output to a file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct FinanceOptionsArgs {
+    /// Underlying ticker (e.g. INTC).
+    #[arg(long, visible_alias = "tickers")]
+    ticker: String,
+
+    /// Expiration date (YYYY-MM-DD). If omitted, uses the first available expiry.
+    #[arg(long)]
+    expiry: Option<String>,
+
+    /// Filter: calls | puts | both (default: both).
+    #[arg(long = "type", value_name = "calls|puts|both")]
+    option_type: Option<String>,
+
+    /// Only return strikes within this percentage of the underlying (e.g. 10 = +/-10%).
+    #[arg(long = "near-money")]
+    near_money: Option<f64>,
+
+    /// Return summary metrics only (no full chain).
+    #[arg(long)]
+    summary: bool,
+
+    /// List available expirations only.
+    #[arg(long)]
+    expirations: bool,
+
+    /// Output format (currently: json).
+    #[arg(long, default_value = "json")]
+    format: String,
+
+    /// Write full JSON output to a file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
 struct FinanceFilingsArgs {
     /// Ticker to fetch filings for.
-    #[arg(long)]
+    #[arg(long, visible_alias = "tickers")]
     ticker: String,
 
     /// Form types to include (comma-separated), e.g. 8-K,10-K,10-Q. Defaults to 8-K,10-K,10-Q.
@@ -1024,7 +1104,7 @@ struct FinanceFilingsArgs {
 #[derive(clap::Args, Debug)]
 struct FinanceTimeseriesArgs {
     /// Tickers to fetch (repeatable or comma-separated).
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, visible_alias = "ticker", value_delimiter = ',')]
     tickers: Vec<String>,
 
     /// Optional file with tickers (one per line).
@@ -1071,17 +1151,21 @@ pub async fn run() -> Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
+    let cli = Cli::try_parse()?;
 
     match cli.cmd {
-        None => cmd_chat(cli.provider, cli.model).await,
+        None => cmd_chat(cli.provider, cli.model, None).await,
         Some(Command::Setup) => cmd_setup().await,
         Some(Command::Init) => cmd_init().await,
         Some(Command::Config { set, value }) => cmd_config(set, value).await,
-        Some(Command::Chat) => cmd_chat(cli.provider, cli.model).await,
+        Some(Command::ToolInfo { path }) => cmd_tool_info(path),
+        Some(Command::Chat) => cmd_chat(cli.provider, cli.model, None).await,
+        Some(Command::Debug) => cmd_chat(cli.provider, cli.model, Some(DisplayMode::Debug)).await,
+        Some(Command::Raw) => cmd_chat(cli.provider, cli.model, Some(DisplayMode::Raw)).await,
         Some(Command::Research { query }) => cmd_research(query, cli.provider, cli.model).await,
         Some(Command::Tui) => cmd_tui().await,
         Some(Command::Finance { cmd }) => cmd_finance(cmd).await,
+        Some(Command::Web { cmd }) => cmd_web(cmd).await,
     }
 }
 
@@ -1127,7 +1211,7 @@ async fn cmd_research(query: String, provider: Option<String>, model: Option<Str
     info!(session_id = %session_id, provider = %cfg.chat.provider, model = %cfg.chat.model, "starting research");
 
     let mut memory = eli_core::memory::Memory::new(cfg.chat.mem_steps);
-    memory.set_system(eli_core::contract::quant_system_prompt());
+    memory.set_system(eli_core::contract::system_prompt());
 
     // Inject existing instincts into memory
     if instincts_dir.exists() {
@@ -1180,7 +1264,149 @@ async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
         FinanceCommand::Filings(args) | FinanceCommand::Sec(args) => cmd_finance_filings(args).await,
         FinanceCommand::News(args) => cmd_finance_news(args).await,
         FinanceCommand::Macro(args) => cmd_finance_macro(args).await,
+        FinanceCommand::Prices(args) => cmd_finance_prices(args).await,
+        FinanceCommand::Odds(args) => cmd_finance_odds(args).await,
+        FinanceCommand::Options(args) => cmd_finance_options(args).await,
     }
+}
+
+async fn cmd_web(cmd: WebCommand) -> Result<()> {
+    match cmd {
+        WebCommand::Crawl(args) => cmd_web_crawl(args).await,
+        WebCommand::Search(args) => cmd_web_search(args).await,
+        WebCommand::Read(args) => cmd_web_read(args).await,
+        WebCommand::Extract(args) => cmd_web_extract(args).await,
+    }
+}
+
+async fn cmd_web_crawl(args: WebCrawlArgs) -> Result<()> {
+    let req = eli_core::web::CrawlRequest {
+        url: args.url,
+        max_pages: Some(args.max_pages),
+        respect_robots: args.respect_robots,
+        include_subdomains: args.subdomains,
+    };
+
+    let resp = eli_core::web::crawl_website(req)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))
+        .context("crawl website")?;
+
+    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+
+    if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&out_path, &json).context("write --out")?;
+        println!(
+            "{{\"ok\":true,\"path\":{}}}",
+            serde_json::to_string(&out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
+    }
+
+    println!("{json}");
+    Ok(())
+}
+
+async fn cmd_web_search(args: WebSearchArgs) -> Result<()> {
+    let hits = eli_core::web::providers::general::search_general(&args.query)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))
+        .context("web search")?;
+
+    let resp = eli_core::web::WebSearchResponse { hits };
+    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+
+    if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&out_path, &json).context("write --out")?;
+        println!(
+            "{{\"ok\":true,\"path\":{}}}",
+            serde_json::to_string(&out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
+    }
+
+    println!("{json}");
+    Ok(())
+}
+
+async fn cmd_web_read(args: WebReadArgs) -> Result<()> {
+    let article = eli_core::web::providers::read::read_url(&args.url)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))
+        .context("read url")?;
+
+    let json = serde_json::to_string_pretty(&article).context("serialize response")?;
+
+    if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&out_path, &json).context("write --out")?;
+        println!(
+            "{{\"ok\":true,\"path\":{}}}",
+            serde_json::to_string(&out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
+    }
+
+    println!("{json}");
+    Ok(())
+}
+
+async fn cmd_web_extract(args: WebExtractArgs) -> Result<()> {
+    let resp = if let Some(url) = args.url {
+        eli_core::extraction::extract_from_url(&url, args.bullets, args.focus)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .context("extract from url")?
+    } else if let Some(file) = args.file {
+        eli_core::extraction::extract_from_file(&file, args.bullets, args.focus)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .context("extract from file")?
+    } else if let Some(text) = args.text {
+        let req = eli_core::extraction::ExtractRequest {
+            content: text,
+            source: "inline".to_string(),
+            bullets: args.bullets,
+            focus: args.focus,
+        };
+        eli_core::extraction::extract_facts(req)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .context("extract from text")?
+    } else {
+        anyhow::bail!("must provide --url, --file, or --text");
+    };
+
+    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+
+    if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&out_path, &json).context("write --out")?;
+        println!(
+            "{{\"ok\":true,\"path\":{}}}",
+            serde_json::to_string(&out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
+    }
+
+    println!("{json}");
+    Ok(())
 }
 
 /// Redirect JSON output files to eli_research/data/ if they're in the project root.
@@ -1224,6 +1450,156 @@ async fn cmd_finance_macro(args: FinanceMacroArgs) -> Result<()> {
     if let Some(out_path) = args.out {
         let out_path = redirect_finance_output(out_path);
         std::fs::write(&out_path, &json).context("write output file")?;
+    }
+
+    println!("{json}");
+    Ok(())
+}
+
+async fn cmd_finance_prices(args: FinancePricesArgs) -> Result<()> {
+    if args.format.trim().to_ascii_lowercase() != "json" {
+        anyhow::bail!("unsupported --format (only 'json' is implemented)");
+    }
+
+    let req = eli_core::finance::PricesRequest {
+        query: args.query,
+        asset_type: args.asset_type,
+        ids: args.ids,
+    };
+
+    let resp = eli_core::finance::fetch_prices(req)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("fetch prices")?;
+
+    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+
+    if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&out_path, json).context("write --out")?;
+        println!(
+            "{{\"ok\":true,\"path\":{}}}",
+            serde_json::to_string(&out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
+    }
+
+    println!("{json}");
+    Ok(())
+}
+
+async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
+    if args.format.trim().to_ascii_lowercase() != "json" {
+        anyhow::bail!("unsupported --format (only 'json' is implemented)");
+    }
+
+    let provider = args.provider.as_ref().map(|s| s.trim().to_ascii_lowercase());
+    let provider = match provider {
+        None => None,
+        Some(p) if p.is_empty() => None,
+        Some(p) => match p.as_str() {
+            "kalshi" | "polymarket" | "auto" => Some(p),
+            other => anyhow::bail!(
+                "unsupported --provider '{other}' (supported: kalshi, polymarket, auto)"
+            ),
+        },
+    };
+
+    let req = eli_core::finance::OddsRequest {
+        provider,
+        disable_kalshi: false,
+        series_ticker: args.series,
+        event_ticker: args.event,
+        market_ticker: args.market,
+        status: args.status,
+        limit: args.limit,
+        cursor: args.cursor,
+        max_pages: args.max_pages,
+        include_orderbook: args.orderbook,
+        orderbook_depth: args.depth,
+        list_series: args.list_series,
+        list_events: args.list_events,
+        list_markets: args.list_markets,
+        list_tags: args.list_tags,
+        category: args.category,
+        search: args.search,
+    };
+
+    let resp = eli_core::finance::fetch_odds(req)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("fetch odds")?;
+
+    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+
+    if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&out_path, json).context("write --out")?;
+        println!(
+            "{{\"ok\":true,\"path\":{}}}",
+            serde_json::to_string(&out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
+    }
+
+    println!("{json}");
+    Ok(())
+}
+
+async fn cmd_finance_options(args: FinanceOptionsArgs) -> Result<()> {
+    if args.format.trim().to_ascii_lowercase() != "json" {
+        anyhow::bail!("unsupported --format (only 'json' is implemented)");
+    }
+
+    if args.summary && args.expirations {
+        anyhow::bail!("use only one of --summary or --expirations");
+    }
+
+    let option_type = match args.option_type.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+        None => None,
+        Some(t) if t == "both" || t.is_empty() => None,
+        Some(t) if t == "calls" || t == "puts" => Some(t),
+        Some(other) => anyhow::bail!("invalid --type '{other}' (expected calls|puts|both)"),
+    };
+
+    let req = eli_core::finance::OptionsRequest {
+        ticker: args.ticker,
+        expiry: args.expiry,
+        option_type,
+        near_money_pct: args.near_money,
+        summary_only: args.summary,
+        list_expirations: args.expirations,
+        multi_expiry: false,
+        num_expiries: None,
+    };
+
+    let resp = eli_core::finance::fetch_options(req)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("fetch options")?;
+
+    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+
+    if let Some(out_path) = args.out {
+        let out_path = redirect_finance_output(out_path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&out_path, json).context("write --out")?;
+        println!(
+            "{{\"ok\":true,\"path\":{}}}",
+            serde_json::to_string(&out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
     }
 
     println!("{json}");
@@ -1672,8 +2048,12 @@ async fn cmd_config(set: Option<String>, value: Option<String>) -> Result<()> {
                 cfg.chat.parallel_subagents = val.parse::<u32>().context("parallel_subagents must be a number")?;
                 println!("Set parallel_subagents = {}", cfg.chat.parallel_subagents);
             }
+            "scrollback_max_lines" | "scrollback" => {
+                cfg.chat.scrollback_max_lines = val.parse::<usize>().context("scrollback_max_lines must be a number")?;
+                println!("Set scrollback_max_lines = {}", cfg.chat.scrollback_max_lines);
+            }
             other => {
-                anyhow::bail!("Unknown config key: {}. Valid keys: provider, model, mem_steps, key, anthropic_key, openai_key, openrouter_key, compact, compact_trigger, compact_keep, summary_model, parallel_commands, parallel_subagents", other);
+                anyhow::bail!("Unknown config key: {}. Valid keys: provider, model, mem_steps, key, anthropic_key, openai_key, openrouter_key, sec_user_agent, compact, compact_trigger, compact_keep, summary_model, parallel_commands, parallel_subagents, scrollback_max_lines", other);
             }
         }
 
@@ -1688,10 +2068,735 @@ async fn cmd_config(set: Option<String>, value: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()> {
+fn build_tool_info(path: &[String]) -> ToolInfoResponse {
+    use clap::{ArgAction, ValueHint};
+
+    let mut cmd = Cli::command();
+    let mut full_path = vec![cmd.get_name().to_string()];
+    let mut missing: Option<String> = None;
+
+    for seg in path {
+        let next = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == seg.as_str())
+            .cloned();
+        if let Some(sub) = next {
+            cmd = sub;
+            full_path.push(seg.clone());
+        } else {
+            missing = Some(seg.clone());
+            break;
+        }
+    }
+
+    let args: Vec<ToolInfoArg> = cmd
+        .get_arguments()
+        .map(|arg| {
+            let num_args = arg.get_num_args().map(|range| ToolInfoArgCount {
+                min: range.min_values(),
+                max: range.max_values(),
+            });
+
+            let value_names = arg
+                .get_value_names()
+                .map(|names| names.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+
+            let possible_values = arg.get_value_parser().possible_values().map(|vals| {
+                vals.map(|v| v.get_name().to_string()).collect::<Vec<_>>()
+            });
+
+            let default_values = arg
+                .get_default_values()
+                .iter()
+                .map(|v| v.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let default_values = if default_values.is_empty() {
+                None
+            } else {
+                Some(default_values)
+            };
+
+            let action = arg.get_action();
+            let mut value_type = if matches!(*action, ArgAction::SetTrue | ArgAction::SetFalse) {
+                "bool".to_string()
+            } else if matches!(*action, ArgAction::Count) {
+                "count".to_string()
+            } else if possible_values.is_some() {
+                "enum".to_string()
+            } else {
+                "string".to_string()
+            };
+
+            let type_id = arg.get_value_parser().type_id();
+            if value_type == "string" {
+                if type_id == std::any::TypeId::of::<bool>() {
+                    value_type = "bool".to_string();
+                } else if type_id == std::any::TypeId::of::<std::path::PathBuf>() {
+                    value_type = "path".to_string();
+                } else if type_id == std::any::TypeId::of::<usize>()
+                    || type_id == std::any::TypeId::of::<u64>()
+                    || type_id == std::any::TypeId::of::<u32>()
+                    || type_id == std::any::TypeId::of::<u16>()
+                    || type_id == std::any::TypeId::of::<u8>()
+                    || type_id == std::any::TypeId::of::<i64>()
+                    || type_id == std::any::TypeId::of::<i32>()
+                    || type_id == std::any::TypeId::of::<i16>()
+                    || type_id == std::any::TypeId::of::<i8>()
+                    || type_id == std::any::TypeId::of::<f64>()
+                    || type_id == std::any::TypeId::of::<f32>()
+                {
+                    value_type = "number".to_string();
+                }
+            }
+
+            if let ValueHint::FilePath
+            | ValueHint::DirPath
+            | ValueHint::ExecutablePath = arg.get_value_hint()
+            {
+                value_type = "path".to_string();
+            }
+
+            ToolInfoArg {
+                name: arg.get_id().to_string(),
+                long: arg.get_long().map(|s| s.to_string()),
+                short: arg.get_short().map(|c| c.to_string()),
+                help: arg.get_help().map(|s| s.to_string()),
+                required: arg.is_required_set(),
+                value_type,
+                num_args,
+                value_names,
+                possible_values,
+                default_values,
+            }
+        })
+        .collect();
+
+    let subcommands: Vec<ToolInfoSubcommand> = cmd
+        .get_subcommands()
+        .map(|sub| ToolInfoSubcommand {
+            name: sub.get_name().to_string(),
+            about: sub.get_about().map(|s| s.to_string()),
+        })
+        .collect();
+
+    let (error, available_subcommands) = if let Some(missing) = missing {
+        (
+            Some(format!("unknown subcommand '{missing}'")),
+            Some(subcommands.clone()),
+        )
+    } else {
+        (None, None)
+    };
+
+    ToolInfoResponse {
+        command: full_path.join(" "),
+        about: cmd.get_about().map(|s| s.to_string()),
+        args,
+        subcommands,
+        error,
+        available_subcommands,
+    }
+}
+
+fn cmd_tool_info(path: Vec<String>) -> Result<()> {
+    let resp = build_tool_info(&path);
+
+    let json = serde_json::to_string_pretty(&resp).context("serialize tool-info")?;
+    println!("{json}");
+    Ok(())
+}
+
+/// Run chat in TUI mode (alternate screen, no ghost issues)
+async fn run_chat_tui(
+    cfg: &mut ConfigFile,
+    adapter: Arc<dyn LlmAdapter>,
+    diff_engine: &DiffEngine,
+    command_runner: &CommandRunner,
+    store: &SessionStore,
+    paths: &Paths,
+    session_id: &str,
+    project_root: &Path,
+    memory: &mut eli_core::memory::Memory,
+    undo_stack: &mut Vec<Vec<DiffResult>>,
+) -> Result<()> {
+    use chat_ui::{ChatTerminal, ChatUi, PromptMode as TuiPromptMode};
+    use crossterm::event::{Event, KeyEventKind};
+
+    let mut ui = ChatUi::new();
+    ui.prompt_mode = TuiPromptMode::Auto;
+    ui.scrollback_max_lines = cfg.chat.scrollback_max_lines;
+    let mut terminal = ChatTerminal::new().context("create TUI terminal")?;
+
+    // Map TUI prompt mode to config
+    cfg.chat.approvals = ApprovalMode::Auto;
+    cfg.chat.auto_mode = AutoMode::Autonomous;
+    let apply_tui_mode = |_mode: TuiPromptMode, cfg: &mut ConfigFile| {
+        cfg.chat.approvals = ApprovalMode::Auto;
+        cfg.chat.auto_mode = AutoMode::Autonomous;
+    };
+
+    let task_start = Instant::now();
+
+    loop {
+        // Update spinner and elapsed time
+        ui.tick_spinner();
+        ui.elapsed_secs = task_start.elapsed().as_secs();
+
+        // Render
+        terminal.draw(&mut ui)?;
+
+        // Poll for events
+        if let Some(event) = terminal.poll_event(Duration::from_millis(50))? {
+            match event {
+                Event::Paste(text) => {
+                    ui.handle_paste(&text);
+                    continue;
+                }
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        if let Some(input) = ui.handle_key(key.code, key.modifiers) {
+                            let trimmed = input.trim();
+
+                            // Handle slash commands
+                            if trimmed == "/exit" || trimmed == "/quit" {
+                                break;
+                            }
+                            if trimmed == "/help" {
+                                ui.add_message(
+                                    "System",
+                                    "Commands: /exit, /help, /model, /compact, /reset, /copy, /status\n/copy [scope] [> file] - Copy session: all, last, user, tools, N, -data\nKeys: Esc interrupt, ↑↓ history, PgUp/PgDn scroll",
+                                );
+                                continue;
+                            }
+                            if trimmed == "/model" || trimmed.starts_with("/model ") {
+                                let model = trimmed.strip_prefix("/model").unwrap_or("").trim();
+                                if model.is_empty() {
+                                    ui.add_message("System", &format!("model: {}", cfg.chat.model));
+                                } else {
+                                    cfg.chat.model = model.to_string();
+                                    ui.add_message("System", &format!("(model: {})", cfg.chat.model));
+                                }
+                                continue;
+                            }
+                            if trimmed == "/models" {
+                                ui.add_message("System", &format!("model: {}\nset with: /model <name>", cfg.chat.model));
+                                continue;
+                            }
+                            if trimmed == "/compact" {
+                                match compact_memory_now(adapter.clone(), &cfg.chat, memory).await {
+                                    Ok(Some(compaction)) => {
+                                        let note = format!(
+                                            "memory_compaction: dropped {} messages\n{}",
+                                            compaction.dropped,
+                                            compaction.summary
+                                        );
+                                        let brain_entry = format!(
+                                            "\n### {} (session {})\n{}\n",
+                                            chrono::Utc::now().to_rfc3339(),
+                                            session_id,
+                                            note
+                                        );
+                                        if let Err(e) = append_eli_brain(project_root, &brain_entry) {
+                                            ui.add_message("System", &format!("(compacted, but failed to write brain: {e})"));
+                                        } else {
+                                            ui.add_message("System", &format!("memory: compacted ({} msgs)", compaction.dropped));
+                                        }
+                                        store
+                                            .append(
+                                                session_id,
+                                                &SessionEvent {
+                                                    ts: chrono::Utc::now(),
+                                                    kind: EventKind::Note { content: note },
+                                                },
+                                            )
+                                            .await
+                                            .ok();
+                                    }
+                                    Ok(None) => ui.add_message("System", "(nothing to compact)"),
+                                    Err(e) => ui.add_message("Error", &format!("compact failed: {e}")),
+                                }
+                                continue;
+                            }
+                            if trimmed == "/tip" {
+                                ui.show_tips = !ui.show_tips;
+                                ui.add_message(
+                                    "System",
+                                    if ui.show_tips { "Tips shown." } else { "Tips hidden." },
+                                );
+                                continue;
+                            }
+                            if trimmed == "/brain" || trimmed == "/debug" || trimmed == "/raw" {
+                                // Can't switch rendering modes mid-session
+                                ui.add_message("System", &format!(
+                                    "Can't switch to {} mode mid-session. Exit and run: eli chat --display {}",
+                                    trimmed.trim_start_matches('/'),
+                                    trimmed.trim_start_matches('/')
+                                ));
+                                continue;
+                            }
+                            if trimmed == "/standard" {
+                                ui.add_message("System", "Already in standard (TUI) mode.");
+                                continue;
+                            }
+                            if trimmed == "/status" || trimmed == "/s" {
+                                ui.add_message(
+                                    "System",
+                                    &format!("Mode: AUTO | Tokens: {} | Time: {}s", ui.total_tokens, ui.elapsed_secs),
+                                );
+                                continue;
+                            }
+                            if trimmed == "/copy" || trimmed.starts_with("/copy ") {
+                                let args = trimmed.strip_prefix("/copy").unwrap_or("").trim();
+                                let result = execute_copy_command(args, memory, project_root).await;
+                                match result {
+                                    Ok(msg) => ui.add_message("System", &msg),
+                                    Err(e) => ui.add_message("Error", &format!("copy failed: {e}")),
+                                }
+                                continue;
+                            }
+                            if trimmed == "/clear" || trimmed == "/reset" || trimmed == "/new" {
+                                ui.messages.clear();
+                                ui.add_message("System", "Conversation cleared.");
+                                // Reset memory by creating fresh one with same system prompt
+                                *memory = eli_core::memory::Memory::new(cfg.chat.mem_steps);
+                                memory.set_system(eli_core::contract::system_prompt());
+                                ui.total_tokens = 0;
+                                ui.clear_sources();
+                                continue;
+                            }
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+
+                            // Regular input - run agent
+                            apply_tui_mode(ui.prompt_mode, cfg);
+                            ui.add_message("You", trimmed);
+                            store
+                                .append(
+                                    session_id,
+                                    &SessionEvent {
+                                        ts: chrono::Utc::now(),
+                                        kind: EventKind::UserMessage {
+                                            content: trimmed.to_string(),
+                                        },
+                                    },
+                                )
+                                .await
+                                .ok();
+                            ui.is_processing = true;
+                            ui.clear_sources();
+
+                            // Render processing state
+                        terminal.draw(&mut ui)?;
+
+                        let (clean_prompt, images) = process_input_for_images(trimmed);
+
+                        // Run the agent (single unified persona)
+                        let result = run_agent_tui(
+                            &cfg.chat,
+                            adapter.clone(),
+                            diff_engine,
+                            command_runner,
+                            store,
+                            &paths.data_dir,
+                            session_id,
+                            project_root,
+                            memory,
+                            undo_stack,
+                            &mut ui,
+                            &mut terminal,
+                            AgentProfile::Coding,
+                            clean_prompt,
+                            images,
+                        ).await;
+
+                        ui.is_processing = false;
+
+                        if let Err(e) = result {
+                            let msg = format!("{:?}", e);
+                            ui.add_message("Error", &msg);
+                            store
+                                .append(
+                                    session_id,
+                                    &SessionEvent {
+                                        ts: chrono::Utc::now(),
+                                        kind: EventKind::Note { content: msg },
+                                    },
+                                )
+                                .await
+                                .ok();
+                        }
+
+                        while let Some(queued) = ui.pop_queued() {
+                            let trimmed = queued.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            apply_tui_mode(ui.prompt_mode, cfg);
+                            ui.add_message("You", trimmed);
+                            store
+                                .append(
+                                    session_id,
+                                    &SessionEvent {
+                                        ts: chrono::Utc::now(),
+                                        kind: EventKind::UserMessage {
+                                            content: trimmed.to_string(),
+                                        },
+                                    },
+                                )
+                                .await
+                                .ok();
+                            ui.is_processing = true;
+                            ui.clear_sources();
+                            terminal.draw(&mut ui)?;
+
+                            let (clean_prompt, images) = process_input_for_images(trimmed);
+                            let queued_result = run_agent_tui(
+                                &cfg.chat,
+                                adapter.clone(),
+                                diff_engine,
+                                command_runner,
+                                store,
+                                &paths.data_dir,
+                                session_id,
+                                project_root,
+                                memory,
+                                undo_stack,
+                                &mut ui,
+                                &mut terminal,
+                                AgentProfile::Coding,
+                                clean_prompt,
+                                images,
+                            )
+                            .await;
+
+                            ui.is_processing = false;
+                            if let Err(e) = queued_result {
+                                let msg = format!("{:?}", e);
+                                ui.add_message("Error", &msg);
+                                store
+                                    .append(
+                                        session_id,
+                                        &SessionEvent {
+                                            ts: chrono::Utc::now(),
+                                            kind: EventKind::Note { content: msg },
+                                        },
+                                    )
+                                    .await
+                                    .ok();
+                            }
+                        }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if ui.should_quit {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Run agent steps with TUI output
+async fn run_agent_tui(
+    chat: &eli_core::config::ChatConfig,
+    adapter: Arc<dyn LlmAdapter>,
+    _diff_engine: &DiffEngine,
+    command_runner: &CommandRunner,
+    store: &SessionStore,
+    _data_dir: &Path,
+    session_id: &str,
+    _project_root: &Path,
+    memory: &mut eli_core::memory::Memory,
+    _undo_stack: &mut Vec<Vec<DiffResult>>,
+    ui: &mut chat_ui::ChatUi,
+    terminal: &mut chat_ui::ChatTerminal,
+    _profile: AgentProfile,
+    initial_message: String,
+    images: Vec<String>,
+) -> Result<()> {
+    use eli_core::types::ChatStreamEvent;
+    use futures::StreamExt;
+    use crossterm::event as ct_event;
+    use crossterm::event::{Event as CtEvent, KeyCode as CtKeyCode, KeyEventKind as CtKeyEventKind};
+
+    let max_iters = if chat.auto { chat.max_auto.max(1) } else { 1 };
+    let mut current_message = initial_message.clone();
+    let mut current_images = images;
+
+    for step in 1..=max_iters {
+        // Update UI
+        ui.tick_spinner();
+        terminal.draw(ui)?;
+
+        // Add message to memory
+        if !current_images.is_empty() {
+            memory.push(ChatMessage::user_with_images(current_message.clone(), current_images.clone()));
+            current_images.clear();
+        } else {
+            memory.push(ChatMessage::user(current_message.clone()));
+        }
+
+        // Build request
+        let req = ChatRequest {
+            messages: memory.context(),
+            model: chat.model.clone(),
+            max_tokens: chat.max_tokens,
+            temperature: chat.temperature,
+            response_format: None,
+            stream: true,
+        };
+
+        // Stream response (spinner in title shows we're working)
+        terminal.draw(ui)?;
+
+        let mut stream = adapter.chat_stream(req).await.context("start stream")?;
+        let mut full_response = String::new();
+        let mut interrupted = false;
+
+        let check_interrupt = |ui: &mut chat_ui::ChatUi| -> bool {
+            if ui.interrupt_requested {
+                ui.interrupt_requested = false;
+                return true;
+            }
+            while ct_event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                let Ok(ev) = ct_event::read() else { continue; };
+                match ev {
+                    CtEvent::Key(key) => {
+                        if key.kind != CtKeyEventKind::Press {
+                            continue;
+                        }
+                        if key.code == CtKeyCode::Esc {
+                            return true;
+                        }
+                        if let Some(input) = ui.handle_key(key.code, key.modifiers) {
+                            let trimmed = input.trim();
+                            if trimmed.eq_ignore_ascii_case("/exit") || trimmed.eq_ignore_ascii_case("/quit") {
+                                ui.should_quit = true;
+                                return true;
+                            }
+                            if !trimmed.is_empty() {
+                                ui.queue_prompt(trimmed.to_string());
+                            }
+                        }
+                    }
+                    CtEvent::Paste(text) => {
+                        ui.handle_paste(&text);
+                    }
+                    _ => {}
+                }
+            }
+            false
+        };
+
+        loop {
+            tokio::select! {
+                maybe_ev = stream.next() => {
+                    match maybe_ev {
+                        Some(Ok(ChatStreamEvent::Delta(text))) => {
+                            full_response.push_str(&text);
+                        }
+                        Some(Ok(ChatStreamEvent::Usage(usage))) => {
+                            ui.total_tokens = ui.total_tokens.saturating_add(usage.total_tokens);
+                        }
+                        Some(Ok(ChatStreamEvent::Done)) => break,
+                        Some(Err(e)) => {
+                            let msg = format!("Stream error: {:?}", e);
+                            ui.add_message("Error", &msg);
+                            store
+                                .append(
+                                    session_id,
+                                    &SessionEvent {
+                                        ts: chrono::Utc::now(),
+                                        kind: EventKind::Note { content: msg },
+                                    },
+                                )
+                                .await
+                                .ok();
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+
+            if check_interrupt(ui) {
+                interrupted = true;
+                break;
+            }
+
+            // Update UI periodically
+            ui.tick_spinner();
+            terminal.draw(ui)?;
+        }
+
+        if interrupted {
+            ui.add_message("System", "(interrupted)");
+            store
+                .append(
+                    session_id,
+                    &SessionEvent {
+                        ts: chrono::Utc::now(),
+                        kind: EventKind::Note {
+                            content: "(interrupted)".to_string(),
+                        },
+                    },
+                )
+                .await
+                .ok();
+            return Ok(());
+        }
+
+        // Parse response
+        let model = match contract::validate_model_response(&full_response) {
+            Ok(m) => m,
+            Err(e) => {
+                let msg = format!("Invalid response: {}", e);
+                ui.add_message("Error", &msg);
+                store
+                    .append(
+                        session_id,
+                        &SessionEvent {
+                            ts: chrono::Utc::now(),
+                            kind: EventKind::Note { content: msg },
+                        },
+                    )
+                    .await
+                    .ok();
+                break;
+            }
+        };
+
+        // Add response to memory
+        memory.push(ChatMessage::assistant(full_response.clone()));
+        store
+            .append(
+                session_id,
+                &SessionEvent {
+                    ts: chrono::Utc::now(),
+                    kind: EventKind::AssistantMessage {
+                        content: full_response.clone(),
+                    },
+                },
+            )
+            .await
+            .ok();
+
+        // Show the answer/notes
+        if let Some(synthesis) = &model.synthesis {
+            if !synthesis.answer.trim().is_empty() {
+                ui.add_message("Eli", synthesis.answer.trim());
+            }
+        } else if !model.notes.trim().is_empty() {
+            ui.add_message("Eli", model.notes.trim());
+        }
+
+        // Execute commands if any
+        if !model.commands.is_empty() && !matches!(chat.mode, RunMode::Read) {
+            let mut all_tool_output = String::new();
+
+            for cmd in &model.commands {
+                ui.add_message("Tool", &format!("$ {}", cmd));
+                store
+                    .append(
+                        session_id,
+                        &SessionEvent {
+                            ts: chrono::Utc::now(),
+                            kind: EventKind::Note {
+                                content: format!("$ {}", cmd),
+                            },
+                        },
+                    )
+                    .await
+                    .ok();
+                terminal.draw(ui)?;
+
+                let results = command_runner
+                    .run_commands(&[cmd.clone()])
+                    .await;
+
+                for r in &results {
+                    let icon = if r.returncode == 0 { "✓" } else { "✗" };
+                    let output = if !r.stdout.trim().is_empty() {
+                        r.stdout.lines().take(3).collect::<Vec<_>>().join("\n")
+                    } else if !r.stderr.trim().is_empty() {
+                        r.stderr.lines().take(2).collect::<Vec<_>>().join("\n")
+                    } else {
+                        String::new()
+                    };
+                    let line = format!("{} {}", icon, output);
+                    ui.add_message("Tool", &line);
+                    store
+                        .append(
+                            session_id,
+                            &SessionEvent {
+                                ts: chrono::Utc::now(),
+                                kind: EventKind::Note { content: line },
+                            },
+                        )
+                        .await
+                        .ok();
+
+                    // Build full tool output for memory (LLM needs the actual data!)
+                    all_tool_output.push_str(&format!("Command: {}\n", cmd));
+                    all_tool_output.push_str(&format!("Return code: {}\n", r.returncode));
+                    all_tool_output.push_str(&format!("Digest: {}\n", build_command_digest(r)));
+                    if !r.stdout.trim().is_empty() {
+                        all_tool_output.push_str(&format!("Output:\n{}\n", r.stdout));
+                    }
+                    if !r.stderr.trim().is_empty() {
+                        all_tool_output.push_str(&format!("Stderr:\n{}\n", r.stderr));
+                    }
+                    all_tool_output.push('\n');
+
+                    // Infer sources (never invent a generic "eli finance" source)
+                    for source in infer_sources(cmd, &r.stdout) {
+                        ui.add_source(source);
+                    }
+                    ui.last_tool_ok = Some(r.returncode == 0);
+                }
+                terminal.draw(ui)?;
+            }
+
+            // CRITICAL: Feed tool results back to memory so LLM can use the actual values!
+            if !all_tool_output.is_empty() {
+                memory.push(ChatMessage::user(format!("Tool execution results:\n{}", all_tool_output)));
+            }
+        }
+
+        // Check if done
+        if matches!(model.status, StepStatus::Done) {
+            break;
+        }
+
+        // Continue with KEEP WORKING
+        current_message = "KEEP WORKING".to_string();
+    }
+
+    Ok(())
+}
+
+async fn cmd_chat(
+    provider: Option<String>,
+    model: Option<String>,
+    display_override: Option<DisplayMode>,
+) -> Result<()> {
     let paths = Paths::discover().context("discover paths")?;
     let mut cfg = config::load_or_create(&paths).context("load/create config")?;
     apply_overrides(&mut cfg, provider, model)?;
+    ensure_tui_default_model(&mut cfg.chat);
+    cfg.chat.approvals = ApprovalMode::Auto;
+    cfg.chat.approvals_commands = None;
+    cfg.chat.approvals_diffs = None;
+    cfg.chat.auto_mode = AutoMode::Autonomous;
+    if let Some(mode) = display_override {
+        cfg.chat.display_mode = mode;
+    }
 
     let adapter = eli_adapters::build_from_chat_config(&cfg.chat).context("build adapter")?;
     let mut adapter: Arc<dyn LlmAdapter> = Arc::from(adapter);
@@ -1746,11 +2851,28 @@ async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()>
     let mut memory = eli_core::memory::Memory::new(cfg.chat.mem_steps);
     memory.set_system(eli_core::contract::system_prompt());
     ensure_eli_research_brain(&project_root).context("ensure eli_research/ELI.md")?;
-    let mut quant_memory: Option<eli_core::memory::Memory> = None;
     let mut undo_stack: Vec<Vec<DiffResult>> = Vec::new();
     let mut state = SessionState::new(&cfg.chat);
     state.load_recent_research(&project_root, 12);
+    let force_plain_prompt = matches!(cfg.chat.display_mode, DisplayMode::Debug);
 
+    // Use TUI mode for Standard display mode (alternate screen, no ghost issues)
+    if matches!(cfg.chat.display_mode, DisplayMode::Standard) {
+        return run_chat_tui(
+            &mut cfg,
+            adapter,
+            &diff_engine,
+            &command_runner,
+            &store,
+            &paths,
+            &session_id,
+            &project_root,
+            &mut memory,
+            &mut undo_stack,
+        ).await;
+    }
+
+    // Non-TUI modes (Brain/Debug/Raw) use the old CLI approach
     print_banner(&cfg.chat, &project_root, &state);
 
     loop {
@@ -1763,16 +2885,17 @@ async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()>
         }
         
         let (line, from_boxed_prompt) = if let Some(queued) = state.next_prompt() {
-            println!("{}›{} {}", style::CYAN, style::RESET, queued);
+            print_history_line(format!("{}›{} {}", style::CYAN, style::RESET, queued));
             (queued, false)
-        } else if matches!(state.display_mode, DisplayMode::Standard) {
-            let Some(line) = read_line_boxed(&mut state, queue_len).context("boxed prompt")? else {
+        } else if matches!(state.display_mode, DisplayMode::Standard) && !force_plain_prompt {
+            let Some(line) = read_line_boxed(&mut state, &mut cfg.chat, queue_len).context("boxed prompt")? else {
                 break;
             };
             (line, true)
         } else {
-            // Plain prompt - colors break readline cursor positioning
-            let prompt_prefix = if queue_len > 0 {
+            let prompt_prefix = if force_plain_prompt {
+                "› ".to_string()
+            } else if queue_len > 0 {
                 format!("[{}Q] › ", queue_len)
             } else {
                 "› ".to_string()
@@ -1801,12 +2924,10 @@ async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()>
         }
 
         if from_boxed_prompt {
-            println!("{}›{} {}", style::CYAN, style::RESET, trimmed);
-            state.prompt_history.push(trimmed.to_string());
-        } else {
-            // Add to history
-            editor.add_history_entry(trimmed)?;
+            print_history_line(format!("{}›{} {}", style::CYAN, style::RESET, trimmed));
         }
+        state.prompt_history.push(trimmed.to_string());
+        editor.add_history_entry(trimmed).ok();
 
         // Slash commands
         if trimmed == "/exit" || trimmed == "/quit" {
@@ -1836,53 +2957,54 @@ async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()>
             println!("(queue cleared)");
             continue;
         }
-        if trimmed == "/reset" {
+        if trimmed == "/compact" {
+            match compact_memory_now(adapter.clone(), &cfg.chat, &mut memory).await {
+                Ok(Some(compaction)) => {
+                    let note = format!(
+                        "memory_compaction: dropped {} messages\n{}",
+                        compaction.dropped,
+                        compaction.summary
+                    );
+                    let brain_entry = format!(
+                        "\n### {} (session {})\n{}\n",
+                        chrono::Utc::now().to_rfc3339(),
+                        session_id,
+                        note
+                    );
+                    if let Err(e) = append_eli_brain(&project_root, &brain_entry) {
+                        println!("(compacted, but failed to write brain: {e})");
+                    } else {
+                        println!("memory: compacted ({} msgs)", compaction.dropped);
+                    }
+                    store
+                        .append(
+                            &session_id,
+                            &SessionEvent {
+                                ts: chrono::Utc::now(),
+                                kind: EventKind::Note { content: note },
+                            },
+                        )
+                        .await
+                        .ok();
+                }
+                Ok(None) => println!("(nothing to compact)"),
+                Err(e) => println!("(compact failed: {e})"),
+            }
+            continue;
+        }
+        if trimmed == "/tip" {
+            println!("(tips are only shown in standard TUI mode)");
+            continue;
+        }
+        if trimmed == "/reset" || trimmed == "/new" {
             memory = eli_core::memory::Memory::new(cfg.chat.mem_steps);
             memory.set_system(eli_core::contract::system_prompt());
             ensure_eli_research_brain(&project_root).ok();
-            quant_memory = None;
             state.total_work_time = Duration::ZERO;
             state.step_count = 0;
+            state.total_usage = eli_core::types::Usage::default();
+            state.last_usage = None;
             println!("(reset)");
-            continue;
-        }
-        if trimmed == "/quant" || trimmed.starts_with("/quant ") {
-            let query = trimmed.strip_prefix("/quant").unwrap_or("").trim();
-            if query.is_empty() {
-                println!("usage: /quant <question>");
-                continue;
-            }
-
-            let (q_clean, q_images) = process_input_for_images(query);
-            let mut quant_chat = cfg.chat.clone();
-            quant_chat.mode = RunMode::Read;
-            quant_chat.approvals = ApprovalMode::Auto;
-            quant_chat.auto = true;
-
-	            let qmem = quant_memory.get_or_insert_with(|| {
-	                let mut m = eli_core::memory::Memory::new(cfg.chat.mem_steps);
-	                m.set_system(eli_core::contract::quant_system_prompt());
-	                m
-	            });
-
-	            run_agent_steps(
-	                &quant_chat,
-	                adapter.clone(),
-	                &diff_engine,
-	                &command_runner,
-	                &store,
-                    &paths.data_dir,
-	                &session_id,
-	                &project_root,
-	                qmem,
-	                &mut undo_stack,
-	                &mut state,
-	                AgentProfile::Research,
-	                q_clean,
-                q_images,
-            )
-            .await?;
-            print_cost_stats(&state, &cfg.chat);
             continue;
         }
         if trimmed == "/brain" {
@@ -1890,24 +3012,14 @@ async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()>
             println!("(brain mode: full output)");
             continue;
         }
+        if trimmed == "/debug" {
+            state.display_mode = DisplayMode::Debug;
+            println!("(debug mode: raw request/response + tool output + observation)");
+            continue;
+        }
         if trimmed == "/standard" || trimmed == "/brief" {
             state.display_mode = DisplayMode::Standard;
             println!("(standard mode: brief output)");
-            continue;
-        }
-        if trimmed == "/plan" {
-            state.auto_mode = AutoMode::Plan;
-            println!("(plan mode: human reviews plans)");
-            continue;
-        }
-        if trimmed == "/auto" || trimmed == "/autonomous" {
-            state.auto_mode = AutoMode::Autonomous;
-            println!("(autonomous mode: AI self-reviews until done)");
-            continue;
-        }
-        if trimmed == "/normal" {
-            state.auto_mode = AutoMode::Normal;
-            println!("(normal mode)");
             continue;
         }
         if trimmed == "/read" {
@@ -1958,16 +3070,18 @@ async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()>
         if trimmed == "/model" || trimmed.starts_with("/model ") {
             let model = trimmed.strip_prefix("/model").unwrap_or("").trim();
             if model.is_empty() {
-                println!("model: {}", cfg.chat.model);
+                print_history_block(vec![format!("model: {}", cfg.chat.model)]);
             } else {
                 cfg.chat.model = model.to_string();
-                println!("(model: {})", cfg.chat.model);
+                print_history_block(vec![format!("(model: {})", cfg.chat.model)]);
             }
             continue;
         }
         if trimmed == "/models" {
-            println!("model: {}", cfg.chat.model);
-            println!("set with: /model <name>");
+            print_history_block(vec![
+                format!("model: {}", cfg.chat.model),
+                "set with: /model <name>".to_string(),
+            ]);
             continue;
         }
         if trimmed == "/key" || trimmed.starts_with("/key ") {
@@ -1989,22 +3103,6 @@ async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()>
                 eli_adapters::build_from_chat_config(&cfg.chat).context("build adapter")?,
             );
             println!("(api key set for {} - session only)", cfg.chat.provider);
-            continue;
-        }
-        if trimmed == "/queue" || trimmed == "/q" {
-            if state.prompt_queue.is_empty() {
-                println!("(queue empty)");
-            } else {
-                println!("queued ({}):", state.queue_len());
-                for (i, p) in state.prompt_queue.iter().enumerate() {
-                    println!("  {}. {}", i + 1, truncate(p, 60));
-                }
-            }
-            continue;
-        }
-        if trimmed == "/clear-queue" || trimmed == "/cq" {
-            state.prompt_queue.clear();
-            println!("(queue cleared)");
             continue;
         }
         if trimmed == "/status" || trimmed == "/s" {
@@ -2035,168 +3133,99 @@ async fn cmd_chat(provider: Option<String>, model: Option<String>) -> Result<()>
             continue;
         }
 
-        editor.add_history_entry(trimmed).ok();
-
         // Process images
         let (clean_prompt, images) = process_input_for_images(trimmed);
-        let use_quant =
-            looks_like_quant_query(&clean_prompt) || looks_like_quant_follow_up(&clean_prompt, &state);
-
-        if use_quant {
-            let mut quant_chat = cfg.chat.clone();
-            quant_chat.mode = RunMode::Read;
-            quant_chat.approvals = ApprovalMode::Auto;
-            quant_chat.auto = true;
-
-		            let qmem = quant_memory.get_or_insert_with(|| {
-		                let mut m = eli_core::memory::Memory::new(cfg.chat.mem_steps);
-		                m.set_system(eli_core::contract::quant_system_prompt());
-		                m
-		            });
-
-	            run_agent_steps(
-	                &quant_chat,
-	                adapter.clone(),
-	                &diff_engine,
-	                &command_runner,
-	                &store,
-                    &paths.data_dir,
-	                &session_id,
-	                &project_root,
-	                qmem,
-	                &mut undo_stack,
-	                &mut state,
-	                AgentProfile::Research,
-	                clean_prompt,
-                images,
-            )
-            .await?;
-        } else {
-            // Run agent for this prompt
-	            run_agent_steps(
-	                &cfg.chat,
-	                adapter.clone(),
-	                &diff_engine,
-	                &command_runner,
-	                &store,
-                    &paths.data_dir,
-	                &session_id,
-	                &project_root,
-	                &mut memory,
-	                &mut undo_stack,
-	                &mut state,
-	                AgentProfile::Coding,
-	                clean_prompt,
-                images,
-            )
-            .await?;
-        }
+        // Run agent for this prompt (single unified persona)
+        run_agent_steps(
+            &cfg.chat,
+            adapter.clone(),
+            &diff_engine,
+            &command_runner,
+            &store,
+            &paths.data_dir,
+            &session_id,
+            &project_root,
+            &mut memory,
+            &mut undo_stack,
+            &mut state,
+            AgentProfile::Coding,
+            clean_prompt,
+            images,
+        )
+        .await?;
 
         // Process queue automatically
         while let Some(queued_prompt) = state.next_prompt() {
-            println!("{}  ›{} {}", style::CYAN, style::RESET, queued_prompt);
+            print_history_line(format!("{}›{} {}", style::CYAN, style::RESET, queued_prompt));
             // Queue currently supports text only (no image dragging into queue command yet, 
             // though one could theoretically type the path, but process_input_for_images handles paths in string)
             let (q_clean, q_images) = process_input_for_images(&queued_prompt);
             
-            let use_quant =
-                looks_like_quant_query(&q_clean) || looks_like_quant_follow_up(&q_clean, &state);
-            if use_quant {
-                let mut quant_chat = cfg.chat.clone();
-                quant_chat.mode = RunMode::Read;
-                quant_chat.approvals = ApprovalMode::Auto;
-                quant_chat.auto = true;
-
-		                let qmem = quant_memory.get_or_insert_with(|| {
-		                    let mut m = eli_core::memory::Memory::new(cfg.chat.mem_steps);
-		                    m.set_system(eli_core::contract::quant_system_prompt());
-		                    m
-		                });
-
-	                run_agent_steps(
-	                    &quant_chat,
-	                    adapter.clone(),
-	                    &diff_engine,
-	                    &command_runner,
-	                    &store,
-                        &paths.data_dir,
-	                    &session_id,
-	                    &project_root,
-	                    qmem,
-	                    &mut undo_stack,
-	                    &mut state,
-	                    AgentProfile::Research,
-	                    q_clean,
-                    q_images,
-                )
-                .await?;
-            } else {
-	                run_agent_steps(
-	                    &cfg.chat,
-	                    adapter.clone(),
-	                    &diff_engine,
-	                    &command_runner,
-	                    &store,
-                        &paths.data_dir,
-	                    &session_id,
-	                    &project_root,
-	                    &mut memory,
-	                    &mut undo_stack,
-	                    &mut state,
-	                    AgentProfile::Coding,
-	                    q_clean,
-                    q_images,
-                )
-                .await?;
-            }
+            run_agent_steps(
+                &cfg.chat,
+                adapter.clone(),
+                &diff_engine,
+                &command_runner,
+                &store,
+                &paths.data_dir,
+                &session_id,
+                &project_root,
+                &mut memory,
+                &mut undo_stack,
+                &mut state,
+                AgentProfile::Coding,
+                q_clean,
+                q_images,
+            )
+            .await?;
         }
     }
 
     Ok(())
 }
 
-fn read_line_boxed(state: &mut SessionState, queue_len: usize) -> Result<Option<String>> {
+fn read_line_boxed(
+    state: &mut SessionState,
+    chat: &mut eli_core::config::ChatConfig,
+    queue_len: usize,
+) -> Result<Option<String>> {
     let mut input_buffer = std::mem::take(&mut state.input_buffer);
+    let mut cursor_pos = state.cursor_pos.min(input_buffer.len());
     let mut history_cursor = state.history_cursor;
 
     let start = Instant::now();
-    let mut dots = 0usize;
+    let mut spinner_idx = 0usize;
     let mut last_anim = Instant::now();
+    let mut footer = FooterUi::enable();
+    let mut esc_armed = false;
+    let mut esc_deadline = Instant::now();
 
-    let prompt_history = &state.prompt_history;
-    let prompt_history_len = state.prompt_history.len();
-    let mut sticky_footer: Option<StickyFooter> = None;
-    render_processing_footer(
-        &mut sticky_footer,
-        build_prompt_footer_lines(
-            dots,
-            queue_len,
+    let render = |footer: &mut FooterUi,
+                  spinner_idx: usize,
+                  input_buffer: &str,
+                  cursor_pos: usize,
+                  state: &SessionState,
+                  chat: &eli_core::config::ChatConfig| {
+        let title = footer_title(
             "ready",
+            spinner_idx,
+            queue_len,
             start.elapsed(),
-            &input_buffer,
             state.total_usage.total_tokens,
-            prompt_history_len,
-            history_cursor,
-        ),
-    );
+            Some(prompt_mode(state, chat)),
+        );
+        footer.render(&title, input_buffer, cursor_pos);
+    };
+
+    render(&mut footer, spinner_idx, &input_buffer, cursor_pos, state, chat);
 
     let maybe_line = loop {
-        // Lightweight idle animation so the box feels alive.
+        if esc_armed && Instant::now() > esc_deadline {
+            esc_armed = false;
+        }
         if last_anim.elapsed() > Duration::from_millis(120) {
-            dots = (dots + 1) % style::SPINNER.len();
-            render_processing_footer(
-                &mut sticky_footer,
-                build_prompt_footer_lines(
-                    dots,
-                    queue_len,
-                    "ready",
-                    start.elapsed(),
-                    &input_buffer,
-                    state.total_usage.total_tokens,
-                    prompt_history_len,
-                    history_cursor,
-                ),
-            );
+            spinner_idx = (spinner_idx + 1) % FOOTER_SPINNER.len();
+            render(&mut footer, spinner_idx, &input_buffer, cursor_pos, state, chat);
             last_anim = Instant::now();
         }
 
@@ -2209,156 +3238,158 @@ fn read_line_boxed(state: &mut SessionState, queue_len: usize) -> Result<Option<
             Err(_) => continue,
         };
 
-        let CtEvent::Key(key) = event else {
-            if matches!(event, CtEvent::Resize(_, _)) {
-                render_processing_footer(
-                    &mut sticky_footer,
-                    build_prompt_footer_lines(
-                        dots,
-                        queue_len,
-                        "ready",
-                        start.elapsed(),
-                        &input_buffer,
-                        state.total_usage.total_tokens,
-                        prompt_history_len,
-                        history_cursor,
-                    ),
-                );
+        match event {
+            CtEvent::Resize(_, _) => {
+                render(&mut footer, spinner_idx, &input_buffer, cursor_pos, state, chat);
+                continue;
             }
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        // Ctrl+C = cancel current input (stay in prompt), Ctrl+D = EOF (exit).
-        if key.modifiers.contains(CtKeyModifiers::CONTROL) {
-            match key.code {
-                CtKeyCode::Char('c') => {
-                    input_buffer.clear();
-                    history_cursor = None;
-                    drop(sticky_footer.take());
-                    break Some(String::new());
-                }
-                CtKeyCode::Char('d') => {
-                    drop(sticky_footer.take());
-                    break None
-                }
-                _ => {}
-            }
-        }
-
-        match key.code {
-            CtKeyCode::Char(c) => {
-                history_cursor = None;
-                input_buffer.push(c);
-            }
-            CtKeyCode::Backspace => {
-                history_cursor = None;
-                input_buffer.pop();
-            }
-            CtKeyCode::Up => {
-                let Some(last_idx) = prompt_history.len().checked_sub(1) else {
-                    // no history
+            CtEvent::Key(key) => {
+                if key.kind != KeyEventKind::Press {
                     continue;
-                };
-                let next = match history_cursor {
-                    None => Some(last_idx),
-                    Some(idx) => idx.checked_sub(1),
-                };
-                if let Some(idx) = next {
-                    history_cursor = Some(idx);
-                    input_buffer = prompt_history[idx].clone();
                 }
-            }
-            CtKeyCode::Down => {
-                let Some(idx) = history_cursor else {
-                    continue;
-                };
-                let next = idx.saturating_add(1);
-                if next >= prompt_history.len() {
-                    history_cursor = None;
-                    input_buffer.clear();
-                } else {
-                    history_cursor = Some(next);
-                    input_buffer = prompt_history[next].clone();
+
+                if key.modifiers.contains(CtKeyModifiers::CONTROL) {
+                    match key.code {
+                        CtKeyCode::Char('c') => {
+                            input_buffer.clear();
+                            cursor_pos = 0;
+                            history_cursor = None;
+                            esc_armed = false;
+                            break Some(String::new());
+                        }
+                        CtKeyCode::Char('d') => {
+                            break None;
+                        }
+                        _ => {}
+                    }
                 }
-            }
-            CtKeyCode::Esc => {
-                history_cursor = None;
-                input_buffer.clear();
-            }
-            CtKeyCode::Enter => {
-                let line = input_buffer.clone();
-                history_cursor = None;
-                input_buffer.clear();
-                drop(sticky_footer.take());
-                break Some(line);
+
+                match key.code {
+                    CtKeyCode::Char(c) => {
+                        history_cursor = None;
+                        input_buffer.insert(cursor_pos, c);
+                        cursor_pos += 1;
+                        esc_armed = false;
+                    }
+                    CtKeyCode::Backspace => {
+                        history_cursor = None;
+                        if cursor_pos > 0 {
+                            cursor_pos -= 1;
+                            input_buffer.remove(cursor_pos);
+                        }
+                        esc_armed = false;
+                    }
+                    CtKeyCode::Delete => {
+                        history_cursor = None;
+                        if cursor_pos < input_buffer.len() {
+                            input_buffer.remove(cursor_pos);
+                        }
+                        esc_armed = false;
+                    }
+                    CtKeyCode::Left => {
+                        if cursor_pos > 0 {
+                            cursor_pos -= 1;
+                        }
+                        esc_armed = false;
+                    }
+                    CtKeyCode::Right => {
+                        if cursor_pos < input_buffer.len() {
+                            cursor_pos += 1;
+                        }
+                        esc_armed = false;
+                    }
+                    CtKeyCode::Home => {
+                        cursor_pos = 0;
+                        esc_armed = false;
+                    }
+                    CtKeyCode::End => {
+                        cursor_pos = input_buffer.len();
+                        esc_armed = false;
+                    }
+                    CtKeyCode::Up => {
+                        let Some(last_idx) = state.prompt_history.len().checked_sub(1) else {
+                            continue;
+                        };
+                        let next = match history_cursor {
+                            None => Some(last_idx),
+                            Some(idx) => idx.checked_sub(1),
+                        };
+                        if let Some(idx) = next {
+                            history_cursor = Some(idx);
+                            input_buffer = state.prompt_history[idx].clone();
+                            cursor_pos = input_buffer.len(); // Cursor at end after history load
+                        }
+                        esc_armed = false;
+                    }
+                    CtKeyCode::Down => {
+                        let Some(idx) = history_cursor else {
+                            continue;
+                        };
+                        let next = idx.saturating_add(1);
+                        if next >= state.prompt_history.len() {
+                            history_cursor = None;
+                            input_buffer.clear();
+                            cursor_pos = 0;
+                        } else {
+                            history_cursor = Some(next);
+                            input_buffer = state.prompt_history[next].clone();
+                            cursor_pos = input_buffer.len(); // Cursor at end after history load
+                        }
+                        esc_armed = false;
+                    }
+                    CtKeyCode::Esc => {
+                        if !esc_armed {
+                            esc_armed = true;
+                            esc_deadline = Instant::now() + Duration::from_millis(800);
+                        } else {
+                            history_cursor = None;
+                            input_buffer.clear();
+                            cursor_pos = 0;
+                            esc_armed = false;
+                        }
+                    }
+                    CtKeyCode::Enter => {
+                        let line = input_buffer.clone();
+                        history_cursor = None;
+                        input_buffer.clear();
+                        cursor_pos = 0;
+                        esc_armed = false;
+                        break Some(line);
+                    }
+                    _ => {}
+                }
+
+                render(&mut footer, spinner_idx, &input_buffer, cursor_pos, state, chat);
             }
             _ => {}
         }
-
-        // Re-render immediately after input changes.
-        render_processing_footer(
-            &mut sticky_footer,
-            build_prompt_footer_lines(
-                dots,
-                queue_len,
-                "ready",
-                start.elapsed(),
-                &input_buffer,
-                state.total_usage.total_tokens,
-                prompt_history_len,
-                history_cursor,
-            ),
-        );
     };
 
     state.input_buffer = input_buffer;
+    state.cursor_pos = cursor_pos;
     state.history_cursor = history_cursor;
 
     Ok(maybe_line)
 }
 
 fn print_mode_status(state: &SessionState, chat: &eli_core::config::ChatConfig) {
-    use style::*;
-
     let display = match state.display_mode {
         DisplayMode::Standard => "standard",
         DisplayMode::Brain => "brain",
+        DisplayMode::Debug => "debug",
+        DisplayMode::Raw => "raw",
     };
-    let agent = match state.auto_mode {
-        AutoMode::Normal => "normal",
-        AutoMode::Plan => "plan",
-        AutoMode::Autonomous => "autonomous",
-    };
+    let agent = "autonomous (locked)";
     let exec = format_mode(chat.mode);
     let approvals = format_approvals_display(chat);
     let auto_run = if chat.auto { "on" } else { "off" };
     let time = format_duration(state.total_work_time);
 
-    let lines = vec![
-        format!("{}status{}", CYAN, RESET),
-        format!(
-            "{}◆{} display {}{}{}  {}│{}  agent {}{}{}  {}│{}  exec {}{}{}",
-            PURPLE, RESET, WHITE, display, RESET,
-            DARK_GRAY, RESET, WHITE, agent, RESET,
-            DARK_GRAY, RESET, WHITE, exec, RESET
-        ),
-        format!(
-            "{}◆{} approvals {}{}{}  {}│{}  auto-run {}{}{}",
-            GREEN, RESET, WHITE, approvals, RESET,
-            DARK_GRAY, RESET, WHITE, auto_run, RESET
-        ),
-        format!(
-            "{}◆{} steps {}{}{}  {}│{}  time {}{}{}",
-            YELLOW, RESET, WHITE, state.step_count, RESET,
-            DARK_GRAY, RESET, WHITE, time, RESET
-        ),
-    ];
-
-    let out = format_indented_block(&lines);
-    println!("{}", out);
+    let body = format!(
+        "display: {display}\nagent: {agent}\nexec: {exec}\napprovals: {approvals}\nauto-run: {auto_run}\nsteps: {}\ntime: {time}",
+        state.step_count
+    );
+    println!("{}", render_ratatui_panel("status", &body));
 }
 
 fn print_help() {
@@ -2369,12 +3400,8 @@ fn print_help() {
         String::new(),
         format!("{}Display{}", PURPLE, RESET),
         format!("  {}/brain{}      full output (tools, history, details)", WHITE, RESET),
+        format!("  {}/debug{}      debug output (raw request/response + tool output + observation)", WHITE, RESET),
         format!("  {}/standard{}   brief output (recent stream, summary)", WHITE, RESET),
-        String::new(),
-        format!("{}Agent Mode{}", PURPLE, RESET),
-        format!("  {}/plan{}       require human approval for plans", WHITE, RESET),
-        format!("  {}/auto{}       autonomous: AI self-reviews until done", WHITE, RESET),
-        format!("  {}/normal{}     default execution mode", WHITE, RESET),
         String::new(),
         format!("{}Execution{}", PURPLE, RESET),
         format!("  {}/mode{}       set exec mode (read/work)", WHITE, RESET),
@@ -2382,9 +3409,6 @@ fn print_help() {
         format!("  {}/work{}       set exec mode to work", WHITE, RESET),
         format!("  {}/bot{}        work; cmds auto, diffs ask", WHITE, RESET),
         format!("  {}/yolo{}       work; auto approvals", WHITE, RESET),
-        String::new(),
-        format!("{}Quant{}", PURPLE, RESET),
-        format!("  {}/quant <question>{} run market/time-series research", WHITE, RESET),
         String::new(),
         format!("{}Configuration{}", PURPLE, RESET),
         format!("  {}/model{}      set or show model for this session", WHITE, RESET),
@@ -2397,11 +3421,16 @@ fn print_help() {
         String::new(),
         format!("{}Keyboard{}", PURPLE, RESET),
         format!("  {}Esc{}         interrupt current run (standard mode)", WHITE, RESET),
-        format!("  {}Esc Esc Esc{} undo last edit after interrupt", WHITE, RESET),
+        format!("  {}Esc Esc{}     clear input (standard mode)", WHITE, RESET),
+        format!("  {}Ctrl+C{}      clear input (standard mode)", WHITE, RESET),
+        format!("  {}Ctrl+D{}      quit (standard mode)", WHITE, RESET),
         String::new(),
         format!("{}Session{}", PURPLE, RESET),
         format!("  {}/status /s{}  show current mode/stats", WHITE, RESET),
+        format!("  {}/compact{}    summarize older context (reduce tokens)", WHITE, RESET),
         format!("  {}/reset{}      clear conversation", WHITE, RESET),
+        format!("  {}/new{}        alias for /reset", WHITE, RESET),
+        format!("  {}/tip{}        toggle tips (standard mode)", WHITE, RESET),
         format!("  {}/undo{}       undo last edit", WHITE, RESET),
         format!("  {}/exit{}       quit", WHITE, RESET),
     ];
@@ -2488,23 +3517,59 @@ fn ensure_eli_research_brain(project_root: &Path) -> Result<PathBuf> {
 }
 
 fn read_eli_brain_tail(project_root: &Path, max_chars: usize) -> Result<Option<String>> {
+    const MAX_LOG_ENTRIES: usize = 5;
+    const LOG_MARKER: &str = "<!-- Append-only log below (eli writes here). -->";
+
     let brain = ensure_eli_research_brain(project_root)?;
     let content = std::fs::read_to_string(&brain).context("read eli_research/ELI.md")?;
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
+    if content.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let log_slice = if let Some(idx) = content.find(LOG_MARKER) {
+        &content[idx + LOG_MARKER.len()..]
+    } else {
+        content.as_str()
+    };
+
+    let mut entries: Vec<String> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for line in log_slice.lines() {
+        if line.starts_with("### ") {
+            if !current.is_empty() {
+                entries.push(current.join("\n"));
+                current.clear();
+            }
+            current.push(line.to_string());
+        } else if !current.is_empty() {
+            current.push(line.to_string());
+        }
+    }
+    if !current.is_empty() {
+        entries.push(current.join("\n"));
+    }
+
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    let start = entries.len().saturating_sub(MAX_LOG_ENTRIES);
+    let mut recent = entries[start..].join("\n\n");
+    recent = recent.trim().to_string();
+    if recent.is_empty() {
         return Ok(None);
     }
 
     if max_chars == 0 {
-        return Ok(Some(trimmed.to_string()));
+        return Ok(Some(recent));
     }
 
-    let total = trimmed.chars().count();
+    let total = recent.chars().count();
     if total <= max_chars {
-        return Ok(Some(trimmed.to_string()));
+        return Ok(Some(recent));
     }
 
-    let tail: String = trimmed.chars().skip(total - max_chars).collect();
+    let tail: String = recent.chars().skip(total - max_chars).collect();
     Ok(Some(format!("…\n{tail}")))
 }
 
@@ -2581,6 +3646,123 @@ fn append_eli_brain(project_root: &Path, entry: &str) -> Result<()> {
             .context("append newline to eli_research/ELI.md")?;
     }
     Ok(())
+}
+
+/// Execute /copy command - query session state and copy to clipboard or file
+async fn execute_copy_command(
+    args: &str,
+    memory: &eli_core::memory::Memory,
+    project_root: &Path,
+) -> Result<String> {
+    use eli_core::types::Role;
+
+    // Parse arguments
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    // Check for file output: /copy all > file.md
+    let (scope_parts, output_file) = if let Some(idx) = parts.iter().position(|&p| p == ">") {
+        let (scope, rest) = parts.split_at(idx);
+        let file = rest.get(1).map(|s| s.to_string());
+        (scope.to_vec(), file)
+    } else {
+        (parts, None)
+    };
+
+    // Parse scope
+    let scope = scope_parts.first().copied().unwrap_or("");
+
+    // Check for filters (-data, -raw, -meta)
+    let exclude_data = scope_parts.iter().any(|&p| p == "-data");
+    let exclude_meta = scope_parts.iter().any(|&p| p == "-meta");
+
+    // Get messages from memory
+    let messages = memory.context();
+
+    // Filter by scope
+    let filtered: Vec<_> = match scope {
+        "" | "last" => {
+            // Last assistant response
+            messages.iter()
+                .rev()
+                .find(|m| m.role == Role::Assistant)
+                .into_iter()
+                .collect()
+        }
+        "all" => {
+            // All non-system messages
+            messages.iter()
+                .filter(|m| m.role != Role::System)
+                .collect()
+        }
+        "user" => {
+            messages.iter()
+                .filter(|m| m.role == Role::User)
+                .collect()
+        }
+        "assistant" => {
+            messages.iter()
+                .filter(|m| m.role == Role::Assistant)
+                .collect()
+        }
+        "tools" => {
+            messages.iter()
+                .filter(|m| m.role == Role::Tool)
+                .collect()
+        }
+        n if n.parse::<usize>().is_ok() => {
+            // Last N turns (user + assistant pairs)
+            let n: usize = n.parse().unwrap();
+            let non_system: Vec<_> = messages.iter()
+                .filter(|m| m.role != Role::System)
+                .collect();
+            non_system.into_iter().rev().take(n * 2).collect::<Vec<_>>().into_iter().rev().collect()
+        }
+        _ => {
+            return Err(anyhow::anyhow!("unknown scope '{}'. Use: all, last, user, assistant, tools, or N", scope));
+        }
+    };
+
+    if filtered.is_empty() {
+        return Ok("Nothing to copy.".to_string());
+    }
+
+    // Format as markdown
+    let mut output = String::new();
+    for msg in filtered {
+        let role_str = match msg.role {
+            Role::User => "## User",
+            Role::Assistant => "## Assistant",
+            Role::Tool => &format!("### Tool: {}", msg.name.as_deref().unwrap_or("unknown")),
+            Role::System => continue, // Skip system messages
+        };
+
+        output.push_str(role_str);
+        output.push_str("\n\n");
+
+        let content = if exclude_data && msg.content.len() > 2000 && msg.role == Role::Tool {
+            format!("[output: {} chars, omitted with -data]\n", msg.content.len())
+        } else {
+            msg.content.clone()
+        };
+
+        output.push_str(&content);
+        output.push_str("\n\n");
+    }
+
+    let char_count = output.len();
+
+    // Output to file or clipboard
+    if let Some(file_path) = output_file {
+        let full_path = project_root.join(&file_path);
+        std::fs::write(&full_path, &output)
+            .with_context(|| format!("write to {}", full_path.display()))?;
+        Ok(format!("Copied {} chars to {}", char_count, file_path))
+    } else {
+        // Copy to clipboard
+        eli_screen::clipboard_set(&output).await
+            .map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
+        Ok(format!("Copied {} chars to clipboard", char_count))
+    }
 }
 
 fn slugify_for_filename(input: &str, max_len: usize) -> String {
@@ -2730,7 +3912,8 @@ fn format_duration(d: Duration) -> String {
 
 async fn cmd_tui() -> Result<()> {
     let paths = Paths::discover().context("discover paths")?;
-    let cfg = config::load_or_create(&paths).context("load/create config")?;
+    let mut cfg = config::load_or_create(&paths).context("load/create config")?;
+    ensure_tui_default_model(&mut cfg.chat);
     let adapter = eli_adapters::build_from_chat_config(&cfg.chat).context("build adapter")?;
     let adapter: Arc<dyn LlmAdapter> = Arc::from(adapter);
 
@@ -2751,7 +3934,9 @@ async fn cmd_tui() -> Result<()> {
     let store = SessionStore::new(&paths);
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    eli_tui::run(cfg.chat, adapter, diff_engine, command_runner, store, session_id).await.context("run tui")?;
+    eli_tui::run(cfg.chat, adapter, diff_engine, command_runner, store, session_id)
+        .await
+        .context("run tui")?;
     Ok(())
 }
 
@@ -2769,6 +3954,22 @@ fn apply_overrides(cfg: &mut ConfigFile, provider: Option<String>, model: Option
 }
 
 use base64::Engine;
+
+fn ensure_tui_default_model(chat: &mut eli_core::config::ChatConfig) {
+    let model = chat.model.trim();
+    if model.is_empty() || model.eq_ignore_ascii_case("test") {
+        chat.model = config::DEFAULT_OPENROUTER_MODEL.to_string();
+    }
+}
+
+fn debug_print_request(req: &ChatRequest) {
+    println!("\n=== REQUEST ===");
+    match serde_json::to_string_pretty(req) {
+        Ok(json) => println!("{json}"),
+        Err(err) => println!("(failed to serialize request: {err})"),
+    }
+    println!("\n=== END REQUEST ===");
+}
 
 fn process_input_for_images(input: &str) -> (String, Vec<String>) {
     let mut clean_words = Vec::new();
@@ -2821,17 +4022,20 @@ async fn run_agent_steps(
 
     let max_iters = if chat.auto { chat.max_auto.max(1) } else { 1 };
     let task_start = Instant::now();
-    let brief = matches!(state.display_mode, DisplayMode::Standard);
-    let mut sticky_footer: Option<StickyFooter> = None;
+    let debug = matches!(state.display_mode, DisplayMode::Debug) || matches!(chat.display_mode, DisplayMode::Debug);
+    let brief = matches!(state.display_mode, DisplayMode::Standard) && !matches!(chat.display_mode, DisplayMode::Debug);
+    let mut footer: Option<FooterUi> = None;
+    let mut spinner_idx = 0usize;
+    let mut last_anim = Instant::now();
     let synthesis_title = format_synthesis_title(&initial_user_message);
     let mut task_had_actions = false;
     let mut task_insights: Vec<String> = Vec::new();
     let mut saw_finance_timeseries = false;
     let mut saw_finance_snapshot = false;
+    let mut plan_confirmed = !matches!(state.auto_mode, AutoMode::Plan);
     let mut current_message = initial_user_message;
     let mut current_images = initial_images;
     let root_prompt = current_message.clone();
-    state.last_run_was_research = profile == AgentProfile::Research;
 
     for step in 1..=max_iters {
         let step_start = Instant::now();
@@ -2888,7 +4092,7 @@ async fn run_agent_steps(
                     session_id,
                     &SessionEvent {
                         ts: chrono::Utc::now(),
-                        kind: EventKind::Note { content: note },
+                        kind: EventKind::Note { content: note.clone() },
                     },
                 )
                 .await
@@ -2902,9 +4106,6 @@ async fn run_agent_steps(
         if let Ok(Some(ctx)) = read_eli_brain_context(project_root, 2_000, 6_000) {
             insert_system_context_before_conversation(&mut messages, ChatMessage::system(ctx));
         }
-        if let Some(ctx) = state.recent_research_context(5, 1800) {
-            insert_system_context_before_conversation(&mut messages, ChatMessage::system(ctx));
-        }
         let trajectory_input = messages.clone();
 
         let req = ChatRequest {
@@ -2912,28 +4113,31 @@ async fn run_agent_steps(
             messages,
             temperature: chat.temperature,
             max_tokens: chat.max_tokens,
+            response_format: None,
             stream: true,
         };
+
+        if debug {
+            debug_print_request(&req);
+        }
 
         use std::io::Write;
         let mut out = String::new();
         let mut interrupted = false;
         let mut interrupted_by_esc = false;
-        let mut last_anim = Instant::now();
-        let mut spinner = 0usize;
 
         let connect_start = Instant::now();
         if brief {
-            render_processing_footer(
-                &mut sticky_footer,
-                build_processing_footer_lines(
-                    spinner,
-                    state.queue_len(),
-                    "connecting",
-                    connect_start.elapsed(),
-                    &state.input_buffer,
-                    &state.total_usage,
-                ),
+            if footer.is_none() {
+                footer = Some(FooterUi::enable());
+            }
+            render_footer(
+                &mut footer,
+                "connecting",
+                spinner_idx,
+                connect_start.elapsed(),
+                state,
+                None,
             );
         } else {
             print!("{}eli[{}]>{} connecting...", style::CYAN, step, style::RESET);
@@ -2944,28 +4148,23 @@ async fn run_agent_steps(
             let mut fut = Box::pin(adapter.chat_stream(req));
             loop {
                 let changed = drain_run_key_events(state, &mut interrupted, &mut interrupted_by_esc);
-                if last_anim.elapsed() > Duration::from_millis(80) || changed {
-                    if last_anim.elapsed() > Duration::from_millis(80) {
-                        spinner = (spinner + 1) % style::SPINNER.len();
+                if last_anim.elapsed() > Duration::from_millis(120) || changed {
+                    if last_anim.elapsed() > Duration::from_millis(120) {
+                        spinner_idx = (spinner_idx + 1) % FOOTER_SPINNER.len();
                         last_anim = Instant::now();
                     }
-                    render_processing_footer(
-                        &mut sticky_footer,
-                        build_processing_footer_lines(
-                            spinner,
-                            state.queue_len(),
-                            "connecting",
-                            connect_start.elapsed(),
-                            &state.input_buffer,
-                            &state.total_usage,
-                        ),
+                    render_footer(
+                        &mut footer,
+                        "connecting",
+                        spinner_idx,
+                        connect_start.elapsed(),
+                        state,
+                        None,
                     );
                 }
-
                 if interrupted {
                     break None;
                 }
-
                 tokio::select! {
                     res = &mut fut => break Some(res.context("chat_stream")?),
                     _ = tokio::time::sleep(Duration::from_millis(50)) => {}
@@ -2978,16 +4177,13 @@ async fn run_agent_steps(
         if let Some(mut stream) = stream_opt {
             let thinking_start = Instant::now();
             if brief {
-                render_processing_footer(
-                    &mut sticky_footer,
-                    build_processing_footer_lines(
-                        spinner,
-                        state.queue_len(),
-                        "thinking",
-                        thinking_start.elapsed(),
-                        &state.input_buffer,
-                        &state.total_usage,
-                    ),
+                render_footer(
+                    &mut footer,
+                    "thinking",
+                    spinner_idx,
+                    thinking_start.elapsed(),
+                    state,
+                    None,
                 );
             }
 
@@ -3008,7 +4204,7 @@ async fn run_agent_steps(
                             eli_core::types::ChatStreamEvent::Done => break,
                         }
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(30)) => {}
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
                 }
 
                 let changed = drain_run_key_events(state, &mut interrupted, &mut interrupted_by_esc);
@@ -3016,34 +4212,24 @@ async fn run_agent_steps(
                     break;
                 }
 
-                if last_anim.elapsed() > Duration::from_millis(80) || changed {
-                    if last_anim.elapsed() > Duration::from_millis(80) {
-                        spinner = (spinner + 1) % style::SPINNER.len();
+                if last_anim.elapsed() > Duration::from_millis(120) || changed {
+                    if last_anim.elapsed() > Duration::from_millis(120) {
+                        spinner_idx = (spinner_idx + 1) % FOOTER_SPINNER.len();
                         last_anim = Instant::now();
                     }
-                    // Re-render after input/animation so the footer never flickers between tool output.
-                    // (Keeps the cursor in the scroll region too.)
-                    render_processing_footer(
-                        &mut sticky_footer,
-                        build_processing_footer_lines(
-                            spinner,
-                            state.queue_len(),
-                            "thinking",
-                            thinking_start.elapsed(),
-                            &state.input_buffer,
-                            &state.total_usage,
-                        ),
+                    render_footer(
+                        &mut footer,
+                        "thinking",
+                        spinner_idx,
+                        thinking_start.elapsed(),
+                        state,
+                        None,
                     );
                 }
             }
         }
 
-        let mut undo_after_interrupt = false;
         if brief && interrupted_by_esc {
-            // Triple-ESC workflow:
-            // 1) ESC interrupts the current run
-            // 2) ESC shows warning (arms undo)
-            // 3) ESC confirms undo
             let mut armed = false;
             let mut deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline {
@@ -3062,7 +4248,7 @@ async fn run_agent_steps(
                         if !armed {
                             armed = true;
                             print!(
-                                "\r\x1b[K  {}!{} press {}Esc{} again to undo last edit",
+                                "\r\x1b[K  {}!{} press {}Esc{} again to clear input",
                                 style::YELLOW,
                                 style::RESET,
                                 style::WHITE,
@@ -3071,23 +4257,26 @@ async fn run_agent_steps(
                             std::io::stdout().flush().ok();
                             deadline = Instant::now() + Duration::from_secs(2);
                         } else {
-                            undo_after_interrupt = true;
+                            state.input_buffer.clear();
+                            state.cursor_pos = 0;
                             break;
                         }
                     }
                     CtKeyCode::Char(c) => {
-                        state.input_buffer.push(c);
+                        state.input_buffer.insert(state.cursor_pos, c);
+                        state.cursor_pos += 1;
                         break;
                     }
                     CtKeyCode::Backspace => {
-                        state.input_buffer.pop();
+                        if state.cursor_pos > 0 {
+                            state.cursor_pos -= 1;
+                            state.input_buffer.remove(state.cursor_pos);
+                        }
                         break;
                     }
                     _ => break,
                 }
             }
-
-            // Clear any arming hint before returning to the normal prompt.
             print!("\r\x1b[K");
             std::io::stdout().flush().ok();
         }
@@ -3154,15 +4343,21 @@ async fn run_agent_steps(
                     Err(e) => warn!("failed to write interrupted research report (ignored): {e}"),
                 }
             }
-            if undo_after_interrupt {
-                perform_undo(undo_stack, memory, store, session_id).await?;
-            }
-            break; 
+            break;
         }
 
         if out.trim().is_empty() {
             warn!("empty assistant message");
             break;
+        }
+
+        if debug {
+            println!("\n=== RAW MODEL OUTPUT ===");
+            print!("{}", out);
+            if !out.ends_with('\n') {
+                println!();
+            }
+            println!("=== END RAW MODEL OUTPUT ===");
         }
 
         memory.push(ChatMessage::assistant(out.clone()));
@@ -3193,7 +4388,12 @@ async fn run_agent_steps(
 
         // Print step summary (brief vs full)
         if brief {
+            if step == 1 {
+                // Force a scroll line so the first prompt is not overwritten.
+                print_history_line(String::new());
+            }
             print_step_summary_brief(step, step_elapsed, &model);
+            render_footer(&mut footer, "ready", spinner_idx, Duration::ZERO, state, None);
         } else {
             print_step_summary(step, &model);
         }
@@ -3215,6 +4415,83 @@ async fn run_agent_steps(
             .as_deref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
+
+        let has_actions =
+            !model.commands.is_empty() || !model.diffs.is_empty() || !model.subagents.is_empty();
+
+        if debug {
+            println!("\n=== TOOL CALL ATTEMPTED ===");
+            if model.commands.is_empty() && model.diffs.is_empty() && model.subagents.is_empty() && model.screen.is_empty() {
+                println!("(none)");
+            } else {
+                if !model.commands.is_empty() {
+                    println!("commands:");
+                    for cmd in &model.commands {
+                        println!("  $ {}", cmd);
+                    }
+                }
+                if !model.diffs.is_empty() {
+                    println!("diffs: {}", model.diffs.len());
+                    for diff in &model.diffs {
+                        println!("  {:?} {}", diff.op, diff.path);
+                    }
+                }
+                if !model.subagents.is_empty() {
+                    println!("subagents: {}", model.subagents.len());
+                    for agent in &model.subagents {
+                        println!("  {} (model: {})", agent.name, agent.model.as_deref().unwrap_or("default"));
+                    }
+                }
+                if !model.screen.is_empty() {
+                    println!("screen actions: {}", model.screen.len());
+                }
+            }
+        }
+
+        if matches!(state.auto_mode, AutoMode::Plan)
+            && !plan_confirmed
+            && !wants_user_input
+            && !model.plan.trim().is_empty()
+            && (has_actions || matches!(model.status, StepStatus::KeepWorking))
+        {
+            if brief {
+                footer.take();
+            }
+
+            println!(
+                "\n{}[PLAN]{} \n{}\n",
+                style::BLUE,
+                style::RESET,
+                model.plan.trim_end()
+            );
+
+            use std::io::Write;
+            print!(
+                "{}?{} Confirm plan (Enter = proceed, type = critique): ",
+                style::YELLOW,
+                style::RESET
+            );
+            std::io::stdout().flush().ok();
+
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("read plan confirmation input")?;
+            let critique = input.trim();
+
+            if !critique.is_empty() {
+                current_message = critique.to_string();
+                current_images.clear();
+                continue;
+            }
+
+            plan_confirmed = true;
+
+            if !has_actions {
+                current_message = "Plan approved. Proceed with execution.".to_string();
+                continue;
+            }
+        }
 
         let mut diff_results: Vec<DiffResult> = Vec::new();
         let mut command_results: Vec<CommandResult> = Vec::new();
@@ -3239,22 +4516,9 @@ async fn run_agent_steps(
                 } else {
                     let apply = if approvals_ask_diffs {
                         if brief {
-                            drop(sticky_footer.take());
+                            footer.take();
                         }
                         let ans = confirm("Apply diffs?")?;
-                        if brief {
-                            render_processing_footer(
-                                &mut sticky_footer,
-                                build_processing_footer_lines(
-                                    spinner,
-                                    state.queue_len(),
-                                    "exec",
-                                    Duration::ZERO,
-                                    &state.input_buffer,
-                                    &state.total_usage,
-                                ),
-                            );
-                        }
                         ans
                     } else {
                         true
@@ -3277,16 +4541,13 @@ async fn run_agent_steps(
                     };
                     if brief {
                         let exec_start = Instant::now();
-                        render_processing_footer(
-                            &mut sticky_footer,
-                            build_processing_footer_lines(
-                                spinner,
-                                state.queue_len(),
-                                "exec",
-                                exec_start.elapsed(),
-                                &state.input_buffer,
-                                &state.total_usage,
-                            ),
+                        render_footer(
+                            &mut footer,
+                            "exec",
+                            spinner_idx,
+                            exec_start.elapsed(),
+                            state,
+                            None,
                         );
 
                         let mut fut = Box::pin(run_commands_with_policy(
@@ -3301,25 +4562,21 @@ async fn run_agent_steps(
                                     command_results = res;
                                     break;
                                 }
-                                _ = tokio::time::sleep(Duration::from_millis(40)) => {}
+                                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
                             }
-
                             let changed = drain_run_key_events_queue_only(state);
-                            if last_anim.elapsed() > Duration::from_millis(80) || changed {
-                                if last_anim.elapsed() > Duration::from_millis(80) {
-                                    spinner = (spinner + 1) % style::SPINNER.len();
+                            if last_anim.elapsed() > Duration::from_millis(120) || changed {
+                                if last_anim.elapsed() > Duration::from_millis(120) {
+                                    spinner_idx = (spinner_idx + 1) % FOOTER_SPINNER.len();
                                     last_anim = Instant::now();
                                 }
-                                render_processing_footer(
-                                    &mut sticky_footer,
-                                    build_processing_footer_lines(
-                                        spinner,
-                                        state.queue_len(),
-                                        "exec",
-                                        exec_start.elapsed(),
-                                        &state.input_buffer,
-                                        &state.total_usage,
-                                    ),
+                                render_footer(
+                                    &mut footer,
+                                    "exec",
+                                    spinner_idx,
+                                    exec_start.elapsed(),
+                                    state,
+                                    None,
                                 );
                             }
                         }
@@ -3335,22 +4592,9 @@ async fn run_agent_steps(
                 } else {
                     let run = if approvals_ask_commands {
                         if brief {
-                            drop(sticky_footer.take());
+                            footer.take();
                         }
                         let ans = confirm("Run commands?")?;
-                        if brief {
-                            render_processing_footer(
-                                &mut sticky_footer,
-                                build_processing_footer_lines(
-                                    spinner,
-                                    state.queue_len(),
-                                    "exec",
-                                    Duration::ZERO,
-                                    &state.input_buffer,
-                                    &state.total_usage,
-                                ),
-                            );
-                        }
                         ans
                     } else {
                         true
@@ -3363,16 +4607,13 @@ async fn run_agent_steps(
                         };
                         if brief {
                             let exec_start = Instant::now();
-                            render_processing_footer(
-                                &mut sticky_footer,
-                                build_processing_footer_lines(
-                                    spinner,
-                                    state.queue_len(),
-                                    "exec",
-                                    exec_start.elapsed(),
-                                    &state.input_buffer,
-                                    &state.total_usage,
-                                ),
+                            render_footer(
+                                &mut footer,
+                                "exec",
+                                spinner_idx,
+                                exec_start.elapsed(),
+                                state,
+                                None,
                             );
 
                             let mut fut = Box::pin(run_commands_with_policy(
@@ -3387,25 +4628,21 @@ async fn run_agent_steps(
                                         command_results = res;
                                         break;
                                     }
-                                    _ = tokio::time::sleep(Duration::from_millis(40)) => {}
+                                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
                                 }
-
                                 let changed = drain_run_key_events_queue_only(state);
-                                if last_anim.elapsed() > Duration::from_millis(80) || changed {
-                                    if last_anim.elapsed() > Duration::from_millis(80) {
-                                        spinner = (spinner + 1) % style::SPINNER.len();
+                                if last_anim.elapsed() > Duration::from_millis(120) || changed {
+                                    if last_anim.elapsed() > Duration::from_millis(120) {
+                                        spinner_idx = (spinner_idx + 1) % FOOTER_SPINNER.len();
                                         last_anim = Instant::now();
                                     }
-                                    render_processing_footer(
-                                        &mut sticky_footer,
-                                        build_processing_footer_lines(
-                                            spinner,
-                                            state.queue_len(),
-                                            "exec",
-                                            exec_start.elapsed(),
-                                            &state.input_buffer,
-                                            &state.total_usage,
-                                        ),
+                                    render_footer(
+                                        &mut footer,
+                                        "exec",
+                                        spinner_idx,
+                                        exec_start.elapsed(),
+                                        state,
+                                        None,
                                     );
                                 }
                             }
@@ -3453,6 +4690,10 @@ async fn run_agent_steps(
                 }
             }
 
+            if !command_results.is_empty() {
+                command_results = augment_tool_errors(command_results);
+            }
+
             let insight = extract_insight(&command_results, &diff_results);
             if let Some(ref line) = insight {
                 if task_insights.last().map(|s| s != line).unwrap_or(true) {
@@ -3463,22 +4704,46 @@ async fn run_agent_steps(
             }
 
             if !command_results.is_empty() {
-                print_command_results(&command_results, brief);
+                if debug {
+                    print_tool_results_debug(&command_results);
+                } else {
+                    print_command_results(
+                        &command_results,
+                        brief,
+                        matches!(state.display_mode, DisplayMode::Brain),
+                    );
+                }
+                if brief {
+                    render_footer(&mut footer, "ready", spinner_idx, Duration::ZERO, state, None);
+                }
             }
 
             if !model.screen.is_empty() && !read_mode && !brief {
                 print_screen_results(&model.screen).await;
             }
 
-                            if !diff_results.is_empty()
-                                || !command_results.is_empty()
-                                || !model.screen.is_empty()
-                            {
-                                task_had_actions = true;
-                                let observation =
-                                    build_observation(read_mode, approvals_ask_commands, approvals_ask_diffs, &diff_results, &command_results);
-                                step_observation = Some(observation.clone());
-                                memory.push(ChatMessage::tool(observation.clone(), "eli"));                store
+            let command_results_for_llm = shadow_large_tool_outputs(project_root, &command_results);
+
+            if !diff_results.is_empty() || !command_results.is_empty() || !model.screen.is_empty() {
+                task_had_actions = true;
+                let observation = build_observation(
+                    read_mode,
+                    approvals_ask_commands,
+                    approvals_ask_diffs,
+                    &diff_results,
+                    &command_results_for_llm,
+                );
+                if debug {
+                    println!("\n=== OBSERVATION INJECTED (eli) ===");
+                    print!("{}", observation);
+                    if !observation.ends_with('\n') {
+                        println!();
+                    }
+                    println!("=== END OBSERVATION INJECTED (eli) ===");
+                }
+                step_observation = Some(observation.clone());
+                memory.push(ChatMessage::tool(observation.clone(), "eli"));
+                store
                     .append(
                         session_id,
                         &SessionEvent {
@@ -3495,16 +4760,13 @@ async fn run_agent_steps(
             Vec::new()
         } else if brief {
             let agents_start = Instant::now();
-            render_processing_footer(
-                &mut sticky_footer,
-                build_processing_footer_lines(
-                    spinner,
-                    state.queue_len(),
-                    "agents",
-                    agents_start.elapsed(),
-                    &state.input_buffer,
-                    &state.total_usage,
-                ),
+            render_footer(
+                &mut footer,
+                "agents",
+                spinner_idx,
+                agents_start.elapsed(),
+                state,
+                None,
             );
 
             let mut fut = Box::pin(run_subagents(adapter.clone(), chat, memory, &model.subagents));
@@ -3513,25 +4775,21 @@ async fn run_agent_steps(
                     res = &mut fut => {
                         break res;
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(40)) => {}
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
                 }
-
                 let changed = drain_run_key_events_queue_only(state);
-                if last_anim.elapsed() > Duration::from_millis(80) || changed {
-                    if last_anim.elapsed() > Duration::from_millis(80) {
-                        spinner = (spinner + 1) % style::SPINNER.len();
+                if last_anim.elapsed() > Duration::from_millis(120) || changed {
+                    if last_anim.elapsed() > Duration::from_millis(120) {
+                        spinner_idx = (spinner_idx + 1) % FOOTER_SPINNER.len();
                         last_anim = Instant::now();
                     }
-                    render_processing_footer(
-                        &mut sticky_footer,
-                        build_processing_footer_lines(
-                            spinner,
-                            state.queue_len(),
-                            "agents",
-                            agents_start.elapsed(),
-                            &state.input_buffer,
-                            &state.total_usage,
-                        ),
+                    render_footer(
+                        &mut footer,
+                        "agents",
+                        spinner_idx,
+                        agents_start.elapsed(),
+                        state,
+                        None,
                     );
                 }
             };
@@ -3546,7 +4804,18 @@ async fn run_agent_steps(
             } else {
                 println!("  subagents: {} completed", subagent_results.len());
             }
+            if brief {
+                render_footer(&mut footer, "ready", spinner_idx, Duration::ZERO, state, None);
+            }
             let observation = build_subagent_observation(&subagent_results);
+            if debug {
+                println!("\n=== OBSERVATION INJECTED (eli.subagents) ===");
+                print!("{}", observation);
+                if !observation.ends_with('\n') {
+                    println!();
+                }
+                println!("=== END OBSERVATION INJECTED (eli.subagents) ===");
+            }
             if let Some(ref mut existing) = step_observation {
                 existing.push_str("\n");
                 existing.push_str(&observation);
@@ -3576,33 +4845,6 @@ async fn run_agent_steps(
             observation: step_observation,
             usage: state.last_usage.clone(),
         }).await;
-
-        if profile == AgentProfile::Research && matches!(model.status, StepStatus::Done) && !wants_user_input {
-            if !saw_finance_timeseries && !saw_finance_snapshot {
-                let msg = "policy_violation: research mode requires at least one market data fetch via `eli finance timeseries` or `eli finance snapshot` before answering. If analyzing price action, zoom out first (e.g., --range 5y --granularity 1mo) and include correlates.";
-                if !brief {
-                    println!("{msg}");
-                } else {
-                    println!("  (policy) forcing market data fetch");
-                }
-                memory.push(ChatMessage::tool(msg.to_string(), "eli.policy"));
-                store
-                    .append(
-                        session_id,
-                        &SessionEvent {
-                            ts: chrono::Utc::now(),
-                            kind: EventKind::Note {
-                                content: msg.to_string(),
-                            },
-                        },
-                    )
-                    .await
-                    .ok();
-
-                current_message = "KEEP WORKING".to_string();
-                continue;
-            }
-        }
 
 	        match model.status {
 	            StepStatus::Done => {
@@ -3799,7 +5041,7 @@ async fn run_agent_steps(
         if let Some(ask) = model.ask_user {
             if !ask.trim().is_empty() {
                 if brief {
-                    drop(sticky_footer.take());
+                    footer.take();
                 }
                 let (msg, imgs) = prompt_user(ask.trim())?;
                 current_message = msg;
@@ -3811,20 +5053,20 @@ async fn run_agent_steps(
         current_message = "KEEP WORKING".to_string();
     }
 
+    if brief {
+        footer.take();
+    }
+
     Ok(())
 }
 
-fn print_banner(chat: &eli_core::config::ChatConfig, project_root: &Path, state: &SessionState) {
+fn print_banner(chat: &eli_core::config::ChatConfig, project_root: &Path, _state: &SessionState) {
     use style::*;
 
+    let model = truncate_middle(&chat.model, 60);
+    let root = format_root_path(project_root);
     // ASCII art logo with monochrome gradient (white → gray)
-    const W1: &str = "\x1b[38;5;255m";  // bright white
-    const W2: &str = "\x1b[38;5;252m";  // light gray
-    const W3: &str = "\x1b[38;5;249m";  // medium light
-    const W4: &str = "\x1b[38;5;246m";  // medium gray
-    const W5: &str = "\x1b[38;5;243m";  // darker gray
-    const W6: &str = "\x1b[38;5;240m";  // dark gray
-    let logo = format!(
+    println!(
         r#"
 {W1}{BOLD}  ███████╗██╗     ██╗{RESET}
 {W2}{BOLD}  ██╔════╝██║     ██║{RESET}     {WHITE}financial coding agent{RESET}
@@ -3832,51 +5074,24 @@ fn print_banner(chat: &eli_core::config::ChatConfig, project_root: &Path, state:
 {W4}{BOLD}  ██╔══╝  ██║     ██║{RESET}
 {W5}{BOLD}  ███████╗███████╗██║{RESET}
 {W6}{BOLD}  ╚══════╝╚══════╝╚═╝{RESET}
-"#
+"#,
+        W1 = "\x1b[38;5;255m", // bright white
+        W2 = "\x1b[38;5;252m", // light gray
+        W3 = "\x1b[38;5;249m", // medium light
+        W4 = "\x1b[38;5;246m", // medium gray
+        W5 = "\x1b[38;5;243m", // darker gray
+        W6 = "\x1b[38;5;240m", // dark gray
     );
-    println!("{}", logo);
 
-    let mode = format_mode(chat.mode);
-    let approvals = format_approvals_display(chat);
-    let auto = if chat.auto { "on" } else { "off" };
-    let compact = if chat.compact { "on" } else { "off" };
-    let model = truncate_middle(&chat.model, 42);
-    let root = format_root_path(project_root);
-    let display = match state.display_mode {
-        DisplayMode::Standard => "standard",
-        DisplayMode::Brain => "brain",
-    };
-    let agent = match state.auto_mode {
-        AutoMode::Normal => "normal",
-        AutoMode::Plan => "plan",
-        AutoMode::Autonomous => "autonomous",
-    };
-
-    // Status section with styled labels
-    let lines = vec![
-        format!("{CYAN}●{RESET} {WHITE}{}{RESET} {GRAY}›{RESET} {BLUE}{}{RESET}", chat.provider, model),
-        format!("{GRAY}  cwd{RESET} {}", root),
-        String::new(),
-        format!(
-            "{PURPLE}◆{RESET} display {WHITE}{}{RESET}  {GRAY}│{RESET}  agent {WHITE}{}{RESET}  {GRAY}│{RESET}  exec {WHITE}{}{RESET}",
-            display, agent, mode
-        ),
-        format!(
-            "{GREEN}◆{RESET} approvals {WHITE}{}{RESET}  {GRAY}│{RESET}  auto-run {WHITE}{}{RESET}  {GRAY}│{RESET}  compact {WHITE}{}{RESET}",
-            approvals, auto, compact
-        ),
-        format!(
-            "{YELLOW}◆{RESET} memory {WHITE}{}{RESET} steps  {GRAY}│{RESET}  parallel {WHITE}{}{RESET} cmds (cap) / {WHITE}{}{RESET} agents (cap)",
-            chat.mem_steps, chat.parallel_commands, chat.parallel_subagents
-        ),
-        String::new(),
-        format!(
-            "{DARK_GRAY}shortcuts:{RESET} {MUTED}Esc  /help  /status  /mode  /model  /undo  /exit{RESET}"
-        ),
-    ];
-
-    let out = format_indented_block(&lines);
-    println!("{}", out);
+    println!(
+        "{}({} / {}){}",
+        GRAY,
+        chat.provider,
+        model,
+        RESET
+    );
+    println!("{}cwd{} {}", GRAY, RESET, root);
+    println!("{}Auto mode. /help for commands.{}", DARK_GRAY, RESET);
     println!();
 }
 
@@ -3932,12 +5147,7 @@ fn print_step_summary(step: u32, model: &eli_core::contract::ModelResponse) {
 
 /// Brief step summary for standard mode - one line
 fn print_step_summary_brief(_step: u32, elapsed: Duration, model: &eli_core::contract::ModelResponse) {
-    use style::*;
-    use std::io::Write;
-
-    let secs = elapsed.as_secs_f32();
-    let time_str = format!("{:.1}s", secs);
-
+    let _ = elapsed;
     match model.status {
         StepStatus::KeepWorking => {
             // Show focus/plan when still working
@@ -3946,40 +5156,26 @@ fn print_step_summary_brief(_step: u32, elapsed: Duration, model: &eli_core::con
             } else {
                 model.focus.trim()
             };
-            println!(
-                "  {}→{} {} {}{}{}",
-                BLUE, RESET,
-                truncate(focus, 65),
-                DARK_GRAY, time_str, RESET
-            );
+            if focus.is_empty() {
+                return;
+            }
+            print_history_line(format!(
+                "→ {}",
+                focus
+            ));
         }
         StepStatus::Done => {
             // Show the actual response/answer unboxed
-            let answer = model.notes.trim();
+            let answer = model
+                .synthesis
+                .as_ref()
+                .map(|s| s.answer.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| model.notes.trim());
             if answer.is_empty() { return; }
             
-            println!(); // Ensure one empty line before response
-            
-            let mut lines = Vec::new();
-            for line in answer.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() { 
-                    lines.push(String::new());
-                    continue; 
-                }
-                
-                // If it already starts with a bullet/dash, preserve it but colored
-                // Otherwise add a bullet
-                if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("• ") {
-                    lines.push(format!("{}{}", style::RESET, trimmed));
-                } else {
-                    lines.push(format!("{}•{} {}", style::DARK_GRAY, style::RESET, trimmed));
-                }
-            }
-            
-            let out = format_indented_block(&lines);
-            print!("{}", out);
-            std::io::stdout().flush().ok();
+            print_history_line(String::new());
+            print_markdown(answer);
         }
     };
 }
@@ -3999,6 +5195,100 @@ fn extract_insight(command_results: &[CommandResult], diff_results: &[DiffResult
     None
 }
 
+fn build_command_digest(result: &CommandResult) -> String {
+    let stdout = result.stdout.trim();
+    let stderr = result.stderr.trim();
+    let stdout_bytes = result.stdout.as_bytes().len();
+    let stderr_bytes = result.stderr.as_bytes().len();
+
+    if result.returncode != 0 {
+        return format!(
+            "returncode={} stdout_bytes={} stderr_bytes={}",
+            result.returncode, stdout_bytes, stderr_bytes
+        );
+    }
+
+    if stdout.is_empty() {
+        return format!(
+            "returncode={} stdout_bytes={} stderr_bytes={}",
+            result.returncode, stdout_bytes, stderr_bytes
+        );
+    }
+
+    if stdout.starts_with("[OUTPUT SUPPRESSED]") {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(saved_to) = stdout.split("saved_to=").nth(1).and_then(|s| s.split_whitespace().next()) {
+            parts.push(format!("saved_to={saved_to}"));
+        }
+        if let Some(bytes) = stdout.split('(').nth(1).and_then(|s| s.split(" bytes").next()) {
+            if bytes.chars().all(|c| c.is_ascii_digit()) {
+                parts.push(format!("bytes={bytes}"));
+            }
+        }
+        if let Some(points) = stdout.split("Data points: ").nth(1).and_then(|s| s.split('.').next()) {
+            let points = points.trim();
+            if !points.is_empty() && points.chars().all(|c| c.is_ascii_digit()) {
+                parts.push(format!("data_points={points}"));
+            }
+        }
+        if parts.is_empty() {
+            parts.push(format!("stdout_bytes={stdout_bytes}"));
+        }
+        return parts.join(" ");
+    }
+
+    let looks_like_json = stdout.starts_with('{') || stdout.starts_with('[');
+    if looks_like_json {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
+            return digest_from_json(&value, stdout_bytes);
+        }
+    }
+
+    let lines = stdout.lines().count();
+    format!("stdout_bytes={} lines={}", stdout_bytes, lines)
+}
+
+fn digest_from_json(value: &serde_json::Value, bytes: usize) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(format!("bytes={bytes}"));
+
+    match value {
+        serde_json::Value::Array(items) => {
+            parts.push(format!("items={}", items.len()));
+        }
+        serde_json::Value::Object(map) => {
+            let mut array_parts: Vec<String> = Vec::new();
+            for (key, val) in map.iter() {
+                if let serde_json::Value::Array(items) = val {
+                    array_parts.push(format!("{key}={}", items.len()));
+                }
+            }
+            if !array_parts.is_empty() {
+                array_parts.truncate(4);
+                parts.extend(array_parts);
+            } else {
+                parts.push(format!("keys={}", map.len()));
+            }
+            if let Some(ts) = map
+                .get("generated_at")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+            {
+                parts.push(format!("generated_at={ts}"));
+            } else if let Some(ts) = map
+                .get("fetched_at")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+            {
+                parts.push(format!("fetched_at={ts}"));
+            }
+        }
+        _ => {}
+    }
+
+    parts.join(" ")
+}
+
 fn synthesis_has_content(synthesis: &eli_core::contract::Synthesis) -> bool {
     !synthesis.summary.is_empty()
         || !synthesis.next_steps.is_empty()
@@ -4007,6 +5297,11 @@ fn synthesis_has_content(synthesis: &eli_core::contract::Synthesis) -> bool {
 
 fn format_synthesis_title(_user_message: &str) -> String {
     String::new()
+}
+
+fn print_markdown(text: &str) {
+    let skin = MadSkin::default();
+    skin.print_text(text);
 }
 
 fn print_synthesis_box(title: &str, synthesis: &eli_core::contract::Synthesis) {
@@ -4018,11 +5313,13 @@ fn print_synthesis_box(title: &str, synthesis: &eli_core::contract::Synthesis) {
          lines.push(format!("{}{}{}", GRAY, title, RESET));
     }
 
+    let mut seen = std::collections::HashSet::new();
     let summary: Vec<String> = synthesis
         .summary
         .iter()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.to_string()))
         .take(6)
         .map(|s| format!("{}•{} {}", GREEN, RESET, s))
         .collect();
@@ -4182,12 +5479,28 @@ mod style {
     pub const INFO: &str = "\x1b[38;5;111m";      // soft blue
     pub const MUTED: &str = "\x1b[38;5;245m";     // gray
 
-    // Spinner frames (Braille-based)
-    pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    // Spinner frames handled by indicatif (no manual frames here).
+}
 
-    // Alternative spinners
-    pub const DOTS: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
-    pub const PULSE: &[&str] = &["◜", "◠", "◝", "◞", "◡", "◟"];
+fn split_leading_spaces(s: &str) -> (String, &str) {
+    let count = s.chars().take_while(|c| *c == ' ').count();
+    let (indent, rest) = s.split_at(count);
+    (indent.to_string(), rest)
+}
+
+fn split_bullet_prefix(s: &str) -> (String, String) {
+    let candidates = ["- ", "* ", "• ", "=> ", "→ "];
+    for cand in candidates {
+        if s.starts_with(cand) {
+            return (cand.to_string(), s[cand.len()..].to_string());
+        }
+    }
+    if let Some(pos) = s.find(". ") {
+        if s[..pos].chars().all(|c| c.is_ascii_digit()) {
+            return (s[..pos + 2].to_string(), s[pos + 2..].to_string());
+        }
+    }
+    (String::new(), s.to_string())
 }
 
 fn format_box_string(lines: &[String]) -> String {
@@ -4199,143 +5512,388 @@ fn format_indented_block(lines: &[String]) -> String {
         return String::new();
     }
 
-    if lines.is_empty() {
-        return String::new();
-    }
-
-    // Use terminal width minus 2 (margin) minus 1 (safety)
     let (term_width, _term_height) = terminal_size();
-    
-    // Threshold Check
-    if term_width < 40 {
+    if term_width < 20 {
         return lines.join("\n");
     }
 
     let term_width = term_width.min(140);
-    // Margin on left
-    let margin = 2;
-    let max_content_width = term_width.saturating_sub(margin + 1);
-
-    if max_content_width == 0 {
-        return lines.join("\n");
-    }
-
+    let max_content_width = term_width.saturating_sub(1).max(1);
     let mut wrapped_lines = Vec::new();
     for line in lines {
-        let line = sanitize_for_box(line);
-        if line.is_empty() {
+        let clean = strip_ansi(line);
+        if clean.trim().is_empty() {
             wrapped_lines.push(String::new());
             continue;
         }
 
-        // Strip ANSI for processing, but keep track of original
-        let visible_line = strip_ansi(&line);
-
-        // Find prefix length (bullet points or numbers) based on visible text
-        let mut prefix_visible_len = if visible_line.starts_with("- ") {
-            2
-        } else if visible_line.starts_with("• ") {
-            2
-        } else if visible_line.starts_with("=> ") {
-            3
-        } else if visible_line.starts_with("→ ") {
-            2 // → is one char visually
-        } else if visible_line.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-            if let Some(pos) = visible_line.find(". ") {
-                pos + 2
-            } else {
-                0
-            }
+        let (indent, rest) = split_leading_spaces(&clean);
+        let (prefix, content) = split_bullet_prefix(rest);
+        let full = format!("{prefix}{content}");
+        let subsequent_indent = if prefix.is_empty() {
+            indent.clone()
         } else {
-            0
+            format!("{}{}", indent, " ".repeat(prefix.width()))
         };
-        // Don't let indent consume the entire line in narrow terminals.
-        prefix_visible_len = prefix_visible_len.min(max_content_width.saturating_sub(1));
 
-        // If line fits, just add it
-        if visible_line.width() <= max_content_width {
-            wrapped_lines.push(line);
-            continue;
-        }
-
-        // Need to wrap - work on the original line (preserving ANSI codes).
-        let indent = " ".repeat(prefix_visible_len);
-        let mut current_visible_len = 0usize;
-        let mut current_line = String::new();
-        let mut current_prefix_len = 0usize; // 0 for first line, prefix_visible_len for continuations
-        let mut is_first_wrapped_line = true;
-
-        for word in line.split_whitespace() {
-            let word_visible_len = strip_ansi(word).width();
-
-            // If we're at the start of the line (only prefix), don't insert a leading space.
-            let space_needed = if current_visible_len == current_prefix_len { 0 } else { 1 };
-            if current_visible_len + space_needed + word_visible_len <= max_content_width {
-                if space_needed == 1 {
-                    current_line.push(' ');
-                    current_visible_len += 1;
-                }
-                current_line.push_str(word);
-                current_visible_len += word_visible_len;
-                continue;
-            }
-
-            // Word doesn't fit; flush the current line if it has content beyond the prefix.
-            if current_visible_len > current_prefix_len {
-                wrapped_lines.push(current_line);
-                is_first_wrapped_line = false;
-            }
-
-            // Start (or restart) the next line (continuation lines are indented).
-            current_line = if is_first_wrapped_line {
-                String::new()
-            } else {
-                indent.clone()
-            };
-            current_prefix_len = if is_first_wrapped_line { 0 } else { prefix_visible_len };
-            current_visible_len = current_prefix_len;
-
-            let available_width = max_content_width.saturating_sub(current_prefix_len).max(1);
-            if word_visible_len <= available_width {
-                current_line.push_str(word);
-                current_visible_len += word_visible_len;
-                continue;
-            }
-
-            // Hard-wrap long "words" (paths, code, etc) to prevent the right border from wrapping.
-            let chunks = split_ansi_chunks(word, available_width);
-            for (idx, chunk) in chunks.iter().enumerate() {
-                if idx > 0 {
-                    wrapped_lines.push(current_line);
-                    is_first_wrapped_line = false;
-                    current_line = indent.clone();
-                    current_visible_len = prefix_visible_len;
-                    current_prefix_len = prefix_visible_len;
-                }
-                current_line.push_str(chunk);
-                current_visible_len += strip_ansi(chunk).width();
-            }
-        }
-        if current_visible_len > current_prefix_len {
-            wrapped_lines.push(current_line);
+        let options = WrapOptions::new(max_content_width)
+            .break_words(true)
+            .initial_indent(&indent)
+            .subsequent_indent(&subsequent_indent);
+        let wrapped = wrap(&full, &options);
+        for line in wrapped {
+            wrapped_lines.push(line.into_owned());
         }
     }
 
-    // Just print as indented block
-    let mut out = String::new();
-    let margin_str = " ".repeat(margin);
-
-    // One blank line top?
-    // out.push('\n'); 
-
-    for line in &wrapped_lines {
-        // strip ansi for checking emptiness? no, keep it simple
-        out.push_str(&margin_str);
-        out.push_str(line);
+    let mut out = wrapped_lines.join("\n");
+    if !out.is_empty() {
         out.push('\n');
     }
-    
     out
+}
+
+fn tail_to_width(input: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in input.chars().rev() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > max_width {
+            break;
+        }
+        out.insert(0, ch);
+        width += w;
+    }
+    out
+}
+
+fn flush_buffer(out: &mut std::io::Stdout, buf: &Buffer, rect: Rect, top: u16) {
+    let mut current_style = Style::default();
+    for y in 0..rect.height {
+        queue!(out, cursor::MoveTo(0, top + y)).ok();
+        for x in 0..rect.width {
+            let cell = buf.get(x, y);
+            let cell_style = cell.style();
+            if cell_style != current_style {
+                apply_style(out, cell_style);
+                current_style = cell_style;
+            }
+            queue!(out, crossterm::style::Print(cell.symbol())).ok();
+        }
+        queue!(out, SetAttribute(Attribute::Reset), ResetColor).ok();
+        current_style = Style::default();
+    }
+}
+
+fn apply_style(out: &mut std::io::Stdout, style: Style) {
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor).ok();
+    if let Some(fg) = style.fg {
+        queue!(out, SetForegroundColor(map_color(fg))).ok();
+    }
+    if let Some(bg) = style.bg {
+        queue!(out, SetBackgroundColor(map_color(bg))).ok();
+    }
+    let mods = style.add_modifier;
+    if mods.contains(Modifier::BOLD) {
+        queue!(out, SetAttribute(Attribute::Bold)).ok();
+    }
+    if mods.contains(Modifier::DIM) {
+        queue!(out, SetAttribute(Attribute::Dim)).ok();
+    }
+    if mods.contains(Modifier::ITALIC) {
+        queue!(out, SetAttribute(Attribute::Italic)).ok();
+    }
+    if mods.contains(Modifier::UNDERLINED) {
+        queue!(out, SetAttribute(Attribute::Underlined)).ok();
+    }
+    if mods.contains(Modifier::REVERSED) {
+        queue!(out, SetAttribute(Attribute::Reverse)).ok();
+    }
+    if mods.contains(Modifier::HIDDEN) {
+        queue!(out, SetAttribute(Attribute::Hidden)).ok();
+    }
+    if mods.contains(Modifier::CROSSED_OUT) {
+        queue!(out, SetAttribute(Attribute::CrossedOut)).ok();
+    }
+    if mods.contains(Modifier::SLOW_BLINK) {
+        queue!(out, SetAttribute(Attribute::SlowBlink)).ok();
+    }
+    if mods.contains(Modifier::RAPID_BLINK) {
+        queue!(out, SetAttribute(Attribute::RapidBlink)).ok();
+    }
+}
+
+fn map_color(color: Color) -> crossterm::style::Color {
+    match color {
+        Color::Reset => crossterm::style::Color::Reset,
+        Color::Black => crossterm::style::Color::Black,
+        Color::Red => crossterm::style::Color::DarkRed,
+        Color::Green => crossterm::style::Color::DarkGreen,
+        Color::Yellow => crossterm::style::Color::DarkYellow,
+        Color::Blue => crossterm::style::Color::DarkBlue,
+        Color::Magenta => crossterm::style::Color::DarkMagenta,
+        Color::Cyan => crossterm::style::Color::DarkCyan,
+        Color::Gray => crossterm::style::Color::Grey,
+        Color::DarkGray => crossterm::style::Color::DarkGrey,
+        Color::LightRed => crossterm::style::Color::Red,
+        Color::LightGreen => crossterm::style::Color::Green,
+        Color::LightYellow => crossterm::style::Color::Yellow,
+        Color::LightBlue => crossterm::style::Color::Blue,
+        Color::LightMagenta => crossterm::style::Color::Magenta,
+        Color::LightCyan => crossterm::style::Color::Cyan,
+        Color::White => crossterm::style::Color::White,
+        Color::Indexed(idx) => crossterm::style::Color::AnsiValue(idx),
+        Color::Rgb(r, g, b) => crossterm::style::Color::Rgb { r, g, b },
+    }
+}
+
+fn footer_title(
+    phase: &str,
+    spinner_idx: usize,
+    queue_len: usize,
+    elapsed: Duration,
+    total_tokens: u32,
+    mode: Option<PromptMode>,
+) -> String {
+    let spinner = FOOTER_SPINNER[spinner_idx % FOOTER_SPINNER.len()];
+    let queue_indicator = if queue_len > 0 {
+        format!(" [{}Q]", queue_len)
+    } else {
+        String::new()
+    };
+    let mode_chip = match mode {
+        Some(PromptMode::Ask) => " [ASK]",
+        Some(PromptMode::Plan) => " [PLAN]",
+        Some(PromptMode::Auto) => " [AUTO]",
+        None => "",
+    };
+    format!(
+        "{spinner} {phase}{queue_indicator}{mode_chip} [{}s] {total_tokens} tokens",
+        elapsed.as_secs()
+    )
+}
+
+fn render_footer(
+    footer: &mut Option<FooterUi>,
+    phase: &str,
+    spinner_idx: usize,
+    elapsed: Duration,
+    state: &SessionState,
+    mode: Option<PromptMode>,
+) {
+    if footer.is_none() {
+        *footer = Some(FooterUi::enable());
+    }
+    if let Some(footer) = footer.as_mut() {
+        let title = footer_title(
+            phase,
+            spinner_idx,
+            state.queue_len(),
+            elapsed,
+            state.total_usage.total_tokens,
+            mode,
+        );
+        footer.render(&title, &state.input_buffer, state.cursor_pos);
+    }
+}
+
+
+fn drain_run_key_events(
+    state: &mut SessionState,
+    interrupted: &mut bool,
+    interrupted_by_esc: &mut bool,
+) -> bool {
+    let mut changed = false;
+    while ct_event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let Ok(ev) = ct_event::read() else {
+            continue;
+        };
+        match ev {
+            CtEvent::Resize(_, _) => {
+                changed = true;
+            }
+            CtEvent::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    CtKeyCode::Char(c) => {
+                        state.input_buffer.insert(state.cursor_pos, c);
+                        state.cursor_pos += 1;
+                        changed = true;
+                    }
+                    CtKeyCode::Backspace => {
+                        if state.cursor_pos > 0 {
+                            state.cursor_pos -= 1;
+                            state.input_buffer.remove(state.cursor_pos);
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Delete => {
+                        if state.cursor_pos < state.input_buffer.len() {
+                            state.input_buffer.remove(state.cursor_pos);
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Left => {
+                        if state.cursor_pos > 0 {
+                            state.cursor_pos -= 1;
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Right => {
+                        if state.cursor_pos < state.input_buffer.len() {
+                            state.cursor_pos += 1;
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Home => {
+                        state.cursor_pos = 0;
+                        changed = true;
+                    }
+                    CtKeyCode::End => {
+                        state.cursor_pos = state.input_buffer.len();
+                        changed = true;
+                    }
+                    CtKeyCode::Enter => {
+                        let trimmed = state.input_buffer.trim().to_string();
+                        if !trimmed.is_empty() {
+                            if trimmed == "/stop" || trimmed == "/interrupt" {
+                                *interrupted = true;
+                                state.input_buffer.clear();
+                                state.cursor_pos = 0;
+                                changed = true;
+                                break;
+                            }
+                            print_history_line(format!("{}›{} {}", style::CYAN, style::RESET, trimmed));
+                            state.queue_prompt(trimmed.clone());
+                            state.prompt_history.push(trimmed);
+                            state.input_buffer.clear();
+                            state.cursor_pos = 0;
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Esc => {
+                        *interrupted = true;
+                        *interrupted_by_esc = true;
+                        changed = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+fn drain_run_key_events_queue_only(state: &mut SessionState) -> bool {
+    let mut changed = false;
+    while ct_event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let Ok(ev) = ct_event::read() else {
+            continue;
+        };
+        match ev {
+            CtEvent::Resize(_, _) => {
+                changed = true;
+            }
+            CtEvent::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    CtKeyCode::Char(c) => {
+                        state.input_buffer.insert(state.cursor_pos, c);
+                        state.cursor_pos += 1;
+                        changed = true;
+                    }
+                    CtKeyCode::Backspace => {
+                        if state.cursor_pos > 0 {
+                            state.cursor_pos -= 1;
+                            state.input_buffer.remove(state.cursor_pos);
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Delete => {
+                        if state.cursor_pos < state.input_buffer.len() {
+                            state.input_buffer.remove(state.cursor_pos);
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Left => {
+                        if state.cursor_pos > 0 {
+                            state.cursor_pos -= 1;
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Right => {
+                        if state.cursor_pos < state.input_buffer.len() {
+                            state.cursor_pos += 1;
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Home => {
+                        state.cursor_pos = 0;
+                        changed = true;
+                    }
+                    CtKeyCode::End => {
+                        state.cursor_pos = state.input_buffer.len();
+                        changed = true;
+                    }
+                    CtKeyCode::Enter => {
+                        let trimmed = state.input_buffer.trim().to_string();
+                        if !trimmed.is_empty() {
+                            print_history_line(format!("{}›{} {}", style::CYAN, style::RESET, trimmed));
+                            state.queue_prompt(trimmed.clone());
+                            state.prompt_history.push(trimmed);
+                            state.input_buffer.clear();
+                            state.cursor_pos = 0;
+                            changed = true;
+                        }
+                    }
+                    CtKeyCode::Esc => {
+                        state.input_buffer.clear();
+                        state.cursor_pos = 0;
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+fn render_ratatui_panel(title: &str, body: &str) -> String {
+    let (width, _) = terminal_size();
+    let width = width.min(140).max(20);
+    let inner_width = width.saturating_sub(2).max(1);
+    let wrapped = wrap(body, WrapOptions::new(inner_width));
+    let height = wrapped.len().saturating_add(2).max(3);
+    let rect = Rect::new(0, 0, width as u16, height as u16);
+    let mut buf = Buffer::empty(rect);
+    let paragraph = Paragraph::new(wrapped.join("\n"))
+        .block(Block::default().title(title).borders(Borders::ALL));
+    paragraph.render(rect, &mut buf);
+    buffer_to_lines(buf, rect).join("\n")
+}
+
+fn buffer_to_lines(buf: Buffer, rect: Rect) -> Vec<String> {
+    let mut lines = Vec::new();
+    for y in 0..rect.height {
+        let mut line = String::new();
+        for x in 0..rect.width {
+            let cell = buf.get(x, y);
+            line.push_str(cell.symbol());
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines
 }
 
 /// Strip ANSI escape sequences for length calculation
@@ -4393,86 +5951,6 @@ fn truncate_line(input: &str, max: usize) -> String {
     input.chars().take(max).collect()
 }
 
-fn truncate_to_visible_width(input: &str, max_visible_width: usize) -> String {
-    if max_visible_width == 0 {
-        return String::new();
-    }
-
-    let mut out = String::new();
-    let mut width = 0usize;
-    for c in input.chars() {
-        let w = UnicodeWidthChar::width(c).unwrap_or(0);
-        if width + w > max_visible_width {
-            break;
-        }
-        out.push(c);
-        width += w;
-    }
-    out
-}
-
-fn wrap_to_visible_width(input: &str, max_visible_width: usize) -> Vec<String> {
-    if max_visible_width == 0 {
-        return vec![String::new()];
-    }
-
-    let mut out: Vec<String> = Vec::new();
-    for raw_line in input.split('\n') {
-        let mut current = String::new();
-        let mut width = 0usize;
-        for ch in raw_line.chars() {
-            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if width + w > max_visible_width && !current.is_empty() {
-                out.push(current);
-                current = String::new();
-                width = 0;
-            }
-            current.push(ch);
-            width = width.saturating_add(w);
-            if width >= max_visible_width {
-                out.push(current);
-                current = String::new();
-                width = 0;
-            }
-        }
-        out.push(current);
-    }
-
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
-}
-
-fn wrap_with_prefix(
-    input: &str,
-    prefix_first: &str,
-    prefix_cont: &str,
-    inner_width: usize,
-) -> Vec<String> {
-    if inner_width == 0 {
-        return vec![String::new()];
-    }
-
-    let prefix_width = prefix_first.width();
-    if inner_width <= prefix_width {
-        return vec![truncate_to_visible_width(prefix_first, inner_width)];
-    }
-
-    let content_width = inner_width.saturating_sub(prefix_width).max(1);
-    let wrapped = wrap_to_visible_width(input, content_width);
-    if wrapped.is_empty() {
-        return vec![truncate_to_visible_width(prefix_first, inner_width)];
-    }
-
-    let mut out = Vec::with_capacity(wrapped.len());
-    for (idx, line) in wrapped.into_iter().enumerate() {
-        let prefix = if idx == 0 { prefix_first } else { prefix_cont };
-        let combined = format!("{prefix}{line}");
-        out.push(truncate_to_visible_width(&combined, inner_width));
-    }
-    out
-}
 
 fn truncate_middle(input: &str, max: usize) -> String {
     if input.len() <= max {
@@ -4497,105 +5975,11 @@ fn format_root_path(path: &Path) -> String {
 }
 
 fn terminal_size() -> (usize, usize) {
-    crossterm::terminal::size()
-        .map(|(cols, rows)| (cols as usize, rows as usize))
-        .ok()
-        .or_else(|| {
-            let cols = std::env::var("COLUMNS")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok());
-            let rows = std::env::var("LINES")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok());
-            
-            match (cols, rows) {
-                (Some(c), Some(r)) => Some((c, r)),
-                _ => None,
-            }
-        })
-        .unwrap_or((80, 24))
-}
-
-
-fn sanitize_for_box(s: &str) -> String {
-    // Keep printable text; avoid control chars that can break box alignment (e.g. \r, \t).
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\r' => {}
-            '\t' => out.push_str("    "),
-            '\x1b' => out.push(c), // keep ANSI escapes
-            c if c.is_control() => {}
-            c => out.push(c),
-        }
-    }
-    out.trim_end().to_string()
-}
-
-fn split_ansi_chunks(s: &str, max_visible_width: usize) -> Vec<String> {
-    if max_visible_width == 0 {
-        return vec![String::new()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        if c == '\x1b' {
-            // Copy the entire escape sequence without counting it toward visible width.
-            current.push(c);
-            match it.next() {
-                Some('[') => {
-                    current.push('[');
-                    while let Some(ch) = it.next() {
-                        current.push(ch);
-                        if ('@'..='~').contains(&ch) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    current.push(']');
-                    while let Some(ch) = it.next() {
-                        current.push(ch);
-                        if ch == '\x07' {
-                            break;
-                        }
-                        if ch == '\x1b' {
-                            if let Some('\\') = it.peek().copied() {
-                                current.push(it.next().unwrap());
-                                break;
-                            }
-                        }
-                    }
-                }
-                Some(other) => {
-                    current.push(other);
-                }
-                None => break,
-            }
-            continue;
-        }
-
-        let w = UnicodeWidthChar::width(c).unwrap_or(0);
-        if current_width + w > max_visible_width && current_width > 0 {
-            chunks.push(current);
-            current = String::new();
-            current_width = 0;
-        }
-        current.push(c);
-        current_width += w;
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    if chunks.is_empty() {
-        chunks.push(String::new());
-    }
-    chunks
+    let term = ConsoleTerm::stdout();
+    let (rows, cols) = term.size();
+    let width = cols.max(1) as usize;
+    let height = rows.max(1) as usize;
+    (width, height)
 }
 
 fn format_mode(mode: RunMode) -> &'static str {
@@ -4629,228 +6013,621 @@ fn parse_bool(val: &str) -> Result<bool> {
     }
 }
 
-fn looks_like_quant_query(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
-
-    for tok in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
-        match tok {
-            // Core finance nouns
-            "stock"
-            | "stocks"
-            | "ticker"
-            | "tickers"
-            | "shares"
-            | "earnings"
-            | "dividend"
-            | "dividends"
-            | "etf"
-            | "etfs"
-            // FX / macro / commodities
-            | "fx"
-            | "forex"
-            | "currency"
-            | "currencies"
-            | "exchange"
-            | "conversion"
-            | "yen"
-            | "jpy"
-            | "usd"
-            | "eur"
-            | "gbp"
-            | "cny"
-            | "yuan"
-            | "aud"
-            | "cad"
-            | "chf"
-            | "sp500"
-            | "nasdaq"
-            | "dow" => return true,
-            _ => {}
-        }
-    }
-
-    if lower.contains("price history")
-        || lower.contains("price action")
-        || lower.contains("market data")
-        || lower.contains("correlation")
-        || lower.contains("correlate")
-        || lower.contains("yahoo")
-        || lower.contains("fred")
-    {
-        return true;
-    }
-
-    lower.contains("=f")
-        || lower.contains("=x")
-        || lower.contains("-usd")
-        || prompt
-            .split_whitespace()
-            .any(|t| t.starts_with('^') && t.len() > 1)
-}
-
-fn looks_like_coding_intent(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
-
-    let strong = [
-        "cargo", "rust", "compile", "build", "test", "clippy", "rustfmt", "fmt", "panic", "stack trace",
-        "segfault", "backtrace", "crate", "module", "struct", "function", "impl ", "diff", "patch",
-        "apply_patch", "subcommand", "cli", "tui", "cursor", "input box", "blue box", "ui", "terminal",
-        "repo", "source code", "codebase",
-    ];
-    if strong.iter().any(|w| lower.contains(w)) {
-        return true;
-    }
-
-    let file_exts = [
-        ".rs", ".toml", ".json", ".yaml", ".yml", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".go",
-        ".java", ".c", ".h", ".cpp", ".hpp",
-    ];
-    for tok in prompt.split_whitespace() {
-        let t = tok.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '"' | '\''));
-        let t_lower = t.to_ascii_lowercase();
-        if (t.contains('/') || t.contains('\\')) && t.contains('.') {
-            return true;
-        }
-        if file_exts.iter().any(|ext| t_lower.contains(ext)) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn looks_like_quant_follow_up(prompt: &str, state: &SessionState) -> bool {
-    if !state.last_run_was_research {
-        return false;
-    }
-
-    let trimmed = prompt.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    // If the user clearly switched back to coding, don't keep the research persona sticky.
-    if looks_like_coding_intent(trimmed) {
-        return false;
-    }
-
-    let lower = trimmed.to_ascii_lowercase();
-
-    // Common "follow-up" / trading language.
-    let follow = [
-        "tradable", "trade", "play", "idea", "thesis", "strategy", "signal", "setup", "entry", "exit",
-        "long", "short", "hedge", "risk", "stop", "lead", "lag", "predict", "forward", "regime",
-        "correlation", "correlate", "pairs", "spread",
-    ];
-    if follow.iter().any(|w| lower.contains(w)) {
-        return true;
-    }
-
-    // Very short replies that usually refer to the immediately preceding analysis.
-    if lower.chars().count() <= 24 {
-        return true;
-    }
-
-    let pronouns = [
-        "that", "this", "it", "those", "earlier", "previous", "last", "same", "again", "still", "why",
-        "how", "more", "explain", "continue",
-    ];
-    pronouns.iter().any(|w| lower.contains(w))
-}
-
-fn deny_reason_for_research_command(command: &str) -> Option<String> {
-    let cmd = command.trim();
-    if cmd.is_empty() {
-        return Some("empty command".to_string());
-    }
-
-    let lower = cmd.to_ascii_lowercase();
-    let first = lower.split_whitespace().next().unwrap_or("");
-
-    let banned_bins = [
-        "curl",
-        "wget",
-        "http",
-        "https",
-        "lynx",
-        "links",
-        "w3m",
-        "open",
-        "xdg-open",
-    ];
-    if banned_bins.contains(&first) {
-        return Some(format!("'{first}' disabled in research mode (no web/news)"));
-    }
-
-    // Disallow URLs anywhere unless it's explicitly an Eli finance command (which should not embed URLs anyway).
-    if (lower.contains("http://") || lower.contains("https://")) && !lower.starts_with("eli finance") {
-        return Some("URLs disabled in research mode (no web/news)".to_string());
-    }
-
-    // Heuristic block: prevent easy network fetches from scripting runtimes.
-    let runtime_bins = ["python", "python3", "node", "nodejs"];
-    if runtime_bins.contains(&first)
-        && (lower.contains("http://")
-            || lower.contains("https://")
-            || lower.contains("requests")
-            || lower.contains("urllib")
-            || lower.contains("fetch("))
-    {
-        return Some("network access via scripting runtime disabled in research mode".to_string());
-    }
-
-    None
-}
-
 async fn run_commands_with_policy(
     profile: AgentProfile,
     command_runner: &CommandRunner,
     commands: &[String],
     parallelism: usize,
 ) -> Vec<CommandResult> {
-    if profile != AgentProfile::Research {
-        return command_runner
-            .run_commands_with_parallelism(commands, parallelism)
-            .await;
-    }
+    let _ = profile;
+    command_runner
+        .run_commands_with_parallelism(commands, parallelism)
+        .await
+}
 
-    let mut allowed_idx = Vec::new();
-    let mut allowed_cmds = Vec::new();
-    let mut indexed_results: Vec<(usize, CommandResult)> = Vec::new();
+fn shadow_large_tool_outputs(project_root: &Path, results: &[CommandResult]) -> Vec<CommandResult> {
+    const MAX_INLINE_JSON_BYTES: usize = 2 * 1024;
 
-    for (idx, cmd) in commands.iter().enumerate() {
-        if let Some(reason) = deny_reason_for_research_command(cmd) {
-            indexed_results.push((
-                idx,
-                CommandResult {
-                    command: cmd.clone(),
-                    returncode: -1,
-                    stdout: String::new(),
-                    stderr: format!("Denied (research policy): {reason}"),
-                    duration_ms: 0,
-                    allowed: false,
-                    deny_reason: Some(reason),
-                },
-            ));
+    let out_path = project_root
+        .join("eli_research")
+        .join("data")
+        .join(".last_tool_output.json");
+    let rel_path = out_path
+        .strip_prefix(project_root)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| out_path.display().to_string());
+
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        let mut rr = r.clone();
+
+        let cmd0 = rr
+            .command
+            .trim_start()
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        let is_eli = cmd0 == "eli" || cmd0.ends_with("/eli") || cmd0.ends_with("\\eli");
+        if !is_eli || !rr.allowed || rr.returncode != 0 {
+            out.push(rr);
             continue;
         }
 
-        allowed_idx.push(idx);
-        allowed_cmds.push(cmd.clone());
+        if is_suppression_exempt(&rr.command) {
+            out.push(rr);
+            continue;
+        }
+
+        let stdout = rr.stdout.trim();
+        if stdout.as_bytes().len() <= MAX_INLINE_JSON_BYTES {
+            out.push(rr);
+            continue;
+        }
+        if !(stdout.starts_with('{') || stdout.starts_with('[')) {
+            out.push(rr);
+            continue;
+        }
+
+        let value: serde_json::Value = match serde_json::from_str(stdout) {
+            Ok(v) => v,
+            Err(_) => {
+                out.push(rr);
+                continue;
+            }
+        };
+
+        if let Some(parent) = out_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                rr.stderr = format!(
+                    "{}\n(data shadowing: failed to create dir '{}': {e})",
+                    rr.stderr.trim_end(),
+                    parent.display()
+                )
+                .trim()
+                .to_string();
+                out.push(rr);
+                continue;
+            }
+        }
+
+        let json = serde_json::to_string_pretty(&value).unwrap_or_else(|_| stdout.to_string());
+        if let Err(e) = std::fs::write(&out_path, &json) {
+            rr.stderr = format!(
+                "{}\n(data shadowing: failed to write '{}': {e})",
+                rr.stderr.trim_end(),
+                rel_path
+            )
+            .trim()
+            .to_string();
+            out.push(rr);
+            continue;
+        }
+
+        let audit_path = {
+            let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S%3f");
+            out_path
+                .parent()
+                .unwrap_or(project_root)
+                .join(format!("tool_output_{stamp}.json"))
+        };
+        let rel_audit_path = audit_path
+            .strip_prefix(project_root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| audit_path.display().to_string());
+        let audit_ok = match std::fs::write(&audit_path, &json) {
+            Ok(()) => true,
+            Err(e) => {
+                rr.stderr = format!(
+                    "{}\n(data shadowing: failed to write '{}': {e})",
+                    rr.stderr.trim_end(),
+                    rel_audit_path
+                )
+                .trim()
+                .to_string();
+                false
+            }
+        };
+
+        let points = count_data_points(&value);
+        let summary = format_suppressed_summary(&value, 8, 160);
+        let hint = "More detail is available in the saved file; inspect with local tools if needed.";
+        let bytes = json.as_bytes().len();
+        let audit_fragment = if audit_ok {
+            format!("; saved_copy={rel_audit_path}")
+        } else {
+            String::new()
+        };
+        rr.stdout = format!(
+            "[OUTPUT SUPPRESSED] saved_to={rel_path} ({bytes} bytes){audit_fragment}. Data points: {points}.\n[SUMMARY]\n{summary}\n{hint}"
+        );
+        out.push(rr);
     }
 
-    if !allowed_cmds.is_empty() {
-        let results = command_runner
-            .run_commands_with_parallelism(&allowed_cmds, parallelism)
-            .await;
-        for (i, r) in results.into_iter().enumerate() {
-            let idx = allowed_idx.get(i).copied().unwrap_or(i);
-            indexed_results.push((idx, r));
+    out
+}
+
+fn format_suppressed_summary(
+    value: &serde_json::Value,
+    max_lines: usize,
+    max_field_len: usize,
+) -> String {
+    fn trunc(s: String, max_len: usize) -> String {
+        if s.chars().count() <= max_len {
+            return s;
+        }
+        let mut out: String = s.chars().take(max_len).collect();
+        out.push('…');
+        out
+    }
+
+    fn list_sample(items: Vec<String>, max_items: usize, max_len: usize) -> String {
+        let mut out = items
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .take(max_items)
+            .map(|s| trunc(s, max_len))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if out.is_empty() {
+            out = "n/a".to_string();
+        }
+        out
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
+            keys.sort();
+            lines.push(format!("top_level_keys: {}", keys.join(", ")));
+
+            if let Some(provider) = map.get("provider").and_then(|v| v.as_str()) {
+                lines.push(format!("provider: {provider}"));
+            }
+
+            if let Some(tickers) = map.get("tickers").and_then(|v| v.as_array()) {
+                let tickers = tickers
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>();
+                if !tickers.is_empty() {
+                    lines.push(format!(
+                        "tickers: {}",
+                        list_sample(tickers, 10, max_field_len)
+                    ));
+                }
+            }
+
+            if let Some(arr) = map.get("available_events").and_then(|v| v.as_array()) {
+                lines.push(format!("available_events: {}", arr.len()));
+                let sample = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|v| {
+                        let title = v.get("title").and_then(|s| s.as_str());
+                        let ticker = v.get("ticker").and_then(|s| s.as_str());
+                        match (ticker, title) {
+                            (Some(t), Some(tt)) => Some(format!("{t}: {tt}")),
+                            (None, Some(tt)) => Some(tt.to_string()),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !sample.is_empty() {
+                    lines.push(format!("event_samples: {}", list_sample(sample, 3, max_field_len)));
+                }
+            }
+
+            if let Some(arr) = map.get("available_tags").and_then(|v| v.as_array()) {
+                lines.push(format!("available_tags: {}", arr.len()));
+                let sample = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|v| {
+                        let label = v.get("label").and_then(|s| s.as_str());
+                        let slug = v.get("slug").and_then(|s| s.as_str());
+                        let id = v.get("id").and_then(|s| s.as_str());
+                        match (label, slug, id) {
+                            (Some(l), _, _) => Some(l.to_string()),
+                            (None, Some(s), _) => Some(s.to_string()),
+                            (None, None, Some(i)) => Some(i.to_string()),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !sample.is_empty() {
+                    lines.push(format!("tag_samples: {}", list_sample(sample, 3, max_field_len)));
+                }
+            }
+
+            if let Some(arr) = map.get("markets").and_then(|v| v.as_array()) {
+                lines.push(format!("markets: {}", arr.len()));
+                let sample = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|v| {
+                        let title = v.get("title").and_then(|s| s.as_str());
+                        let ticker = v.get("ticker").and_then(|s| s.as_str());
+                        match (ticker, title) {
+                            (Some(t), Some(tt)) => Some(format!("{t}: {tt}")),
+                            (None, Some(tt)) => Some(tt.to_string()),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !sample.is_empty() {
+                    lines.push(format!("market_samples: {}", list_sample(sample, 3, max_field_len)));
+                }
+            }
+
+            if let Some(arr) = map.get("series").and_then(|v| v.as_array()) {
+                let mut tickers = Vec::new();
+                let mut total_points = 0usize;
+                for s in arr {
+                    if let Some(t) = s.get("ticker").and_then(|v| v.as_str()) {
+                        tickers.push(t.to_string());
+                    }
+                    if let Some(candles) = s.get("candles").and_then(|v| v.as_array()) {
+                        total_points += candles.len();
+                    }
+                }
+                lines.push(format!("series: {}", arr.len()));
+                if !tickers.is_empty() {
+                    lines.push(format!(
+                        "series_tickers: {}",
+                        list_sample(tickers, 10, max_field_len)
+                    ));
+                }
+                if total_points > 0 {
+                    lines.push(format!("series_points: {total_points}"));
+                }
+            }
+
+            if let Some(arr) = map.get("snapshots").and_then(|v| v.as_array()) {
+                lines.push(format!("snapshots: {}", arr.len()));
+                let sample = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|v| {
+                        let t = v.get("ticker").and_then(|s| s.as_str())?;
+                        let p = v.get("current_price").and_then(|s| s.as_f64());
+                        Some(match p {
+                            Some(px) => format!("{t}={px:.2}"),
+                            None => t.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !sample.is_empty() {
+                    lines.push(format!("snapshot_samples: {}", list_sample(sample, 3, max_field_len)));
+                }
+            }
+
+            if let Some(arr) = map.get("prices").and_then(|v| v.as_array()) {
+                lines.push(format!("prices: {}", arr.len()));
+                let sample = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|v| {
+                        let sym = v.get("symbol").and_then(|s| s.as_str())?;
+                        let val = v.get("value").and_then(|s| s.as_f64());
+                        Some(match val {
+                            Some(px) => format!("{sym}={px:.4}"),
+                            None => sym.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !sample.is_empty() {
+                    lines.push(format!("price_samples: {}", list_sample(sample, 3, max_field_len)));
+                }
+            }
+
+            if let Some(arr) = map.get("filings").and_then(|v| v.as_array()) {
+                lines.push(format!("filings: {}", arr.len()));
+                let sample = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|v| {
+                        let form = v.get("form").and_then(|s| s.as_str())?;
+                        let date = v.get("filing_date").and_then(|s| s.as_str());
+                        Some(match date {
+                            Some(d) => format!("{form} ({d})"),
+                            None => form.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !sample.is_empty() {
+                    lines.push(format!("filing_samples: {}", list_sample(sample, 3, max_field_len)));
+                }
+            }
+
+            if let Some(arr) = map.get("indicators").and_then(|v| v.as_array()) {
+                lines.push(format!("indicators: {}", arr.len()));
+                let sample = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|v| {
+                        let sym = v.get("symbol").and_then(|s| s.as_str())?;
+                        let val = v.get("current_value").and_then(|s| s.as_f64());
+                        Some(match val {
+                            Some(px) => format!("{sym}={px:.3}"),
+                            None => sym.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !sample.is_empty() {
+                    lines.push(format!("indicator_samples: {}", list_sample(sample, 3, max_field_len)));
+                }
+            }
+
+            if let Some(data) = map.get("data") {
+                if let serde_json::Value::Object(data_obj) = data {
+                    let mut child_keys: Vec<&str> =
+                        data_obj.keys().map(|k| k.as_str()).collect();
+                    child_keys.sort();
+                    lines.push(format!("data_keys: {}", child_keys.join(", ")));
+                    for key in child_keys.iter().take(4) {
+                        if let Some(arr) = data_obj.get(*key).and_then(|v| v.as_array()) {
+                            lines.push(format!("data.{key}: {}", arr.len()));
+                        }
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            lines.push(format!("top_level: array (len={})", arr.len()));
+        }
+        _ => {
+            lines.push("top_level: scalar".to_string());
         }
     }
 
-    indexed_results.sort_by_key(|(idx, _)| *idx);
-    indexed_results.into_iter().map(|(_, r)| r).collect()
+    let trimmed = lines.into_iter().take(max_lines).collect::<Vec<_>>();
+    trimmed.into_iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n")
+}
+
+fn augment_tool_errors(results: Vec<CommandResult>) -> Vec<CommandResult> {
+    results
+        .into_iter()
+        .map(|mut r| {
+            if !r.allowed || r.returncode == 0 {
+                return r;
+            }
+
+            if !looks_like_clap_error(&r.stderr) {
+                return r;
+            }
+
+            let path = match extract_eli_tool_path(&r.command) {
+                Some(path) => path,
+                None => return r,
+            };
+
+            if path.first().map(|p| p.as_str()) == Some("tool-info") {
+                return r;
+            }
+
+            let info = build_tool_info(&path);
+            let info_json =
+                serde_json::to_string_pretty(&info).unwrap_or_else(|_| "<tool-info failed>".to_string());
+            let sep = if r.stderr.trim().is_empty() { "" } else { "\n" };
+            r.stderr = format!(
+                "{}{}[TOOL INFO]\n{}",
+                r.stderr.trim_end(),
+                sep,
+                info_json
+            );
+            r
+        })
+        .collect()
+}
+
+fn looks_like_clap_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("error:") && (lower.contains("usage:") || lower.contains("try '--help'"))
+}
+
+fn extract_eli_tool_path(command: &str) -> Option<Vec<String>> {
+    let mut parts = command.split_whitespace();
+    let first = parts.next()?;
+    let is_eli = first == "eli" || first.ends_with("/eli") || first.ends_with("\\eli");
+    if !is_eli {
+        return None;
+    }
+
+    let mut path = Vec::new();
+    for tok in parts {
+        if tok.starts_with('-') {
+            break;
+        }
+        path.push(tok.to_string());
+    }
+
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+fn is_suppression_exempt(command: &str) -> bool {
+    let trimmed = command.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let mut parts = lower.split_whitespace();
+    let Some(bin) = parts.next() else {
+        return false;
+    };
+
+    let is_eli = bin == "eli" || bin.ends_with("/eli") || bin.ends_with("\\eli");
+    if !is_eli {
+        return false;
+    }
+
+    let Some(domain) = parts.next() else {
+        return false;
+    };
+    if domain != "finance" {
+        return false;
+    }
+
+    let Some(tool) = parts.next() else {
+        return false;
+    };
+
+    match tool {
+        "search" => true,
+        "odds" => {
+            let rest = parts.collect::<Vec<_>>();
+            rest.iter().any(|t| *t == "--list-events" || *t == "--list-series")
+        }
+        "options" => {
+            let rest = parts.collect::<Vec<_>>();
+            rest.iter().any(|t| *t == "--expirations")
+        }
+        _ => false,
+    }
+}
+
+fn infer_sources(command: &str, stdout: &str) -> Vec<&'static str> {
+    let cmd_lower = command.to_ascii_lowercase();
+    let mut out: Vec<&'static str> = Vec::new();
+
+    if cmd_lower.contains("eli finance odds") {
+        let out_lower = stdout.to_ascii_lowercase();
+        if out_lower.contains("kalshi") {
+            out.push("Kalshi");
+        }
+        if out_lower.contains("polymarket") {
+            out.push("Polymarket");
+        }
+        return dedupe_sources(out);
+    }
+
+    if cmd_lower.contains("eli finance prices") {
+        out.push("Pyth");
+        return out;
+    }
+
+    if cmd_lower.contains("eli finance") {
+        if let Some(source) = infer_sources_from_json(stdout) {
+            out.extend(source);
+            return dedupe_sources(out);
+        }
+        if cmd_lower.contains("--provider fred") {
+            out.push("FRED");
+        } else if cmd_lower.contains("--provider yahoo") {
+            out.push("Yahoo Finance");
+        } else if cmd_lower.contains("--provider mock") {
+            out.push("Mock");
+        }
+    }
+
+    dedupe_sources(out)
+}
+
+fn infer_sources_from_json(stdout: &str) -> Option<Vec<&'static str>> {
+    let value: serde_json::Value = serde_json::from_str(stdout).ok()?;
+    let mut out: Vec<&'static str> = Vec::new();
+
+    if let Some(provider) = value.get("provider").and_then(|v| v.as_str()) {
+        match provider {
+            "yahoo" => out.push("Yahoo Finance"),
+            "fred" => out.push("FRED"),
+            "mock" => out.push("Mock"),
+            _ => {}
+        }
+    }
+
+    if let Some(source) = value.get("source").and_then(|v| v.as_str()) {
+        match source {
+            "pyth" => out.push("Pyth"),
+            "kalshi" => out.push("Kalshi"),
+            "polymarket" => out.push("Polymarket"),
+            _ => {}
+        }
+    }
+
+    if let Some(sources) = value.get("sources").and_then(|v| v.as_array()) {
+        for s in sources {
+            if let Some(name) = s.get("source").and_then(|v| v.as_str()) {
+                match name {
+                    "kalshi" => out.push("Kalshi"),
+                    "polymarket" => out.push("Polymarket"),
+                    "pyth" => out.push("Pyth"),
+                    "fred" => out.push("FRED"),
+                    "yahoo" => out.push("Yahoo Finance"),
+                    "mock" => out.push("Mock"),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(dedupe_sources(out))
+    }
+}
+
+fn dedupe_sources(mut sources: Vec<&'static str>) -> Vec<&'static str> {
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
+fn count_data_points(value: &serde_json::Value) -> usize {
+    fn array_len(v: Option<&serde_json::Value>) -> Option<usize> {
+        v.and_then(|vv| vv.as_array().map(|a| a.len()))
+    }
+
+    match value {
+        serde_json::Value::Array(arr) => arr.len(),
+        serde_json::Value::Object(map) => {
+            if let Some(series) = map.get("series").and_then(|v| v.as_array()) {
+                let mut total = 0usize;
+                for s in series {
+                    total += s
+                        .get("candles")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                }
+                if total > 0 {
+                    return total;
+                }
+            }
+
+            if let Some(n) = array_len(map.get("snapshots")) {
+                return n;
+            }
+            if let Some(n) = array_len(map.get("prices")) {
+                return n;
+            }
+            if let Some(n) = array_len(map.get("available_events")) {
+                return n;
+            }
+            if let Some(n) = array_len(map.get("available_tags")) {
+                return n;
+            }
+            if let Some(n) = array_len(map.get("events")) {
+                return n;
+            }
+            if let Some(n) = array_len(map.get("markets")) {
+                return n;
+            }
+            if let Some(n) = array_len(map.get("results")) {
+                return n;
+            }
+
+            map.len()
+        }
+        _ => 1,
+    }
 }
 
 fn build_observation(
@@ -4891,6 +6668,10 @@ fn build_observation(
                 code = r.returncode,
                 ms = r.duration_ms
             ));
+            let digest = build_command_digest(r);
+            if !digest.trim().is_empty() {
+                out.push_str(&format!("  digest: {digest}\n"));
+            }
             if !r.stdout.trim().is_empty() {
                 out.push_str(&format!("  stdout:\n{}\n", truncate(&r.stdout, 400000)));
             }
@@ -5088,6 +6869,19 @@ fn colorize_diff(diff: &str) -> String {
     out
 }
 
+fn diff_line_counts(diff: &str) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut deleted = 0usize;
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            added += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            deleted += 1;
+        }
+    }
+    (added, deleted)
+}
+
 fn print_diff_results(results: &[DiffResult], preview: bool, brief: bool) {
     use style::*;
 
@@ -5109,7 +6903,9 @@ fn print_diff_results(results: &[DiffResult], preview: bool, brief: bool) {
         } else {
             format!("{}applied{}", GREEN, RESET)
         };
-        println!("  {}◆{} diffs: {} ({})", PURPLE, RESET, parts.join(", "), status);
+        let count = created + modified + deleted;
+        let noun = if count == 1 { "file" } else { "files" };
+        print_history_line(format!("edited {count} {noun} ({})", status));
         return;
     }
 
@@ -5126,15 +6922,18 @@ fn print_diff_results(results: &[DiffResult], preview: bool, brief: bool) {
         if !r.message.is_empty() && r.message != "ok" {
             println!("    {}{}{}", GRAY, r.message, RESET);
         }
-        if preview {
-            if let Some(d) = &r.diff {
-                println!("{}", colorize_diff(d));
-            }
+        if let Some(d) = &r.diff {
+            let (added, deleted) = diff_line_counts(d);
+            println!(
+                "    LINE CODED ({}{}{} IN GREEN, {}{}{} IN RED)",
+                GREEN, added, RESET, RED, deleted, RESET
+            );
+            println!("{}", colorize_diff(d));
         }
     }
 }
 
-fn print_command_results(results: &[CommandResult], brief: bool) {
+fn print_command_results(results: &[CommandResult], brief: bool, full: bool) {
     use style::*;
 
     if results.is_empty() {
@@ -5144,20 +6943,21 @@ fn print_command_results(results: &[CommandResult], brief: bool) {
     if brief {
         for r in results {
             let (icon, color) = if r.returncode == 0 { ("✓", GREEN) } else { ("✗", RED) };
-            println!(
-                "  {}{}{} {}${} {}{}",
+            print_history_line(format!(
+                "{}{}{} {}${} {}{}",
                 color, icon, RESET,
                 GRAY, RESET,
                 truncate_line(&r.command, 70),
                 RESET
-            );
+            ));
             if r.returncode != 0 && !r.stderr.trim().is_empty() {
-                println!(
-                    "    {}err: {}{}",
+                print_history_line(format!(
+                    "{}err:{} {}{}",
                     RED,
+                    RESET,
                     truncate_line(&r.stderr.replace('\n', " "), 100),
                     RESET
-                );
+                ));
             }
         }
         return;
@@ -5173,20 +6973,64 @@ fn print_command_results(results: &[CommandResult], brief: bool) {
             r.command,
             DARK_GRAY, r.duration_ms, RESET
         );
-        if !r.stdout.trim().is_empty() {
-            for line in r.stdout.lines().take(20) {
-                println!("    {}{}{}", GRAY, line, RESET);
+        if full {
+            if !r.stdout.trim().is_empty() {
+                println!("    {}stdout:{}{}", GRAY, RESET, RESET);
+                for line in r.stdout.lines() {
+                    println!("    {}{}{}", GRAY, line, RESET);
+                }
             }
-            if r.stdout.lines().count() > 20 {
-                println!("    {}... ({} more lines){}", DARK_GRAY, r.stdout.lines().count() - 20, RESET);
+            if !r.stderr.trim().is_empty() {
+                println!("    {}stderr:{}{}", RED, RESET, RESET);
+                for line in r.stderr.lines() {
+                    println!("    {}{}{}", RED, line, RESET);
+                }
             }
-        }
-        if !r.stderr.trim().is_empty() {
-            for line in r.stderr.lines().take(10) {
-                println!("    {}{}{}", RED, line, RESET);
+        } else {
+            if !r.stdout.trim().is_empty() {
+                for line in r.stdout.lines().take(20) {
+                    println!("    {}{}{}", GRAY, line, RESET);
+                }
+                if r.stdout.lines().count() > 20 {
+                    println!("    {}... ({} more lines){}", DARK_GRAY, r.stdout.lines().count() - 20, RESET);
+                }
+            }
+            if !r.stderr.trim().is_empty() {
+                for line in r.stderr.lines().take(10) {
+                    println!("    {}{}{}", RED, line, RESET);
+                }
             }
         }
     }
+}
+
+fn print_tool_results_debug(results: &[CommandResult]) {
+    if results.is_empty() {
+        return;
+    }
+
+    println!("\n=== TOOL CALL RESULT ===");
+    for (idx, r) in results.iter().enumerate() {
+        if idx > 0 {
+            println!("\n---");
+        }
+        println!("command: {}", r.command);
+        println!("returncode: {}", r.returncode);
+        if let Some(reason) = &r.deny_reason {
+            println!("deny_reason: {}", reason);
+        }
+        println!("stdout:");
+        print!("{}", r.stdout);
+        if !r.stdout.ends_with('\n') {
+            println!();
+        }
+        println!("stderr:");
+        print!("{}", r.stderr);
+        if !r.stderr.ends_with('\n') {
+            println!();
+        }
+    }
+    println!("=== END TOOL CALL RESULT ===");
 }
 
 async fn print_screen_results(actions: &[serde_json::Value]) {
@@ -5335,19 +7179,4 @@ fn estimate_cost(usage: &eli_core::types::Usage, model: &str) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::looks_like_quant_query;
-
-    #[test]
-    fn quant_detection_matches_forex_queries() {
-        assert!(looks_like_quant_query("what happened with yen today"));
-        assert!(looks_like_quant_query("USD/JPY"));
-        assert!(looks_like_quant_query("JPY=X"));
-        assert!(looks_like_quant_query("forex rates"));
-    }
-
-    #[test]
-    fn quant_detection_does_not_match_pricing_page_work() {
-        assert!(!looks_like_quant_query("fix the pricing page on the website"));
-    }
-}
+mod tests {}

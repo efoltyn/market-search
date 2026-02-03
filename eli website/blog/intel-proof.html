@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intel: Proof of Work | Eli</title>
+    <meta name="description" content="A real Eli session on Intel: filings, timeseries, and a critical gap analysis backed by numbers.">
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="rss.xml">
+    <style>
+        :root {
+            --bg: #ffffff;
+            --fg: #000000;
+            --gray: #666666;
+            --light-gray: #f5f5f7;
+            --radius: 12px;
+            --font-serif: "New York", "Apple Garamond", "Baskerville", "Times New Roman", serif;
+            --font-sans: "SF Pro Text", "Helvetica Neue", sans-serif;
+            --font-mono: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background-color: var(--bg);
+            color: var(--fg);
+            font-family: var(--font-serif);
+            line-height: 1.75;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        a { color: var(--fg); text-decoration: none; border-bottom: 1px solid transparent; transition: 0.2s; }
+        a:hover { border-bottom: 1px solid var(--fg); }
+
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.82);
+            backdrop-filter: saturate(180%) blur(18px);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+        }
+
+        .nav-inner {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 18px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .nav-logo {
+            font-family: var(--font-sans);
+            font-weight: 800;
+            letter-spacing: -0.06em;
+            font-size: 18px;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 8px;
+            border-radius: 12px;
+            border-bottom: none;
+        }
+
+        .nav-logo:hover {
+            background: rgba(0, 0, 0, 0.04);
+            border-bottom: none;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            font-family: var(--font-sans);
+            font-size: 0.9rem;
+        }
+
+        .nav-cta {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--light-gray);
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            padding: 10px 14px;
+            border-radius: 9999px;
+            font-weight: 600;
+        }
+
+        .nav-cta:hover { border-color: rgba(0, 0, 0, 0.18); }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 56px 24px 80px;
+        }
+
+        article { max-width: 760px; }
+
+        .kicker {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            letter-spacing: 0.08em;
+            color: var(--gray);
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+
+        h1 {
+            font-size: 3rem;
+            font-weight: 500;
+            letter-spacing: -0.04em;
+            line-height: 1.05;
+            margin-bottom: 16px;
+        }
+
+        .meta {
+            font-family: var(--font-sans);
+            color: var(--gray);
+            margin-bottom: 28px;
+        }
+
+        h2 {
+            font-size: 1.6rem;
+            margin-top: 34px;
+            margin-bottom: 12px;
+        }
+
+        p { margin-bottom: 18px; }
+
+        pre {
+            background: var(--light-gray);
+            padding: 14px 16px;
+            border-radius: var(--radius);
+            overflow-x: auto;
+            font-family: var(--font-mono);
+            font-size: 0.92rem;
+            margin-bottom: 18px;
+        }
+
+        .callout {
+            background: var(--light-gray);
+            border-radius: var(--radius);
+            padding: 16px 18px;
+            margin: 22px 0;
+            font-family: var(--font-sans);
+        }
+
+        footer {
+            margin-top: 48px;
+            display: flex;
+            gap: 16px;
+            font-family: var(--font-sans);
+            color: var(--gray);
+        }
+
+        @media (max-width: 600px) {
+            h1 { font-size: 2.4rem; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="top-nav">
+        <div class="nav-inner">
+            <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
+            <div class="nav-links">
+                <a href="./">Blog</a>
+                <a class="nav-cta" href="https://github.com/efoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container">
+        <article>
+            <p class="kicker">Case Study</p>
+            <h1>Intel: Proof of Work</h1>
+            <div class="meta">2026-01-18 • Eli</div>
+
+            <p>This is what “tool-first” analysis looks like in practice: a single prompt, a chain of commands, and a critical summary grounded in numbers and filings.</p>
+
+            <h2>The command trail</h2>
+            <p>Eli did not start with headlines. It resolved symbols, pulled prices, then fetched filings and news only after the move was visible:</p>
+            <pre><code>eli finance search --query "Intel"
+eli finance filings --ticker INTC --forms 8-K,10-K,10-Q --limit 5
+eli finance filings --ticker INTC --forms 8-K --limit 1 --include-text
+eli finance timeseries --tickers INTC --range 1y --granularity 1mo
+eli finance timeseries --tickers INTC,AMD,NVDA --range 3y --granularity 3mo
+eli finance news --ticker INTC --date 2025-12-26</code></pre>
+
+            <div class="callout">
+                <b>Result:</b> a critical gap analysis tied to the 8-K equity issuance, negative free cash flow, and a widening valuation gap vs. peers.
+            </div>
+
+            <h2>What was surfaced</h2>
+            <p>INTC showed a sharp price recovery, but fundamentals lagged. The NVIDIA deal showed up in filings and price, but did not close gaps in cash flow or foundry execution.</p>
+
+            <h2>Why this matters</h2>
+            <p>The output is not a story. It is a chain of verifiable commands, raw data, and a summary that you can rerun or audit.</p>
+
+            <footer>
+                <a href="./">← Blog</a>
+                <a href="../">Home</a>
+            </footer>
+        </article>
+    </main>
+</body>
+</html>

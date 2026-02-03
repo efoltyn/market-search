@@ -6,26 +6,32 @@
     <description>Mini whitepapers on tool-using models, verification, and agentic UX.</description>
     <language>en</language>
     <item>
+      <title>Intel: Proof of Work</title>
+      <link>/blog/intel-proof.html</link>
+      <guid>/blog/intel-proof.html</guid>
+      <pubDate>Sun, 18 Jan 2026 00:00:00 GMT</pubDate>
+      <description>A real Eli session on Intel: filings, timeseries, and a critical gap analysis backed by numbers.</description>
+    </item>
+    <item>
       <title>Beyond the Cutoff: Tools Beat Memory</title>
       <link>/blog/beyond-the-cutoff.html</link>
       <guid>/blog/beyond-the-cutoff.html</guid>
       <pubDate>Tue, 13 Jan 2026 00:00:00 GMT</pubDate>
-      <description>Why Eli starts with timeseries, not headlines—and how tool access turns “knowledge cutoff” into a solvable problem.</description>
+      <description>Why raw numbers come first, and how tools beat memory every time.</description>
     </item>
     <item>
       <title>Self-Repair Is an Emergent Feature</title>
       <link>/blog/self-repair.html</link>
       <guid>/blog/self-repair.html</guid>
       <pubDate>Tue, 13 Jan 2026 00:00:00 GMT</pubDate>
-      <description>Give a model an execution loop and safe diffs, and it begins acting like a debugger.</description>
+      <description>Execution loops turn an LLM into a debugger, not a narrator.</description>
     </item>
     <item>
       <title>Diffs as an Interface</title>
       <link>/blog/diffs-as-interface.html</link>
       <guid>/blog/diffs-as-interface.html</guid>
       <pubDate>Tue, 13 Jan 2026 00:00:00 GMT</pubDate>
-      <description>Text isn’t an API. Diffs are. Eli uses diffs + undo + approvals so the model can ship code safely.</description>
+      <description>Why diffs, approvals, and undo are the safest interface for models.</description>
     </item>
   </channel>
 </rss>
-

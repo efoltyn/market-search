@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Beyond the Cutoff: Tools Beat Memory | Eli</title>
-    <meta name="description" content="Why Eli starts with timeseries, not headlines—and how tool access turns “knowledge cutoff” into a solvable problem.">
+    <meta name="description" content="Why raw numbers come first, and how tools beat memory every time.">
+    <link rel="icon" type="image/png" href="../assets/logo.png">
     <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="rss.xml">
     <style>
         :root {
@@ -51,9 +52,20 @@
 
         .nav-logo {
             font-family: var(--font-sans);
-            font-weight: 700;
-            letter-spacing: -0.05em;
-            font-size: 16px;
+            font-weight: 800;
+            letter-spacing: -0.06em;
+            font-size: 18px;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 8px;
+            border-radius: 12px;
+            border-bottom: none;
+        }
+
+        .nav-logo:hover {
+            background: rgba(0, 0, 0, 0.04);
+            border-bottom: none;
         }
 
         .nav-links {
@@ -158,13 +170,13 @@
     </style>
 </head>
 <body>
-<nav class="top-nav">
-    <div class="nav-inner">
-        <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
-        <div class="nav-links">
-            <a href="./">Blog</a>
-            <a class="nav-cta" href="https://github.com/elifoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
-        </div>
+	<nav class="top-nav">
+	    <div class="nav-inner">
+	        <a class="nav-logo" href="../" aria-label="Eli home">eli</a>
+	        <div class="nav-links">
+	            <a href="./">Blog</a>
+	            <a class="nav-cta" href="https://github.com/efoltyn/eli" rel="noreferrer noopener" target="_blank">GitHub</a>
+	        </div>
     </div>
 </nav>
 
@@ -177,6 +189,7 @@
         <p>Most AI feels stubborn for one reason: it can’t <i>measure</i> reality. So it guesses, fills gaps, and fights your prompts with whatever it remembers.</p>
 
         <p>Eli flips the order. It starts with raw numbers—price, volume, and time—then asks for narrative only when the data demands it.</p>
+        <p>The model doesn’t “know” the market. It runs commands, writes code, and leaves an audit trail you can re-run.</p>
 
         <div class="callout">
             <b>The rule:</b> news matters only if it moved price. If there was no move, don’t waste cycles on headlines.
@@ -189,6 +202,11 @@
         <p>That yields a short list of “interesting days”. Then—and only then—it pulls targeted context for those days:</p>
         <pre><code>eli finance news --ticker INTC --date 2026-01-09
 eli finance filings --ticker INTC --forms 8-K,10-Q,10-K --include-text</code></pre>
+
+        <h2>Odds as a reality check</h2>
+        <p>When the question is probabilistic, Eli can pull prediction market prices and treat them as a competing signal:</p>
+        <pre><code>eli finance odds --series KXHIGHNY --status open --limit 10</code></pre>
+        <p>If the numbers disagree with the odds, that’s a real gap worth investigating.</p>
 
         <h2>Why this beats “web search AI”</h2>
         <p>Generic browsing agents start from headlines and work backwards. Eli starts from the move and works forwards:</p>

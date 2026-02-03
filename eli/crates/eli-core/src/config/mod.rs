@@ -96,6 +96,11 @@ pub struct ChatConfig {
     #[serde(default)]
     pub compact_trigger: Option<usize>,
 
+    /// Optional token-based compaction trigger (estimated prompt tokens).
+    /// When set, this takes precedence over `compact_trigger` (message-count trigger).
+    #[serde(default = "default_compact_trigger_tokens")]
+    pub compact_trigger_tokens: Option<usize>,
+
     #[serde(default)]
     pub compact_keep: Option<usize>,
 
@@ -107,6 +112,9 @@ pub struct ChatConfig {
 
     #[serde(default = "default_parallel_subagents")]
     pub parallel_subagents: u32,
+
+    #[serde(default = "default_scrollback_max_lines")]
+    pub scrollback_max_lines: usize,
 
     #[serde(default)]
     pub display_mode: DisplayMode,
@@ -146,10 +154,12 @@ impl Default for ChatConfig {
             max_tokens: None,
             compact: default_compact(),
             compact_trigger: None,
+            compact_trigger_tokens: default_compact_trigger_tokens(),
             compact_keep: None,
             summary_model: None,
             parallel_commands: default_parallel_commands(),
             parallel_subagents: default_parallel_subagents(),
+            scrollback_max_lines: default_scrollback_max_lines(),
             display_mode: DisplayMode::default(),
             auto_mode: AutoMode::default(),
             sec_user_agent: None,
@@ -175,10 +185,7 @@ impl ChatConfig {
             ProviderKind::OpenRouter => self
                 .openrouter_api_key
                 .clone()
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-                .or_else(|| {
-                    Some("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".to_string())
-                }),
+                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
             ProviderKind::OpenAI => self
                 .openai_api_key
                 .clone()
@@ -231,6 +238,10 @@ impl ChatConfig {
             .unwrap_or(self.mem_steps.saturating_mul(5).max(30))
     }
 
+    pub fn resolved_compact_trigger_tokens(&self) -> Option<usize> {
+        self.compact_trigger_tokens.and_then(|v| if v == 0 { None } else { Some(v) })
+    }
+
     pub fn resolved_compact_keep(&self) -> usize {
         self.compact_keep
             .unwrap_or(self.mem_steps.saturating_mul(2).max(12))
@@ -277,6 +288,10 @@ impl Default for ApprovalMode {
 pub enum DisplayMode {
     /// Brief output: recent stream, recent tool, time summary
     Standard,
+    /// Debug output: detailed logs and internal state
+    Debug,
+    /// Raw output: unprocessed streaming output
+    Raw,
     /// Full output: all tools, full history, detailed logs
     Brain,
 }
@@ -301,7 +316,7 @@ pub enum AutoMode {
 
 impl Default for AutoMode {
     fn default() -> Self {
-        AutoMode::Normal
+        AutoMode::Autonomous
     }
 }
 
@@ -391,15 +406,17 @@ pub fn save(paths: &Paths, cfg: &ConfigFile) -> Result<()> {
 }
 
 fn default_model() -> String {
-    "mistralai/devstral-2512:free".to_string()
+    DEFAULT_OPENROUTER_MODEL.to_string()
 }
+
+pub const DEFAULT_OPENROUTER_MODEL: &str = "arcee-ai/trinity-large-preview:free";
 
 fn default_provider() -> ProviderKind {
     ProviderKind::OpenRouter
 }
 
 fn default_mem_steps() -> usize {
-    10
+    0
 }
 
 fn default_timeout_secs() -> u64 {
@@ -422,10 +439,18 @@ fn default_compact() -> bool {
     true
 }
 
+fn default_compact_trigger_tokens() -> Option<usize> {
+    Some(100_000)
+}
+
 fn default_parallel_commands() -> u32 {
-    4
+    50
 }
 
 fn default_parallel_subagents() -> u32 {
-    3
+    50
+}
+
+fn default_scrollback_max_lines() -> usize {
+    10_000
 }
