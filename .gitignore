@@ -29,7 +29,7 @@ eli/.cargo_local*/
 eli/eli/
 
 # Build binary symlink (recreated by: ln -sf eli/target_local/debug/eli bin/eli)
-bin/
+/bin/
 
 # Generated metadata sidecars in source tree
 eli/crates/**/*.meta.json
