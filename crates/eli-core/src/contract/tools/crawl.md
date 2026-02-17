@@ -9,6 +9,10 @@ eli web crawl --url "https://investor.apple.com" --max-pages 20
 **Options:**
 - `--max-pages`: Limit pages (default: 50)
 - `--subdomains`: Include subdomains
+- `--sitemap`: Crawl via sitemap discovery
+- `--smart`: HTTP-first crawl with JS rendering fallback (for JS-heavy docs)
+- `--view`: `summary` (default), `raw`, or `path`
+- `--save`: `auto` (default) or `off` when `--out` is omitted
 - `--out`: Save to file
 
 **Returns:**
@@ -21,4 +25,5 @@ eli web crawl --url "https://investor.apple.com" --max-pages 20
 - Investor relations pages
 - Documentation (if server-rendered)
 
-**Limitation:** JS-heavy sites (React, Next.js, Mintlify) return JavaScript garbage instead of content. For those, try `eli web search` to find the right page, then read specific URLs.
+For JS-heavy docs (React/Next.js/Mintlify), use `--smart`.
+Default behavior now auto-saves full raw output while showing a compact terminal summary.

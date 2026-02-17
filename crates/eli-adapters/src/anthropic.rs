@@ -208,17 +208,23 @@ impl LlmAdapter for AnthropicAdapter {
                                 return Some((Ok(ChatStreamEvent::Delta(text)), st));
                             }
                             AnthropicEvent::Usage(usage) => {
-                                let prompt_delta = usage.prompt_tokens.saturating_sub(st.last_prompt_tokens);
-                                let completion_delta = usage.completion_tokens.saturating_sub(st.last_completion_tokens);
+                                let prompt_delta =
+                                    usage.prompt_tokens.saturating_sub(st.last_prompt_tokens);
+                                let completion_delta = usage
+                                    .completion_tokens
+                                    .saturating_sub(st.last_completion_tokens);
                                 st.last_prompt_tokens = usage.prompt_tokens;
                                 st.last_completion_tokens = usage.completion_tokens;
-                                
+
                                 if prompt_delta > 0 || completion_delta > 0 {
-                                    return Some((Ok(ChatStreamEvent::Usage(eli_core::types::Usage {
-                                        prompt_tokens: prompt_delta,
-                                        completion_tokens: completion_delta,
-                                        total_tokens: prompt_delta + completion_delta,
-                                    })), st));
+                                    return Some((
+                                        Ok(ChatStreamEvent::Usage(eli_core::types::Usage {
+                                            prompt_tokens: prompt_delta,
+                                            completion_tokens: completion_delta,
+                                            total_tokens: prompt_delta + completion_delta,
+                                        })),
+                                        st,
+                                    ));
                                 }
                                 continue;
                             }
@@ -316,12 +322,18 @@ fn parse_anthropic_event(data: &str) -> Result<Option<AnthropicEvent>> {
             if json_data.is_empty() {
                 return Ok(Some(AnthropicEvent::Continue));
             }
-            let value: serde_json::Value = serde_json::from_str(json_data)
-                .map_err(|e| AdapterError::Json(e.to_string()))?;
-            
+            let value: serde_json::Value =
+                serde_json::from_str(json_data).map_err(|e| AdapterError::Json(e.to_string()))?;
+
             if let Some(usage_val) = value.get("message").and_then(|m| m.get("usage")) {
-                let input = usage_val.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let output = usage_val.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let input = usage_val
+                    .get("input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let output = usage_val
+                    .get("output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
                 return Ok(Some(AnthropicEvent::Usage(eli_core::types::Usage {
                     prompt_tokens: input,
                     completion_tokens: output,
@@ -330,16 +342,14 @@ fn parse_anthropic_event(data: &str) -> Result<Option<AnthropicEvent>> {
             }
             Ok(Some(AnthropicEvent::Continue))
         }
-        "content_block_start" | "ping" => {
-            Ok(Some(AnthropicEvent::Continue))
-        }
+        "content_block_start" | "ping" => Ok(Some(AnthropicEvent::Continue)),
         "content_block_delta" => {
             // Parse the delta
             if json_data.is_empty() {
                 return Ok(Some(AnthropicEvent::Continue));
             }
-            let value: serde_json::Value = serde_json::from_str(json_data)
-                .map_err(|e| AdapterError::Json(e.to_string()))?;
+            let value: serde_json::Value =
+                serde_json::from_str(json_data).map_err(|e| AdapterError::Json(e.to_string()))?;
 
             // Extract text from delta
             if let Some(text) = value.pointer("/delta/text").and_then(|v| v.as_str()) {
@@ -354,13 +364,16 @@ fn parse_anthropic_event(data: &str) -> Result<Option<AnthropicEvent>> {
             if json_data.is_empty() {
                 return Ok(Some(AnthropicEvent::Continue));
             }
-            let value: serde_json::Value = serde_json::from_str(json_data)
-                .map_err(|e| AdapterError::Json(e.to_string()))?;
+            let value: serde_json::Value =
+                serde_json::from_str(json_data).map_err(|e| AdapterError::Json(e.to_string()))?;
 
             if let Some(usage_val) = value.get("usage") {
-                let output = usage_val.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let output = usage_val
+                    .get("output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
                 return Ok(Some(AnthropicEvent::Usage(eli_core::types::Usage {
-                    prompt_tokens: 0, 
+                    prompt_tokens: 0,
                     completion_tokens: output,
                     total_tokens: output,
                 })));
@@ -374,13 +387,16 @@ fn parse_anthropic_event(data: &str) -> Result<Option<AnthropicEvent>> {
                     "Unknown Anthropic error".to_string(),
                 ));
             }
-            let value: serde_json::Value = serde_json::from_str(json_data)
-                .map_err(|e| AdapterError::Json(e.to_string()))?;
+            let value: serde_json::Value =
+                serde_json::from_str(json_data).map_err(|e| AdapterError::Json(e.to_string()))?;
             let error_msg = value
                 .pointer("/error/message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown error");
-            Err(AdapterError::StreamParse(format!("Anthropic error: {}", error_msg)))
+            Err(AdapterError::StreamParse(format!(
+                "Anthropic error: {}",
+                error_msg
+            )))
         }
         _ => {
             // Unknown event type, try to parse as JSON anyway

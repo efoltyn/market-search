@@ -36,7 +36,8 @@ pub fn extract_facts(req: ExtractRequest) -> Result<ExtractResponse> {
     let word_count = req.content.split_whitespace().count();
 
     // Simple extraction: find sentences with numbers, dates, or key terms
-    let sentences: Vec<&str> = req.content
+    let sentences: Vec<&str> = req
+        .content
         .split(|c| c == '.' || c == '!' || c == '?')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty() && s.len() > 20)
@@ -59,7 +60,10 @@ pub fn extract_facts(req: ExtractRequest) -> Result<ExtractResponse> {
 
             // Boost sentences with key financial terms
             let lower = s.to_lowercase();
-            for term in &["revenue", "profit", "loss", "growth", "decline", "increase", "decrease", "guidance", "forecast", "earnings", "quarter", "year"] {
+            for term in &[
+                "revenue", "profit", "loss", "growth", "decline", "increase", "decrease",
+                "guidance", "forecast", "earnings", "quarter", "year",
+            ] {
                 if lower.contains(term) {
                     score += 1;
                 }
@@ -108,7 +112,11 @@ pub fn extract_facts(req: ExtractRequest) -> Result<ExtractResponse> {
 }
 
 /// Fetch URL and extract content
-pub async fn extract_from_url(url: &str, bullets: usize, focus: Option<String>) -> Result<ExtractResponse> {
+pub async fn extract_from_url(
+    url: &str,
+    bullets: usize,
+    focus: Option<String>,
+) -> Result<ExtractResponse> {
     // Fetch and extract readable content
     let article = crate::web::providers::read::read_url(url).await?;
 
@@ -123,9 +131,13 @@ pub async fn extract_from_url(url: &str, bullets: usize, focus: Option<String>) 
 }
 
 /// Extract from file
-pub fn extract_from_file(path: &std::path::Path, bullets: usize, focus: Option<String>) -> Result<ExtractResponse> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| Error::Other(format!("read file: {}", e)))?;
+pub fn extract_from_file(
+    path: &std::path::Path,
+    bullets: usize,
+    focus: Option<String>,
+) -> Result<ExtractResponse> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| Error::Other(format!("read file: {}", e)))?;
 
     let req = ExtractRequest {
         content,

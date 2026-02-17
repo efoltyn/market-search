@@ -34,10 +34,7 @@ impl LlmAdapter for MockAdapter {
             .map(|m| m.content.clone())
             .unwrap_or_default();
 
-        let response = format!(
-            "eli(mock:{model}): {last_user}",
-            model = self.model
-        );
+        let response = format!("eli(mock:{model}): {last_user}", model = self.model);
         let mut events = Vec::new();
         for chunk in response.as_bytes().chunks(16) {
             events.push(Ok(ChatStreamEvent::Delta(
@@ -48,4 +45,3 @@ impl LlmAdapter for MockAdapter {
         Ok(futures::stream::iter(events).boxed())
     }
 }
-

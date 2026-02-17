@@ -239,10 +239,11 @@ impl LlmAdapter for OpenAiCompatibleAdapter {
             return Err(AdapterError::Http(msg));
         }
 
-        let byte_stream: BoxStream<'static, std::result::Result<Vec<u8>, reqwest::Error>> = response
-            .bytes_stream()
-            .map(|r| r.map(|b| b.to_vec()))
-            .boxed();
+        let byte_stream: BoxStream<'static, std::result::Result<Vec<u8>, reqwest::Error>> =
+            response
+                .bytes_stream()
+                .map(|r| r.map(|b| b.to_vec()))
+                .boxed();
 
         let state = SseState {
             stream: byte_stream,
@@ -329,7 +330,7 @@ fn parse_openai_event(data: &str) -> Result<Option<ChatStreamEvent>> {
 
     if let Some(usage) = value.get("usage") {
         if let Ok(usage) = serde_json::from_value::<eli_core::types::Usage>(usage.clone()) {
-             return Ok(Some(ChatStreamEvent::Usage(usage)));
+            return Ok(Some(ChatStreamEvent::Usage(usage)));
         }
     }
 

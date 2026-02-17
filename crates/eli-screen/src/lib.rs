@@ -115,4 +115,3 @@ async fn run_osascript(script: &str) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
-

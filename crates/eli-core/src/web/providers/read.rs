@@ -17,21 +17,29 @@ pub async fn read_url(url: &str) -> Result<Article> {
         .build()
         .map_err(|e| Error::Provider(format!("read client init failed: {e}")))?;
 
-    let resp = client.get(url).send().await
+    let resp = client
+        .get(url)
+        .send()
+        .await
         .map_err(|e| Error::Provider(format!("fetch failed: {e}")))?;
 
     if !resp.status().is_success() {
-        return Err(Error::Provider(format!("fetch failed: http {}", resp.status())));
+        return Err(Error::Provider(format!(
+            "fetch failed: http {}",
+            resp.status()
+        )));
     }
 
-    let raw_html = resp.text().await
+    let raw_html = resp
+        .text()
+        .await
         .map_err(|e| Error::Provider(format!("read failed: {e}")))?;
 
     // 2. Use readability to extract content
     // readability::extractor::extract expects a generic Read + Url, but the struct is simpler to use with a Cursor
     let mut reader = Cursor::new(raw_html);
-    let url_obj = reqwest::Url::parse(url)
-        .map_err(|e| Error::Provider(format!("invalid url: {e}")))?;
+    let url_obj =
+        reqwest::Url::parse(url).map_err(|e| Error::Provider(format!("invalid url: {e}")))?;
 
     let product = extractor::extract(&mut reader, &url_obj)
         .map_err(|e| Error::Provider(format!("extraction failed: {e}")))?;

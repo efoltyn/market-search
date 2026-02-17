@@ -61,13 +61,10 @@ impl CommandRunner {
             }
             results
         } else {
-            let stream = stream::iter(to_run).map(|(idx, cmd)| async move {
-                (idx, self.run_command(cmd).await)
-            });
-            let mut results: Vec<(usize, CommandResult)> = stream
-                .buffer_unordered(parallelism)
-                .collect()
-                .await;
+            let stream = stream::iter(to_run)
+                .map(|(idx, cmd)| async move { (idx, self.run_command(cmd).await) });
+            let mut results: Vec<(usize, CommandResult)> =
+                stream.buffer_unordered(parallelism).collect().await;
             results.sort_by_key(|(idx, _)| *idx);
             results
         };

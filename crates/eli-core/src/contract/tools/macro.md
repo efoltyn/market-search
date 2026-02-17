@@ -5,6 +5,7 @@ Key economic indicators in one call.
 ```bash
 eli finance macro
 eli finance macro --range 6mo
+eli finance macro --compare-to 2020-03-01
 ```
 
 **Returns:**
@@ -19,6 +20,13 @@ eli finance macro --range 6mo
 | M2 Money Supply | M2SL | $22.4T |
 | WTI Oil | DCOILWTICO | $60.46 |
 
-Each indicator shows `current_value` and `change_1y` (percent change).
+Each indicator includes:
+- `category` (`inflation`, `employment`, `gdp`, `rates`, `debt`, `money`, `consumer`, `credit`, `commodities`)
+- `current_value`
+- `change_1y` (percent change)
+- optional compare fields when `--compare-to` is set:
+  - `compare_value`
+  - `delta_abs`
+  - `delta_pct`
 
 **Use for:** Quick macro context, rate environment, inflation trends.

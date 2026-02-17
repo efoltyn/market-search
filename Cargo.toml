@@ -9,6 +9,7 @@ description = "financial coding agent"
 tokio.workspace = true
 anyhow.workspace = true
 eli-cli.workspace = true
+syn = "2.0.115"
 
 [workspace]
 members = [
@@ -16,7 +17,6 @@ members = [
   "crates/eli-cli",
   "crates/eli-core",
   "crates/eli-screen",
-  "crates/eli-tui",
 ]
 resolver = "2"
 
@@ -52,9 +52,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.7", features = ["v4", "serde"] }
 walkdir = "2.5"
 tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
+rand = "0.8"
 
 eli-adapters = { path = "crates/eli-adapters", version = "0.1.0" }
 eli-cli = { path = "crates/eli-cli", version = "0.1.0" }
 eli-core = { path = "crates/eli-core", version = "0.1.0" }
 eli-screen = { path = "crates/eli-screen", version = "0.1.0" }
-eli-tui = { path = "crates/eli-tui", version = "0.1.0" }

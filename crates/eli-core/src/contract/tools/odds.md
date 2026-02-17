@@ -54,11 +54,32 @@ eli finance odds --list-events --limit 50
 
 # Polymarket tags
 eli finance odds --list-tags --provider polymarket
+
+# Local CSV search (breadth preserved by default)
+eli finance odds --search "recession"
+
+# Optional opt-in filters for local CSV search
+eli finance odds --search "unemployment" --country US --min-volume 10000 --top 5
 ```
 
 ### Reading the output
 
+- `field_semantics` is the schema contract for units/scales.
 - `yes_price: 31` means 31% probability (price in cents = probability)
+- `probability_yes` / `probability` are decimals in `[0,1]` (`0.31` = 31%).
 - `volume` is total traded in cents
 - Scalar markets have brackets (e.g., ">$500B", "$100-500B") - highest yes_price = market consensus
 - `status: active` = tradeable, `status: finalized` = settled
+- Local CSV search now adds:
+  - `match_score`
+  - `match_terms`
+  - `country_hints`
+  - `volume_usd`
+- Breadth is preserved by default; `--country` filtering is opt-in.
+
+### CSV parsing safety
+
+- `eli finance sync` writes RFC4180 CSV with quoted fields.
+- `title` often contains commas.
+- Do **not** parse with `awk -F,`, `cut -d,`, or `split(',')`.
+- Use a CSV-aware parser (`python csv`, pandas, etc.) when reading `all_markets.csv`.
