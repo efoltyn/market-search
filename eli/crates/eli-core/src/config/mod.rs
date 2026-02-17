@@ -239,7 +239,8 @@ impl ChatConfig {
     }
 
     pub fn resolved_compact_trigger_tokens(&self) -> Option<usize> {
-        self.compact_trigger_tokens.and_then(|v| if v == 0 { None } else { Some(v) })
+        self.compact_trigger_tokens
+            .and_then(|v| if v == 0 { None } else { Some(v) })
     }
 
     pub fn resolved_compact_keep(&self) -> usize {
@@ -424,11 +425,11 @@ fn default_timeout_secs() -> u64 {
 }
 
 fn default_auto() -> bool {
-    true  // dynamic steps - model decides when done
+    true // dynamic steps - model decides when done
 }
 
 fn default_max_auto() -> u32 {
-    50  // safety limit
+    50 // safety limit
 }
 
 fn default_follow_cwd() -> bool {

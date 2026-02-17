@@ -191,7 +191,10 @@ impl LlmAdapter for OllamaAdapter {
                             if let Some(error) = resp.error {
                                 st.done = true;
                                 return Some((
-                                    Err(AdapterError::StreamParse(format!("Ollama error: {}", error))),
+                                    Err(AdapterError::StreamParse(format!(
+                                        "Ollama error: {}",
+                                        error
+                                    ))),
                                     st,
                                 ));
                             }

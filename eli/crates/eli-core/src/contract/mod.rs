@@ -1,20 +1,13 @@
 use crate::{Error, Result};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize as SerdeDeserialize, Serialize};
 
 pub fn extract_first_json_value(text: &str) -> Option<serde_json::Value> {
+    if let Some((value, _, _)) = extract_first_json_segment(text) {
+        return Some(value);
+    }
     if let Some(fenced) = extract_fenced_code_block(text, "json") {
         if let Ok(value) = parse_json_lenient(fenced) {
-            return Some(value);
-        }
-    }
-
-    for (idx, ch) in text.char_indices() {
-        if ch != '{' && ch != '[' {
-            continue;
-        }
-        if let Ok(value) = parse_json_lenient(&text[idx..]) {
             return Some(value);
         }
     }
@@ -48,9 +41,59 @@ fn extract_fenced_code_block<'a>(text: &'a str, lang: &str) -> Option<&'a str> {
 }
 
 fn parse_json_lenient(s: &str) -> Result<serde_json::Value> {
-    let mut de = serde_json::Deserializer::from_str(s);
-    let value = serde_json::Value::deserialize(&mut de)?;
-    Ok(value)
+    Ok(serde_json::from_str::<serde_json::Value>(s)?)
+}
+
+fn extract_first_json_segment(text: &str) -> Option<(serde_json::Value, usize, usize)> {
+    for (idx, ch) in text.char_indices() {
+        if ch != '{' && ch != '[' {
+            continue;
+        }
+        let Some(end) = balanced_json_end(text, idx) else {
+            continue;
+        };
+        let slice = &text[idx..end];
+        let Ok(value) = parse_json_lenient(slice) else {
+            continue;
+        };
+        return Some((value, idx, end));
+    }
+    None
+}
+
+fn balanced_json_end(text: &str, start: usize) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (off, ch) in text[start..].char_indices() {
+        let idx = start + off;
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, Serialize, SerdeDeserialize, PartialEq, Eq)]
@@ -142,9 +185,13 @@ pub struct ModelResponse {
 }
 
 pub fn validate_model_response(response_text: &str) -> Result<ModelResponse> {
-    let value = extract_first_json_value(response_text).ok_or_else(|| {
-        Error::InvalidInput("no JSON object found in model response".to_string())
-    })?;
+    let (value, start, end) = extract_first_json_segment(response_text)
+        .ok_or_else(|| Error::InvalidInput("no JSON object found in model response".to_string()))?;
+    if !response_text[..start].trim().is_empty() || !response_text[end..].trim().is_empty() {
+        return Err(Error::InvalidInput(
+            "response must be strict JSON only (no extra text before/after)".to_string(),
+        ));
+    }
 
     let mut resp: ModelResponse = serde_json::from_value(value)?;
     resp.focus = clean_focus(&resp.focus);
@@ -185,6 +232,17 @@ pub fn validate_model_response(response_text: &str) -> Result<ModelResponse> {
         }
         if task.task.trim().is_empty() {
             return Err(Error::InvalidInput(format!("subagents[{i}].task is empty")));
+        }
+    }
+
+    if matches!(resp.status, StepStatus::KeepWorking) {
+        if let Some(synthesis) = &resp.synthesis {
+            if !synthesis.answer.trim().is_empty() {
+                return Err(Error::InvalidInput(
+                    "status KEEP_WORKING cannot include synthesis.answer; reserve final answer for DONE"
+                        .to_string(),
+                ));
+            }
         }
     }
 
@@ -229,6 +287,9 @@ fn finance_tools_doc() -> String {
         include_str!("tools/odds.md"),
         include_str!("tools/prices.md"),
         include_str!("tools/macro.md"),
+        include_str!("tools/rate_path.md"),
+        include_str!("tools/yield_curve.md"),
+        include_str!("tools/dashboard.md"),
         include_str!("tools/search.md"),
     ]
     .join("\n\n")
@@ -280,7 +341,7 @@ Reply ONLY with strict JSON:
     }
   ],
   "synthesis": {
-    "summary": ["3-6 short bullets of findings/actions"],
+    "summary": ["0-3 short bullets of findings/actions (optional)"],
     "answer": "Direct answer to the user's request in 1-2 sentences",
     "next_steps": ["Optional: 1-2 concrete follow-ups (only if truly useful)"]
   },
@@ -305,6 +366,13 @@ Use "status": "KEEP_WORKING" when:
 IMPORTANT: Simple questions = DONE immediately. Don't KEEP_WORKING just to repeat yourself.
 If your response fully addresses the user's request, use DONE.
 
+## Execution posture (critical)
+- Optimize for correctness and decisive progress, not token thrift.
+- Bold attempts are encouraged; treat errors as signal and recover quickly.
+- If a command shape fails, adapt the approach instead of repeating the exact same shape.
+- For quick factual asks (e.g., \"market today\", \"price of X\"), finish as soon as you have enough data.
+- Use installed runtime names: prefer `python3` (not `python`) unless `python` is confirmed available.
+
 ## Operating modes
 - /MODE READ: default mode. You can run any command and create NEW files (e.g., for notes, documentation, or new tests), but you cannot edit or delete existing code files.
 - /MODE WORK: full access. Perform edits, deletions, and all commands when they move the task forward.
@@ -315,16 +383,18 @@ If your response fully addresses the user's request, use DONE.
 - Use focus for the most concrete fact learned from tool output when available (not just the action).
 
 ## Reporting / synthesis
-- When status is DONE and you are not asking the user a question, always fill synthesis.answer.
-- If you used tools or performed multi-step investigation/review, also fill synthesis.summary.
+- KEEP_WORKING is for progress only. You may include a brief synthesis.summary (0-3 bullets), but do NOT provide synthesis.answer.
+- When status is DONE and you are not asking the user a question, fill synthesis.answer.
+- synthesis.summary is optional support (0-3 bullets). Include only facts not already repeated in synthesis.answer.
 - Next steps are OPTIONAL: only include when they are genuinely useful or there is a clear follow-up.
-- For trivial requests, summary/next_steps can be empty, but answer must still be present.
+- For trivial requests, summary/next_steps can be empty.
 
 ## Brevity (critical for terminal UX)
 - Brevity is the soul of wit.
 - Keep focus and notes terse (aim ≤ 80 chars each).
 - Use short, concrete phrases; avoid clauses and filler.
 - If you need detail, put it in synthesis.answer, not focus/notes.
+- Keep generated filenames short and intentional; avoid prompt-sized names.
 
 ## Approvals
 - /APPROVALS AUTO: proceed normally.
@@ -341,10 +411,17 @@ If your response fully addresses the user's request, use DONE.
 ## Tooling spec (authoritative)
 - Use Eli tools when they help; you may answer without tool calls when appropriate.
 - Odds tool hierarchy: defaults to Kalshi and falls back to Polymarket automatically. Specify a provider only for direct comparison.
+- In odds/sync outputs, `volume` fields are in cents unless explicitly labeled otherwise. Convert to dollars by dividing by 100.
 - Large JSON tool outputs may be saved to `eli_research/data/.last_tool_output.json` and suppressed from tool observations. Load that file with a local command/script when needed.
 - If data is already present in the current conversation or tool outputs, you may reuse it.
 - Prioritize the current session context; older research logs are optional and should not override recent context.
 - This list covers Eli data tools and is NOT an exhaustive command list. You are free to use any local command-line tools or scripts for analysis and workflow.
+
+## Market-direction math (critical)
+- For \"what is happening today\" market asks, do NOT infer direction from `open` vs `previous_close`.
+- Treat `open` vs `previous_close` as gap-at-open only.
+- To state intraday up/down, compute from `eli finance timeseries` using first close/open of session vs latest close.
+- If you cannot compute a current-direction metric from available fields, say so explicitly instead of guessing.
 
 ## Tool output discipline (ant-farm insights)
 - After **every tool call**, include a **tiny numeric digest** of what you learned (count, price, %, timestamp, min/max, etc.).
@@ -399,13 +476,13 @@ The TUI only shows what fits on screen. `/copy` accesses the full session undern
 - Self-check? `/copy tools` to see what you already ran
 - Debug? `/copy last` to see recent output
 
-### `eli extract` - Summarize large content
+### `eli web extract` - Summarize large content
 
 When content is too large to process effectively, extract key facts:
 
 ```
-eli extract --url <URL> --bullets 10
-eli extract --file article.txt --focus "financial metrics"
+eli web extract --url <URL> --bullets 10
+eli web extract --file article.txt --focus "financial metrics"
 ```
 
 Use extraction when:
@@ -440,4 +517,65 @@ Skip extraction when:
 
 pub fn quant_system_prompt() -> String {
     coding_system_prompt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_keep_working_with_synthesis_answer() {
+        let raw = r#"{
+          "status":"KEEP_WORKING",
+          "commands":[],
+          "diffs":[],
+          "synthesis":{"summary":[],"answer":"draft answer","next_steps":[]}
+        }"#;
+        let err = validate_model_response(raw).expect_err("expected validation error");
+        let msg = format!("{err}");
+        assert!(msg.contains("KEEP_WORKING cannot include synthesis.answer"));
+    }
+
+    #[test]
+    fn accepts_keep_working_with_progress_summary() {
+        let raw = r#"{
+          "status":"KEEP_WORKING",
+          "commands":[],
+          "diffs":[],
+          "synthesis":{"summary":["fetched 4 tickers"],"answer":"","next_steps":["compare returns"]}
+        }"#;
+        let out = validate_model_response(raw).expect("should accept progress summary");
+        assert!(matches!(out.status, StepStatus::KeepWorking));
+        let synthesis = out.synthesis.expect("synthesis expected");
+        assert_eq!(synthesis.summary.len(), 1);
+    }
+
+    #[test]
+    fn accepts_done_with_synthesis_answer() {
+        let raw = r#"{
+          "status":"DONE",
+          "commands":[],
+          "diffs":[],
+          "synthesis":{"summary":["k1"],"answer":"final answer","next_steps":[]}
+        }"#;
+        let out = validate_model_response(raw).expect("done with synthesis should pass");
+        assert!(matches!(out.status, StepStatus::Done));
+        let synthesis = out.synthesis.expect("synthesis expected");
+        assert_eq!(synthesis.answer, "final answer");
+    }
+
+    #[test]
+    fn rejects_trailing_non_json_text() {
+        let raw = r#"{
+          "status":"DONE",
+          "commands":[],
+          "diffs":[],
+          "synthesis":{"summary":[],"answer":"ok","next_steps":[]}
+        }
+        extra text
+        "#;
+        let err = validate_model_response(raw).expect_err("expected strict-json error");
+        let msg = format!("{err}");
+        assert!(msg.contains("strict JSON"));
+    }
 }

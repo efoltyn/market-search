@@ -1,11 +1,10 @@
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod providers;
 
 // Re-export crawl types for convenience
-pub use providers::crawl::{CrawlRequest, CrawlResponse, CrawledPage, crawl_website};
+pub use providers::crawl::{crawl_website, CrawlRequest, CrawlResponse, CrawledPage};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebHit {
@@ -21,6 +20,8 @@ pub struct WebHit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebSearchResponse {
     pub hits: Vec<WebHit>,
+    /// Alias for `hits` — agents expect `results` key.
+    pub results: Vec<WebHit>,
 }
 
 pub struct ScoringPipeline;
@@ -32,7 +33,11 @@ impl ScoringPipeline {
         hits.retain(|h| seen.insert(h.url.clone()));
 
         // 2. Sort by score (descending)
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         hits
     }

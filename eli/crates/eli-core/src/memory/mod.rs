@@ -89,11 +89,13 @@ impl Memory {
         let mut out = Vec::new();
         if let Some(system) = &self.system {
             out.push(ChatMessage::system(system.clone()));
-            
+
             // Inject current date/time context
             let now = chrono::Local::now();
             let time_str = now.format("%A, %B %e, %Y %H:%M:%S").to_string();
-            out.push(ChatMessage::system(format!("Current Date and Time: {time_str}")));
+            out.push(ChatMessage::system(format!(
+                "Current Date and Time: {time_str}"
+            )));
         }
         if let Some(summary) = &self.summary {
             out.push(ChatMessage::system(format!("Memory summary:\n{summary}")));

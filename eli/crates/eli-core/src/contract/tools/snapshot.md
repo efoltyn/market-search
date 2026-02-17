@@ -4,6 +4,7 @@ Current price, market cap, shares, EV for one or more tickers.
 
 ```bash
 eli finance snapshot --tickers AAPL,MSFT,GOOGL
+eli finance snapshot --tickers SPY,QQQ,IWM --returns 1mo,3mo,1y
 ```
 
 **Returns per ticker:**
@@ -16,6 +17,10 @@ eli finance snapshot --tickers AAPL,MSFT,GOOGL
 - `market_cap_weights` - each ticker's weight in the set
 - `daily_returns` - today's return per ticker
 - `relative_strength` - each ticker vs the group mean
+
+**Optional trend block:**
+- `trailing_returns` - nested map shape `ticker -> period -> decimal_return`
+- Enabled with `--returns` and supported windows: `1mo,3mo,6mo,1y`
 
 **Use cases:**
 - Compare valuations across tickers

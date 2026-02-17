@@ -9,6 +9,7 @@ pub mod executor;
 pub mod extraction;
 pub mod finance;
 pub mod memory;
+pub mod meta;
 pub mod metrics;
 pub mod openrouter;
 pub mod orchestrator;

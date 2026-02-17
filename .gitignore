@@ -1,9 +1,54 @@
+# OS
 .DS_Store
+
+# AI agent workspaces
 .claude/
 .gemini/
 .gemini-clipboard/
+
+# Python
 __pycache__/
 *.pyc
+
+# Secrets
 .env
+
+# Eli backup files
 .eli-backup-*
+
+# Rust build artifacts (all target dirs)
+eli/target*/
 eli/target-codex/
+
+# Cargo home caches (local isolated builds)
+eli/.cargo_local*/
+.cargo_local*/
+.cargo/
+
+# Accidental nested repo duplicate
+eli/eli/
+
+# Build binary symlink (recreated by: ln -sf eli/target_local/debug/eli bin/eli)
+bin/
+
+# Generated metadata sidecars in source tree
+eli/crates/**/*.meta.json
+
+# Scratch data files (analysis outputs, one-off scripts)
+*.pyc
+0
+etf_data.txt
+macro_data.txt
+options_data.txt
+macro.json
+formatted_article.json
+odds_recession.json
+odds_series.json
+recession_markets.json
+spy_candles.json
+spy_options.json
+spy_timeseries.json
+gold_silver_analysis.md
+plots/
+data/
+eli/data/

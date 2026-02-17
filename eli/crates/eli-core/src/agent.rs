@@ -7,15 +7,22 @@ use crate::memory::Memory;
 use crate::orchestrator::{maybe_compact_memory, run_subagents, SubagentResult};
 use crate::persistence::{EventKind, SessionEvent, SessionStore};
 use crate::types::{ChatMessage, ChatRequest, ChatStreamEvent};
+use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use futures::StreamExt;
 
 pub enum AgentEvent {
     Token(String),
     MessageComplete(String),
-    Plan { plan: String, focus: String, status: StepStatus },
-    ToolOutput { name: String, output: String },
+    Plan {
+        plan: String,
+        focus: String,
+        status: StepStatus,
+    },
+    ToolOutput {
+        name: String,
+        output: String,
+    },
     Error(String),
     Done,
 }
@@ -55,14 +62,30 @@ impl Agent {
         self.memory.set_system(prompt);
     }
 
-    pub async fn chat(&mut self, user_message: String, tx: mpsc::Sender<AgentEvent>) -> anyhow::Result<()> {
+    pub async fn chat(
+        &mut self,
+        user_message: String,
+        tx: mpsc::Sender<AgentEvent>,
+    ) -> anyhow::Result<()> {
         self.memory.push(ChatMessage::user(user_message.clone()));
-        let _ = self.store.append(&self.session_id, &SessionEvent {
-            ts: chrono::Utc::now(),
-            kind: EventKind::UserMessage { content: user_message.clone() },
-        }).await;
+        let _ = self
+            .store
+            .append(
+                &self.session_id,
+                &SessionEvent {
+                    ts: chrono::Utc::now(),
+                    kind: EventKind::UserMessage {
+                        content: user_message.clone(),
+                    },
+                },
+            )
+            .await;
 
-        let max_iters = if self.cfg.auto { self.cfg.max_auto.max(1) } else { 1 };
+        let max_iters = if self.cfg.auto {
+            self.cfg.max_auto.max(1)
+        } else {
+            1
+        };
         let mut current_iter = 0;
 
         loop {
@@ -133,13 +156,24 @@ impl Agent {
                 break;
             }
 
-            self.memory.push(ChatMessage::assistant(full_response.clone()));
-            let _ = self.store.append(&self.session_id, &SessionEvent {
-                ts: chrono::Utc::now(),
-                kind: EventKind::AssistantMessage { content: full_response.clone() },
-            }).await;
-            
-            let _ = tx.send(AgentEvent::MessageComplete(full_response.clone())).await;
+            self.memory
+                .push(ChatMessage::assistant(full_response.clone()));
+            let _ = self
+                .store
+                .append(
+                    &self.session_id,
+                    &SessionEvent {
+                        ts: chrono::Utc::now(),
+                        kind: EventKind::AssistantMessage {
+                            content: full_response.clone(),
+                        },
+                    },
+                )
+                .await;
+
+            let _ = tx
+                .send(AgentEvent::MessageComplete(full_response.clone()))
+                .await;
 
             // Parse and Execute
             let model = match contract::validate_model_response(&full_response) {
@@ -156,15 +190,16 @@ impl Agent {
                 .await;
 
             let (plan_mode, _) = self.parse_plan_controls(&model.plan);
-            let read_mode = matches!(self.cfg.mode, RunMode::Read) || matches!(plan_mode, Some(RunMode::Read));
+            let read_mode =
+                matches!(self.cfg.mode, RunMode::Read) || matches!(plan_mode, Some(RunMode::Read));
             let wants_user_input = model
                 .ask_user
                 .as_deref()
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false);
-            
+
             // In TUI, we default to AUTO for now as we don't have interactive confirmation implemented yet
-            let apply = !read_mode; 
+            let apply = !read_mode;
             let dry_run = !apply;
 
             let mut diff_results = Vec::new();
@@ -211,14 +246,17 @@ impl Agent {
                 if !diff_results.is_empty() || !command_results.is_empty() {
                     let observation =
                         self.build_observation(read_mode, false, &diff_results, &command_results);
-                    self.memory.push(ChatMessage::tool(observation.clone(), "eli"));
+                    self.memory
+                        .push(ChatMessage::tool(observation.clone(), "eli"));
                     let _ = self
                         .store
                         .append(
                             &self.session_id,
                             &SessionEvent {
                                 ts: chrono::Utc::now(),
-                                kind: EventKind::Note { content: observation },
+                                kind: EventKind::Note {
+                                    content: observation,
+                                },
                             },
                         )
                         .await;
@@ -234,14 +272,17 @@ impl Agent {
                     .await;
                     if !results.is_empty() {
                         let observation = build_subagent_observation(&results);
-                        self.memory.push(ChatMessage::tool(observation.clone(), "eli.subagents"));
+                        self.memory
+                            .push(ChatMessage::tool(observation.clone(), "eli.subagents"));
                         let _ = self
                             .store
                             .append(
                                 &self.session_id,
                                 &SessionEvent {
                                     ts: chrono::Utc::now(),
-                                    kind: EventKind::Note { content: observation },
+                                    kind: EventKind::Note {
+                                        content: observation,
+                                    },
                                 },
                             )
                             .await;
@@ -277,7 +318,7 @@ impl Agent {
         let line = plan.lines().next().unwrap_or("");
         let mut mode = None;
         let mut approvals = None;
-    
+
         for part in line.split('|').map(|p| p.trim()) {
             let lower = part.to_ascii_lowercase();
             if let Some(rest) = lower.strip_prefix("mode:") {
@@ -296,7 +337,7 @@ impl Agent {
                 };
             }
         }
-    
+
         (mode, approvals)
     }
 
@@ -309,10 +350,10 @@ impl Agent {
     ) -> String {
         let mode = if read_mode { "read" } else { "work" };
         let approvals = if approvals_ask { "ask" } else { "auto" };
-    
+
         let mut out = String::new();
         out.push_str(&format!("mode={}, approvals={}\n", mode, approvals));
-    
+
         if !diffs.is_empty() {
             out.push_str("diffs:\n");
             for r in diffs {
@@ -325,7 +366,7 @@ impl Agent {
                 ));
             }
         }
-    
+
         if !commands.is_empty() {
             out.push_str("commands:\n");
             for r in commands {
@@ -336,14 +377,20 @@ impl Agent {
                     ms = r.duration_ms
                 ));
                 if !r.stdout.trim().is_empty() {
-                    out.push_str(&format!("  stdout:\n{}\n", self.truncate(&r.stdout, 400000)));
+                    out.push_str(&format!(
+                        "  stdout:\n{}\n",
+                        self.truncate(&r.stdout, 400000)
+                    ));
                 }
                 if !r.stderr.trim().is_empty() {
-                    out.push_str(&format!("  stderr:\n{}\n", self.truncate(&r.stderr, 400000)));
+                    out.push_str(&format!(
+                        "  stderr:\n{}\n",
+                        self.truncate(&r.stderr, 400000)
+                    ));
                 }
             }
         }
-    
+
         out
     }
 

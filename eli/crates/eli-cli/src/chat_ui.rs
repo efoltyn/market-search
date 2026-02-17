@@ -3,9 +3,13 @@
 //! Combines TUI's beautiful rendering with CLI's full functionality.
 
 use anyhow::Result;
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers,
+};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -22,7 +26,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// A message in the chat history
 #[derive(Clone)]
 pub struct ChatMessage {
-    pub role: String,    // "You", "Eli", "System", "Tool", etc.
+    pub role: String, // "You", "Eli", "System", "Tool", etc.
     pub content: String,
 }
 
@@ -51,6 +55,7 @@ pub struct ChatUi {
     pub last_spinner: Instant,
     pub sources: Vec<String>,
     pub last_tool_ok: Option<bool>,
+    pub last_tool_summary: Option<String>,
 
     // Stats
     pub total_tokens: u32,
@@ -58,6 +63,7 @@ pub struct ChatUi {
     pub prompt_mode: PromptMode,
     pub queue_len: usize,
     pub show_tips: bool,
+    pub show_tool_output: bool,
     pub interrupt_requested: bool,
     last_esc: Option<Instant>,
 
@@ -80,7 +86,8 @@ impl ChatUi {
         Self {
             messages: vec![ChatMessage {
                 role: "System".to_string(),
-                content: "Welcome to ELI. Type your question or /help for commands (incl. /model).".to_string(),
+                content: "Welcome to ELI. Type your question or /help for commands (incl. /model)."
+                    .to_string(),
             }],
             history: Vec::new(),
             history_cursor: None,
@@ -91,11 +98,13 @@ impl ChatUi {
             last_spinner: Instant::now(),
             sources: Vec::new(),
             last_tool_ok: None,
+            last_tool_summary: None,
             total_tokens: 0,
             elapsed_secs: 0,
             prompt_mode: PromptMode::Auto,
             queue_len: 0,
             show_tips: true,
+            show_tool_output: false,
             interrupt_requested: false,
             last_esc: None,
             should_quit: false,
@@ -114,6 +123,11 @@ impl ChatUi {
             role: role.to_string(),
             content: content.to_string(),
         });
+    }
+
+    /// Remove all inline tool transcript messages.
+    pub fn clear_tool_messages(&mut self) {
+        self.messages.retain(|m| m.role != "Tool");
     }
 
     /// Append content to the last message (for streaming)
@@ -135,11 +149,19 @@ impl ChatUi {
     pub fn clear_sources(&mut self) {
         self.sources.clear();
         self.last_tool_ok = None;
+        self.last_tool_summary = None;
+        self.clear_tool_messages();
     }
 
     /// Cycle prompt mode: Ask -> Plan -> Auto -> Ask
     pub fn cycle_mode(&mut self) {
         self.prompt_mode = PromptMode::Auto;
+    }
+
+    /// Toggle whether full tool stdout/stderr is shown inline.
+    pub fn toggle_tool_output(&mut self) -> bool {
+        self.show_tool_output = !self.show_tool_output;
+        self.show_tool_output
     }
 
     /// Queue a prompt to run after the current task
@@ -358,9 +380,9 @@ impl ChatUi {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),     // Chat body
-                Constraint::Length(3),  // Input box
-                Constraint::Length(1),  // Sources + hints footer
+                Constraint::Min(5),    // Chat body
+                Constraint::Length(3), // Input box
+                Constraint::Length(1), // Sources + hints footer
             ])
             .split(area);
 
@@ -401,7 +423,9 @@ impl ChatUi {
                         "› ",
                         "  ",
                         Style::default().fg(Color::Cyan),
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
                     );
                     lines.push(Line::from(""));
                 }
@@ -424,17 +448,22 @@ impl ChatUi {
                     lines.push(Line::from(""));
                 }
                 "Tool" => {
-                    // Tool output in gray (no truncation)
-                    for content_line in msg.content.lines() {
+                    for (i, content_line) in msg.content.lines().enumerate() {
+                        if content_line.trim().is_empty() {
+                            lines.push(Line::from(""));
+                            continue;
+                        }
+                        let prefix_first = if i == 0 { "· " } else { "  " };
                         push_wrapped(
                             &mut lines,
                             content_line,
+                            prefix_first,
                             "  ",
-                            "  ",
-                            Style::default(),
+                            Style::default().fg(Color::DarkGray),
                             Style::default().fg(Color::DarkGray),
                         );
                     }
+                    lines.push(Line::from(""));
                 }
                 "System" => {
                     push_wrapped(
@@ -459,15 +488,27 @@ impl ChatUi {
                     lines.push(Line::from(""));
                 }
                 "Progress" => {
-                    // Progress/status updates
-                    push_wrapped(
-                        &mut lines,
-                        &msg.content,
-                        "→ ",
-                        "  ",
-                        Style::default().fg(Color::Yellow),
-                        Style::default().fg(Color::DarkGray),
-                    );
+                    for (i, content_line) in msg.content.lines().enumerate() {
+                        let trimmed = content_line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let line = if trimmed.ends_with("...") {
+                            trimmed.to_string()
+                        } else {
+                            format!("{trimmed}...")
+                        };
+                        let prefix_first = if i == 0 { "· " } else { "  " };
+                        push_wrapped(
+                            &mut lines,
+                            &line,
+                            prefix_first,
+                            "  ",
+                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(Color::DarkGray),
+                        );
+                    }
+                    lines.push(Line::from(""));
                 }
                 _ => {
                     push_wrapped(
@@ -529,40 +570,41 @@ impl ChatUi {
         let inner_width = width.saturating_sub(2);
         let content_width = inner_width.saturating_sub(prompt.width()).max(1);
 
-        let window_with_cursor = |text: &str, cursor_idx: usize, max_width: usize| -> (String, usize) {
-            let chars: Vec<char> = text.chars().collect();
-            if chars.is_empty() {
-                return (String::new(), 0);
-            }
-            let widths: Vec<usize> = chars
-                .iter()
-                .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0).max(1))
-                .collect();
-            let total_width: usize = widths.iter().sum();
-            let cursor_idx = cursor_idx.min(chars.len());
-
-            if total_width <= max_width {
-                return (text.to_string(), cursor_idx);
-            }
-
-            let mut end = cursor_idx.min(chars.len());
-            if end < chars.len() {
-                end = end.saturating_add(1);
-            }
-            let mut start = end;
-            let mut width_acc = 0usize;
-            while start > 0 {
-                let w = widths[start - 1];
-                if width_acc + w > max_width {
-                    break;
+        let window_with_cursor =
+            |text: &str, cursor_idx: usize, max_width: usize| -> (String, usize) {
+                let chars: Vec<char> = text.chars().collect();
+                if chars.is_empty() {
+                    return (String::new(), 0);
                 }
-                width_acc += w;
-                start -= 1;
-            }
-            let visible: String = chars[start..end].iter().collect();
-            let cursor_in_window = cursor_idx.saturating_sub(start);
-            (visible, cursor_in_window)
-        };
+                let widths: Vec<usize> = chars
+                    .iter()
+                    .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0).max(1))
+                    .collect();
+                let total_width: usize = widths.iter().sum();
+                let cursor_idx = cursor_idx.min(chars.len());
+
+                if total_width <= max_width {
+                    return (text.to_string(), cursor_idx);
+                }
+
+                let mut end = cursor_idx.min(chars.len());
+                if end < chars.len() {
+                    end = end.saturating_add(1);
+                }
+                let mut start = end;
+                let mut width_acc = 0usize;
+                while start > 0 {
+                    let w = widths[start - 1];
+                    if width_acc + w > max_width {
+                        break;
+                    }
+                    width_acc += w;
+                    start -= 1;
+                }
+                let visible: String = chars[start..end].iter().collect();
+                let cursor_in_window = cursor_idx.saturating_sub(start);
+                (visible, cursor_in_window)
+            };
 
         let (visible, cursor_in_window) = window_with_cursor(&display, cursor_idx, content_width);
 
@@ -626,17 +668,6 @@ impl ChatUi {
     fn render_sources(&self, f: &mut Frame, area: Rect) {
         f.render_widget(Clear, area);
         let mut spans: Vec<Span> = Vec::new();
-
-        // Tool status icon
-        if let Some(ok) = self.last_tool_ok {
-            let (symbol, color) = if ok {
-                ("✓", Color::Green)
-            } else {
-                ("✗", Color::Red)
-            };
-            spans.push(Span::styled(format!("{} ", symbol), Style::default().fg(color)));
-        }
-
         // Sources
         if !self.sources.is_empty() {
             spans.push(Span::styled(
@@ -648,7 +679,11 @@ impl ChatUi {
 
         // Status: mode, time, tokens
         let mode = "AUTO";
-        let phase = if self.is_processing { "working" } else { "ready" };
+        let phase = if self.is_processing {
+            "working"
+        } else {
+            "ready"
+        };
         let spinner = if self.is_processing {
             format!("{} ", SPINNER[self.spinner_idx % SPINNER.len()])
         } else {
@@ -680,7 +715,8 @@ impl ChatUi {
         if !self.is_processing && self.show_tips {
             spans.push(Span::styled(
                 format!(
-                    " │ /compact reduce tokens │ /reset clear tokens │ /tip hide tips"
+                    " │ /compact reduce tokens │ /reset clear tokens │ /tip hide tips │ Opt+O toggle output ({})",
+                    if self.show_tool_output { "on" } else { "off" }
                 ),
                 Style::default().fg(Color::DarkGray),
             ));
@@ -724,7 +760,12 @@ impl ChatTerminal {
 impl Drop for ChatTerminal {
     fn drop(&mut self) {
         disable_raw_mode().ok();
-        execute!(self.terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen).ok();
+        execute!(
+            self.terminal.backend_mut(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        )
+        .ok();
         self.terminal.show_cursor().ok();
     }
 }

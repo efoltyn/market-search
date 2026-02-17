@@ -74,7 +74,9 @@ impl DiffEngine {
 
         match diff.op {
             DiffOp::Create => self.create_file(&resolved, &diff.after_text, dry_run),
-            DiffOp::Replace => self.replace_file(&resolved, &diff.before_sha256, &diff.after_text, dry_run),
+            DiffOp::Replace => {
+                self.replace_file(&resolved, &diff.before_sha256, &diff.after_text, dry_run)
+            }
             DiffOp::Patch => self.patch_file(&resolved, &diff.before_sha256, &diff.patch, dry_run),
             DiffOp::Delete => self.delete_file(&resolved, &diff.before_sha256, dry_run),
         }
@@ -130,7 +132,13 @@ impl DiffEngine {
         }
     }
 
-    fn replace_file(&self, path: &Path, before_sha256: &str, content: &str, dry_run: bool) -> DiffResult {
+    fn replace_file(
+        &self,
+        path: &Path,
+        before_sha256: &str,
+        content: &str,
+        dry_run: bool,
+    ) -> DiffResult {
         if !path.exists() {
             return DiffResult::err(path, "replace", "file does not exist".to_string());
         }
@@ -197,7 +205,13 @@ impl DiffEngine {
         }
     }
 
-    fn patch_file(&self, path: &Path, before_sha256: &str, patch_text: &str, dry_run: bool) -> DiffResult {
+    fn patch_file(
+        &self,
+        path: &Path,
+        before_sha256: &str,
+        patch_text: &str,
+        dry_run: bool,
+    ) -> DiffResult {
         if !path.exists() {
             return DiffResult::err(path, "patch", "file does not exist".to_string());
         }
@@ -383,7 +397,10 @@ struct PatchHunk {
     lines: Vec<String>,
 }
 
-fn apply_patch_to_text(original_text: &str, patch_text: &str) -> std::result::Result<String, PatchApplyError> {
+fn apply_patch_to_text(
+    original_text: &str,
+    patch_text: &str,
+) -> std::result::Result<String, PatchApplyError> {
     let hunks = parse_patch_hunks(patch_text)?;
     if hunks.is_empty() {
         return Err(PatchApplyError("no hunks found in patch".to_string()));
@@ -396,7 +413,9 @@ fn apply_patch_to_text(original_text: &str, patch_text: &str) -> std::result::Re
     for hunk in hunks {
         let src_index = hunk.src_start.saturating_sub(1);
         if src_index > original_lines.len() {
-            return Err(PatchApplyError("patch hunk starts beyond end of file".to_string()));
+            return Err(PatchApplyError(
+                "patch hunk starts beyond end of file".to_string(),
+            ));
         }
         if src_index < cursor {
             return Err(PatchApplyError(
@@ -534,9 +553,15 @@ fn parse_range_start(s: &str, prefix: char) -> std::result::Result<usize, PatchA
     Ok(start)
 }
 
-fn expect_line(lines: &[String], index: usize, expected: &str) -> std::result::Result<String, PatchApplyError> {
+fn expect_line(
+    lines: &[String],
+    index: usize,
+    expected: &str,
+) -> std::result::Result<String, PatchApplyError> {
     let Some(actual) = lines.get(index) else {
-        return Err(PatchApplyError("patch references line beyond end of file".to_string()));
+        return Err(PatchApplyError(
+            "patch references line beyond end of file".to_string(),
+        ));
     };
 
     if actual == expected {
@@ -589,8 +614,12 @@ impl UndoManager {
                 "create" => {
                     if path.exists() {
                         match std::fs::remove_file(&path) {
-                            Ok(()) => messages.push(format!("Deleted created file: {}", path.display())),
-                            Err(e) => messages.push(format!("Error deleting {}: {e}", path.display())),
+                            Ok(()) => {
+                                messages.push(format!("Deleted created file: {}", path.display()))
+                            }
+                            Err(e) => {
+                                messages.push(format!("Error deleting {}: {e}", path.display()))
+                            }
                         }
                     }
                 }
@@ -602,7 +631,9 @@ impl UndoManager {
                     let backup = PathBuf::from(backup_path);
                     if backup.exists() {
                         match std::fs::copy(&backup, &path) {
-                            Ok(_) => messages.push(format!("Restored from backup: {}", path.display())),
+                            Ok(_) => {
+                                messages.push(format!("Restored from backup: {}", path.display()))
+                            }
                             Err(e) => messages.push(format!(
                                 "Error restoring {} from {}: {e}",
                                 path.display(),

@@ -9,13 +9,13 @@ pub struct TrajectoryStep {
     pub session_id: String,
     pub step_index: usize,
     pub timestamp: DateTime<Utc>,
-    
+
     /// The exact context messages passed to the LLM for this generation
     pub input_messages: Vec<ChatMessage>,
-    
+
     /// The raw response text from the model
     pub model_output_raw: String,
-    
+
     /// The resulting observation/tool output from the environment
     /// (Captured after the commands are executed)
     pub observation: Option<String>,
@@ -38,17 +38,16 @@ impl TrajectoryLogger {
         if let Some(parent) = self.log_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        
+
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.log_path)
             .await?;
-            
+
         let line = serde_json::to_string(step)?;
         file.write_all(line.as_bytes()).await?;
         file.write_all(b"\n").await?;
         Ok(())
     }
 }
-

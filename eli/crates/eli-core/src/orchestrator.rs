@@ -91,10 +91,7 @@ pub async fn maybe_compact_memory(
     memory.drop_older(keep_last);
     memory.set_summary(Some(summary.clone()));
 
-    Ok(Some(CompactionResult {
-        summary,
-        dropped,
-    }))
+    Ok(Some(CompactionResult { summary, dropped }))
 }
 
 pub async fn compact_memory_now(
@@ -170,7 +167,8 @@ pub async fn run_subagents(
         }
     });
 
-    let mut out: Vec<(usize, SubagentResult)> = stream.buffer_unordered(max_parallel).collect().await;
+    let mut out: Vec<(usize, SubagentResult)> =
+        stream.buffer_unordered(max_parallel).collect().await;
     out.sort_by_key(|(idx, _)| *idx);
     out.into_iter().map(|(_, result)| result).collect()
 }
@@ -185,7 +183,11 @@ async fn run_one_subagent(
     let task_text = task.task.trim().to_string();
     if name.is_empty() || task_text.is_empty() {
         return SubagentResult {
-            name: if name.is_empty() { "subagent".to_string() } else { name },
+            name: if name.is_empty() {
+                "subagent".to_string()
+            } else {
+                name
+            },
             output: String::new(),
             error: Some("empty subagent name or task".to_string()),
         };
@@ -198,7 +200,11 @@ async fn run_one_subagent(
     );
 
     let req = ChatRequest {
-        model: task.model.as_deref().unwrap_or(cfg.model.as_str()).to_string(),
+        model: task
+            .model
+            .as_deref()
+            .unwrap_or(cfg.model.as_str())
+            .to_string(),
         messages: vec![
             ChatMessage::system(subagent_system_prompt(&name)),
             ChatMessage::user(prompt),
@@ -236,7 +242,11 @@ fn build_subagent_context(memory: &Memory) -> String {
         out.push_str("Recent messages:\n");
         for msg in recent {
             let role = format_role(&msg);
-            out.push_str(&format!("{role}: {content}\n", role = role, content = msg.content));
+            out.push_str(&format!(
+                "{role}: {content}\n",
+                role = role,
+                content = msg.content
+            ));
         }
     }
 

@@ -8,7 +8,12 @@
     <meta property="og:title" content="Eli | Connect Your AI to the Market">
     <meta property="og:description" content="Free CLI that gives AI agents access to real market data. Timeseries, options, prediction markets, macro. Works with Claude Code, Codex, any CLI.">
     <meta property="og:type" content="website">
+    <meta property="og:image" content="assets/logo.png">
+    <meta property="og:image:alt" content="eli logo">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:image" content="assets/logo.png">
     <link rel="icon" type="image/png" href="assets/logo.png">
+    <link rel="apple-touch-icon" href="assets/logo.png">
     <link rel="alternate" type="application/rss+xml" title="Eli Blog" href="blog/rss.xml">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -76,7 +81,7 @@
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         }
 
-        #how, #demos {
+        #how {
             scroll-margin-top: 96px;
         }
 
@@ -147,7 +152,7 @@
         .container {
             max-width: 900px;
             margin: 0 auto;
-            padding: 64px 24px 80px;
+            padding: 32px 24px 80px;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -616,7 +621,18 @@
             to { opacity: 1; transform: translateY(0); }
         }
 
+        .compare-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            margin-bottom: 48px;
+            font-size: 0.95rem;
+        }
+
         @media (max-width: 600px) {
+            .compare-grid {
+                grid-template-columns: 1fr;
+            }
             .hero { padding-top: 28px; }
             .install-container { width: 100%; }
             .install-pill { width: 100%; justify-content: center; flex-wrap: wrap; }
@@ -639,7 +655,6 @@
 	        <a class="nav-logo" href="#" aria-label="Eli home">eli</a>
 	        <div class="nav-links" aria-label="Site">
             <a href="#how">How it works</a>
-            <a href="#demos">Demos</a>
 	            <a class="nav-cta" href="https://github.com/efoltyn/eli" rel="noreferrer noopener" target="_blank">
                 <svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
                     <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path>
@@ -716,139 +731,138 @@
 </section>
 
 <div class="container">
-    <!-- WHY ELI -->
-    <div id="how"></div>
-    <p class="section-header">Why Eli</p>
+    <!-- HOW IT WORKS -->
+    <section id="how" style="width: 100%; margin-bottom: 32px; text-align: left;">
+        <p style="font-size: 1.3rem; color: var(--fg); font-weight: 500; max-width: 580px; margin-bottom: 40px; line-height: 1.5;">
+            Websearch summarizes what journalists wrote.<br>
+            Eli lets your AI read the market directly.
+        </p>
+        <p class="section-header" style="margin-top: 0; margin-bottom: 32px;">How it works</p>
+
+        <div style="display: grid; grid-template-columns: 1fr; gap: 32px; margin-bottom: 48px;">
+            <div style="font-size: 1.1rem; color: var(--gray); line-height: 1.7; max-width: 680px;">
+                <p style="margin-bottom: 20px;">
+                    <code style="color: var(--accent); background: rgba(92, 242, 194, 0.1); padding: 4px 10px; border-radius: 6px; font-size: 0.95rem;">cargo install eli-cli</code>
+                </p>
+                <p style="margin-bottom: 20px;">
+                    Now your AI calls eli commands via bash. Instead of searching the web for answers about markets, it fetches the actual data.
+                </p>
+            </div>
+        </div>
+
+        <div class="compare-grid">
+            <div style="background: rgba(255, 100, 100, 0.06); border: 1px solid rgba(255, 100, 100, 0.2); border-radius: 14px; padding: 20px;">
+                <div style="font-weight: 700; margin-bottom: 14px; color: rgba(255, 150, 150, 0.9); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase;">Without Eli</div>
+                <div style="color: var(--gray); line-height: 1.7;">
+                    <div style="margin-bottom: 8px;">AI → Web search</div>
+                    <div style="margin-bottom: 8px;">→ CNN article from 3 hours ago</div>
+                    <div style="margin-bottom: 8px;">→ "Analysts say..."</div>
+                    <div style="margin-bottom: 8px;">→ Opinion, not data</div>
+                </div>
+            </div>
+            <div style="background: rgba(92, 242, 194, 0.06); border: 1px solid rgba(92, 242, 194, 0.2); border-radius: 14px; padding: 20px;">
+                <div style="font-weight: 700; margin-bottom: 14px; color: var(--accent); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase;">With Eli</div>
+                <div style="color: var(--gray); line-height: 1.7;">
+                    <div style="margin-bottom: 8px;">AI → <code style="color: var(--accent);">eli finance prices</code> → Live price</div>
+                    <div style="margin-bottom: 8px;">AI → <code style="color: var(--accent);">eli finance options</code> → IV spike 47%</div>
+                    <div style="margin-bottom: 8px;">AI → <code style="color: var(--accent);">eli finance odds</code> → 68% expect more downside</div>
+                    <div style="margin-bottom: 8px;">Data, not articles</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- TOOLS -->
+    <p class="section-header" style="margin-top: 0;">Tools</p>
     <div class="manifesto-grid">
         <div class="manifesto-item">
-            <div class="manifesto-num">01</div>
-            <div class="manifesto-title">Raw Data First.</div>
-            <p>Timeseries, not summaries. If Yahoo says $72.44, the model works from that number. No hallucinated prices.</p>
+            <div class="manifesto-num">eli finance timeseries --tickers SPY --range 30d --granularity 1h</div>
+            <div class="manifesto-title">Historical Data.</div>
+            <p>OHLCV candles for charts, correlations, backtests. Your AI writes Python to find patterns in actual price history.</p>
         </div>
         <div class="manifesto-item">
-            <div class="manifesto-num">02</div>
-            <div class="manifesto-title">Compute Locally.</div>
-            <p>LLMs can't do math. Eli fetches with Rust, writes Python to calculate correlations and returns, executes it locally.</p>
-        </div>
-        <div class="manifesto-item">
-            <div class="manifesto-num">03</div>
-            <div class="manifesto-title">Options as Signal.</div>
-            <p>IV at 147% tells you more than price. Put/call ratios, skew, max pain—positioning data that news doesn't capture.</p>
-        </div>
-        <div class="manifesto-item">
-            <div class="manifesto-num">04</div>
+            <div class="manifesto-num">eli finance odds --provider polymarket --list-events</div>
             <div class="manifesto-title">Prediction Markets.</div>
-            <p>Kalshi odds are forward-looking. "56% Japan recession" beats yesterday's headlines. Read the future, not the past.</p>
+            <p>Kalshi and Polymarket odds. Your AI sees what the market expects, not what journalists wrote yesterday.</p>
         </div>
-    </div>
-
-    <!-- FINANCE TOOLS -->
-    <p class="section-header">Standard Library</p>
-    <p class="section-sub">Core finance tools that fetch raw data and keep the math local.</p>
-    <div class="tools-banner">FREE FOREVER • NO PAID APIs • WORKS WITH CLAUDE CODE / CODEX / ANY CLI</div>
-    <table class="tools-table" aria-label="Standard library tools">
-        <thead>
-            <tr>
-                <th>Tool</th>
-                <th>Function</th>
-                <th>Source</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td class="tool-name">timeseries</td>
-                <td>OHLCV candles with precise range and granularity.</td>
-                <td>Yahoo</td>
-            </tr>
-            <tr>
-                <td class="tool-name">snapshot</td>
-                <td>Point-in-time price, cap, shares, EV.</td>
-                <td>Yahoo</td>
-            </tr>
-            <tr>
-                <td class="tool-name">balance</td>
-                <td>Quarterly income, balance sheet, cash flow.</td>
-                <td>Yahoo</td>
-            </tr>
-            <tr>
-                <td class="tool-name">filings</td>
-                <td>SEC filings with full text.</td>
-                <td>SEC EDGAR</td>
-            </tr>
-            <tr>
-                <td class="tool-name">news</td>
-                <td>Date-specific headlines.</td>
-                <td>Google News RSS</td>
-            </tr>
-            <tr>
-                <td class="tool-name">odds</td>
-                <td>Prediction market prices and orderbook depth.</td>
-                <td>Kalshi</td>
-            </tr>
-            <tr>
-                <td class="tool-name">options</td>
-                <td>Options chains with IV/skew summaries.</td>
-                <td>Yahoo</td>
-            </tr>
-            <tr>
-                <td class="tool-name">macro</td>
-                <td>CPI, unemployment, Fed funds, yield curve, M2.</td>
-                <td>FRED</td>
-            </tr>
-            <tr>
-                <td class="tool-name">search</td>
-                <td>Ticker and macro ID lookup.</td>
-                <td>Yahoo + FRED</td>
-            </tr>
-        </tbody>
-    </table>
-
-    <!-- DEMOS -->
-    <div id="demos"></div>
-    <p class="section-header">What You Can Build</p>
-    <div class="blog-grid" aria-label="Demo sessions">
-        <a class="blog-card" href="blog/beyond-the-cutoff.html">
-            <div class="blog-meta">cross-asset</div>
-            <h3>Silver crashed 30%—is it macro or positioning?</h3>
-            <p>Pull SLV timeseries, options IV (147%), SPY/TLT/BTC snapshots, Kalshi Fed odds. Synthesize into a market call with cited numbers.</p>
-        </a>
-        <a class="blog-card" href="blog/self-repair.html">
-            <div class="blog-meta">correlation</div>
-            <h3>AMD vs INTC: find the divergence day</h3>
-            <p>Fetch hourly candles, write Python to compute returns, identify when correlation broke down. Math runs locally.</p>
-        </a>
-        <a class="blog-card" href="blog/diffs-as-interface.html">
-            <div class="blog-meta">prediction markets</div>
-            <h3>What does Kalshi price for Fed cuts?</h3>
-            <p>Pull live odds: 2 cuts (25%), 3 cuts (22%), 0 cuts (8%). Forward-looking signal, not stale news.</p>
-        </a>
-        <a class="blog-card" href="blog/intel-proof.html">
-            <div class="blog-meta">options flow</div>
-            <h3>Is the put/call ratio bearish on SPY?</h3>
-            <p>Get options summary: P/C ratio 1.40, max pain $673, ATM IV 12%. Institutional positioning in one call.</p>
-        </a>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli finance options --ticker QQQ --summary</div>
+            <div class="manifesto-title">Options Flow.</div>
+            <p>IV, put/call ratios, skew, max pain. Your AI reads how institutions are positioned.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli finance prices --query BTC --asset-type crypto</div>
+            <div class="manifesto-title">Realtime Prices.</div>
+            <p>Pyth Network feeds with confidence intervals. Price + spread in one call.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli finance fundamentals --ticker AAPL</div>
+            <div class="manifesto-title">Financial Statements.</div>
+            <p>Income statement, balance sheet, cash flow. Quarterly data your AI can analyze directly.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli finance macro</div>
+            <div class="manifesto-title">Macro Indicators.</div>
+            <p>CPI, unemployment, Fed funds, yield curve, M2. The numbers that move markets.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli finance snapshot --tickers NVDA,AMD,INTC</div>
+            <div class="manifesto-title">Ticker Snapshot.</div>
+            <p>Price, market cap, shares outstanding, enterprise value. Quick comparison across tickers.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli finance filings --ticker TSLA --include-text</div>
+            <div class="manifesto-title">SEC Filings.</div>
+            <p>8-K, 10-K, 10-Q with full text. Your AI reads the actual filing, not a summary of it.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli finance news --ticker GME --date 2021-01-28</div>
+            <div class="manifesto-title">News Context.</div>
+            <p>What happened on that day? Your AI finds the catalyst without burning tokens on web search.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli finance search --query "inflation"</div>
+            <div class="manifesto-title">Ticker & Series Lookup.</div>
+            <p>Find ticker symbols and FRED macro IDs. Your AI can discover what data exists.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli web search --query "NVDA earnings reaction"</div>
+            <div class="manifesto-title">Web Search.</div>
+            <p>DuckDuckGo results as structured JSON. Free alternative to expensive search APIs.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli web read --url "https://sec.gov/..."</div>
+            <div class="manifesto-title">Read Any URL.</div>
+            <p>Extract clean text from any webpage. No browser, no JavaScript, just content.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">eli web crawl --url "https://docs.company.com" --max-pages 50</div>
+            <div class="manifesto-title">Crawl Sites.</div>
+            <p>Spider an entire site and extract all pages. Build a knowledge base from documentation.</p>
+        </div>
+        <div class="manifesto-item">
+            <div class="manifesto-num">cargo install eli-cli</div>
+            <div class="manifesto-title">Open Source.</div>
+            <p>Need a data source we don't have? Add it yourself. MIT licensed, PRs welcome.</p>
+        </div>
     </div>
 
     <!-- FOOTER -->
     <footer>
         <a href="https://github.com/efoltyn/eli">GitHub</a>
-        <a href="blog/">Demos</a>
         <span>Built with Rust</span>
-        <span>v0.1.0</span>
+        <span>MIT License</span>
     </footer>
 </div>
 
 <script>
+    const INSTALL_CMD = "cargo install eli-cli";
     function copyCmd() {
-        const cmdEl = document.getElementById('cmd');
-        if (!cmdEl) return;
-        const text = cmdEl.innerText;
-        navigator.clipboard.writeText(text);
+        navigator.clipboard.writeText(INSTALL_CMD);
 
+        const cmdEl = document.getElementById('cmd');
         const labelEl = document.getElementById('copyLabel');
-        const original = cmdEl.innerText;
-        const labelOriginal = labelEl ? labelEl.innerText : null;
-        const labelBgOriginal = labelEl ? labelEl.style.background : null;
+        if (!cmdEl) return;
 
         cmdEl.innerText = "Copied!";
         cmdEl.style.color = "var(--gray)";
@@ -858,11 +872,11 @@
         }
 
         setTimeout(() => {
-            cmdEl.innerText = original;
+            cmdEl.innerText = INSTALL_CMD;
             cmdEl.style.color = "var(--fg)";
             if (labelEl) {
-                labelEl.innerText = labelOriginal || "Copy";
-                labelEl.style.background = labelBgOriginal || "var(--fg)";
+                labelEl.innerText = "Copy";
+                labelEl.style.background = "";
             }
         }, 1500);
     }

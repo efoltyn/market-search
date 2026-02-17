@@ -1,5 +1,5 @@
-use crate::{Error, Result};
 use crate::web::WebHit;
+use crate::{Error, Result};
 use scraper::{Html, Selector};
 // Re-export or use creates
 use urlencoding;
@@ -12,24 +12,31 @@ pub async fn search_general(query: &str) -> Result<Vec<WebHit>> {
 
     // DDG Lite URL
     let url = "https://html.duckduckgo.com/html/";
-    
+
     // DDG expects form params usually, but query params work for lite
     let params = [("q", query)];
 
-    let resp = client.post(url)
+    let resp = client
+        .post(url)
         .form(&params)
-        .send().await
+        .send()
+        .await
         .map_err(|e| Error::Provider(format!("duckduckgo fetch failed: {e}")))?;
 
     if !resp.status().is_success() {
-        return Err(Error::Provider(format!("duckduckgo fetch failed: http {}", resp.status())));
+        return Err(Error::Provider(format!(
+            "duckduckgo fetch failed: http {}",
+            resp.status()
+        )));
     }
 
-    let html = resp.text().await
+    let html = resp
+        .text()
+        .await
         .map_err(|e| Error::Provider(format!("duckduckgo read failed: {e}")))?;
 
     let document = Html::parse_document(&html);
-    
+
     // Selectors for DDG Lite
     // .result is the container
     // .result__a is the title link
@@ -64,7 +71,7 @@ pub async fn search_general(query: &str) -> Result<Vec<WebHit>> {
         };
 
         if !title.is_empty() && !clean_url.is_empty() {
-             hits.push(WebHit {
+            hits.push(WebHit {
                 title: title.trim().to_string(),
                 url: clean_url,
                 snippet: snippet.trim().to_string(),
@@ -83,7 +90,9 @@ fn decode_ddg_url(url: &str) -> String {
     if let Some(start) = url.find("uddg=") {
         let rest = &url[start + 5..];
         if let Some(end) = rest.find('&') {
-            return urlencoding::decode(&rest[..end]).unwrap_or_default().to_string();
+            return urlencoding::decode(&rest[..end])
+                .unwrap_or_default()
+                .to_string();
         }
         return urlencoding::decode(rest).unwrap_or_default().to_string();
     }

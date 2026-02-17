@@ -122,7 +122,7 @@ pub fn safe_join(root: &Path, rel: &Path) -> Result<PathBuf> {
             "path must be relative (got '{}')",
             rel.display()
         )));
-}
+    }
 
     let mut out = PathBuf::from(root);
     let root_len = out.components().count();

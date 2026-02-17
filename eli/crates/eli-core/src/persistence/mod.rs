@@ -57,4 +57,3 @@ impl SessionStore {
         Ok(out)
     }
 }
-
