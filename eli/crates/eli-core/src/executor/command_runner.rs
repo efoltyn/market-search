@@ -81,7 +81,8 @@ impl CommandRunner {
         let start = Instant::now();
         let timeout = std::time::Duration::from_secs(self.timeout_secs);
 
-        let safe_command = quote_heredoc_delimiters(command);
+        let rewritten = rewrite_eli_invocation(command);
+        let safe_command = quote_heredoc_delimiters(&rewritten);
         let mut cmd = shell_command(&safe_command);
         cmd.current_dir(&self.cwd);
 
@@ -151,6 +152,46 @@ impl CommandRunner {
             .collect();
         (to_run, None)
     }
+}
+
+fn rewrite_eli_invocation(command: &str) -> String {
+    let trimmed = command.trim_start();
+    if !trimmed.starts_with("eli") {
+        return command.to_string();
+    }
+
+    let Some(after) = trimmed.strip_prefix("eli") else {
+        return command.to_string();
+    };
+    if !(after.is_empty() || after.starts_with(char::is_whitespace)) {
+        return command.to_string();
+    }
+
+    let normalized_after = normalize_legacy_eli_subcommands(after);
+
+    let Ok(exe) = std::env::current_exe() else {
+        return command.to_string();
+    };
+    let exe = exe.to_string_lossy().replace('\'', "'\\''");
+    let prefix_len = command.len().saturating_sub(trimmed.len());
+    let prefix = &command[..prefix_len];
+    format!("{prefix}'{exe}'{normalized_after}")
+}
+
+fn normalize_legacy_eli_subcommands(after: &str) -> String {
+    let trimmed = after.trim_start();
+    let ws_len = after.len().saturating_sub(trimmed.len());
+    let ws = &after[..ws_len];
+
+    if trimmed == "odds"
+        || trimmed.starts_with("odds ")
+        || trimmed == "sync"
+        || trimmed.starts_with("sync ")
+    {
+        return format!("{ws}finance {trimmed}");
+    }
+
+    after.to_string()
 }
 
 fn quote_heredoc_delimiters(command: &str) -> String {

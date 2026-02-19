@@ -954,6 +954,7 @@ dependencies = [
  "chrono",
  "csv",
  "directories",
+ "eli-finance-types",
  "futures",
  "html-escape",
  "rand 0.8.5",
@@ -976,6 +977,15 @@ dependencies = [
  "uuid",
  "walkdir",
  "yahoo_finance_api",
+]
+
+[[package]]
+name = "eli-finance-types"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

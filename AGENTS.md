@@ -267,11 +267,14 @@ eli web extract --url https://example.com --focus "earnings"         # focus ext
 ### Code Analysis (syn + quote)
 
 #### `eli code`
-Parse Rust source into a structural map using `syn`. Returns function/struct/enum/impl/trait counts and names. Useful for understanding large Rust files without reading them.
+Parse Rust source into a structural map using `syn`.
+- File mode: function/struct/enum/impl/trait counts and names for one file.
+- Directory mode: parallel scan across all `.rs` files with hotspot rankings (largest files, largest function spans, function-dense files).
 ```bash
-eli code <path>                # structural summary
-eli code <path> --generate     # also generate getter methods for structs
-eli code <path> --out out.json # write to file
+eli code <path/to/file.rs>                          # single-file structural summary
+eli code <path/to/file.rs> --generate              # generate getter methods for structs
+eli code <path/to/dir> --min-loc 300 --top 20     # parallel workspace hotspots
+eli code <path/to/dir> --min-loc 300 --top 20 --include-files --out out.json
 ```
 
 ---

@@ -16,6 +16,7 @@ members = [
   "crates/eli-adapters",
   "crates/eli-cli",
   "crates/eli-core",
+  "crates/eli-finance-types",
   "crates/eli-screen",
 ]
 resolver = "2"
@@ -57,4 +58,5 @@ rand = "0.8"
 eli-adapters = { path = "crates/eli-adapters", version = "0.1.0" }
 eli-cli = { path = "crates/eli-cli", version = "0.1.0" }
 eli-core = { path = "crates/eli-core", version = "0.1.0" }
+eli-finance-types = { path = "crates/eli-finance-types", version = "0.1.0" }
 eli-screen = { path = "crates/eli-screen", version = "0.1.0" }
