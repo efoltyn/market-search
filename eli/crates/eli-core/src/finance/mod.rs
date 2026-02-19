@@ -11,20 +11,25 @@ use tokio::time::{sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tracing::{info, warn};
 
-const MAX_POINTS_PER_TICKER_DEFAULT: usize = 5_000;
 const SEC_COMPANY_TICKERS_TTL_SECS: u64 = 60 * 60 * 24 * 7; // 7 days
 const SEC_SUBMISSIONS_TTL_SECS: u64 = 60 * 60 * 24; // 1 day
 const SEC_DEFAULT_TEXT_MAX_CHARS: usize = 10_000;
 const SCHEDULE_HTTP_TIMEOUT_SECS: u64 = 12;
 const SCHEDULE_PER_DAY_TIMEOUT_SECS: u64 = 10;
-const SCHEDULE_MAX_CONSECUTIVE_FAILS: usize = 5;
 const YAHOO_SEARCH_URL: &str = "https://query2.finance.yahoo.com/v1/finance/search";
-const YAHOO_QUOTE_SUMMARY_URL: &str = "https://query2.finance.yahoo.com/v7/finance/quoteSummary";
 const KALSHI_BASE_URL: &str = "https://api.elections.kalshi.com/trade-api/v2";
 const POLYMARKET_GAMMA_URL: &str = "https://gamma-api.polymarket.com";
 
 mod types;
 pub use types::*;
+
+impl From<eli_finance_types::FinanceTypesError> for Error {
+    fn from(value: eli_finance_types::FinanceTypesError) -> Self {
+        match value {
+            eli_finance_types::FinanceTypesError::InvalidInput(msg) => Error::InvalidInput(msg),
+        }
+    }
+}
 
 mod providers;
 pub use providers::odds::fetch_odds;

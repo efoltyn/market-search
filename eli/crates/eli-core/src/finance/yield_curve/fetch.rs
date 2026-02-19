@@ -34,7 +34,9 @@ async fn fetch_curve_series_with_retry(
 ) -> Option<Vec<Candle>> {
     for attempt in 0..3 {
         let tickers = vec![symbol.to_string()];
-        if let Ok((mut series, _errors)) = fetch_fred_series(&tickers, start, end, granularity).await {
+        if let Ok((mut series, _errors)) =
+            fetch_fred_series(&tickers, start, end, granularity).await
+        {
             if let Some(s) = series.pop() {
                 if !s.candles.is_empty() {
                     return Some(s.candles);
@@ -89,7 +91,9 @@ pub async fn fetch_yield_curve(req: YieldCurveRequest) -> Result<YieldCurveRespo
             continue;
         }
         let wide_start = end - chrono::Duration::days(3650);
-        if let Some(candles) = fetch_curve_series_with_retry(symbol, wide_start, end, granularity).await {
+        if let Some(candles) =
+            fetch_curve_series_with_retry(symbol, wide_start, end, granularity).await
+        {
             series_map.insert(symbol.to_string(), candles);
         }
     }
@@ -169,10 +173,7 @@ pub async fn fetch_yield_curve(req: YieldCurveRequest) -> Result<YieldCurveRespo
                 "30y" => "DGS30",
                 _ => return None,
             };
-            series_map
-                .get(symbol)
-                .and_then(|c| c.last())
-                .map(|c| c.t)
+            series_map.get(symbol).and_then(|c| c.last()).map(|c| c.t)
         })
         .max()
         .unwrap_or(now);

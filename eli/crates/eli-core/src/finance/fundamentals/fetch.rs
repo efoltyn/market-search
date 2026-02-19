@@ -59,14 +59,12 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
         cost_of_revenue: None,
         gross_profit: fin.and_then(|f| f.gross_profits).map(|v| v as i64),
         operating_income: fin.and_then(|f| f.operating_cashflow),
-        net_income: stats
-            .and_then(|s| s.net_income_to_common)
-            .or_else(|| {
-                // Derive from revenue * profit margin if direct net income unavailable
-                let rev = fin.and_then(|f| f.total_revenue)? as f64;
-                let margin = fin.and_then(|f| f.profit_margins)?;
-                Some((rev * margin) as i64)
-            }),
+        net_income: stats.and_then(|s| s.net_income_to_common).or_else(|| {
+            // Derive from revenue * profit margin if direct net income unavailable
+            let rev = fin.and_then(|f| f.total_revenue)? as f64;
+            let margin = fin.and_then(|f| f.profit_margins)?;
+            Some((rev * margin) as i64)
+        }),
         ebitda: fin.and_then(|f| f.ebitda).map(|v| v as i64),
         total_assets: None,
         total_liabilities: None,

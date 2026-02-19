@@ -4,17 +4,24 @@ fn is_finance_like(title: &str, link: &str) -> bool {
     let t = title.to_ascii_lowercase();
     let l = link.to_ascii_lowercase();
     let finance_keywords = [
-        "stock", "shares", "etf", "market", "s&p", "nasdaq", "dow", "invest", "earnings",
-        "fed", "bond", "yield", "economy", "inflation",
+        "stock",
+        "shares",
+        "etf",
+        "market",
+        "s&p",
+        "nasdaq",
+        "dow",
+        "invest",
+        "earnings",
+        "fed",
+        "bond",
+        "yield",
+        "economy",
+        "inflation",
     ];
-    finance_keywords.iter().any(|k| t.contains(k) || l.contains(k))
-}
-
-fn is_spy_noise(title: &str, link: &str) -> bool {
-    let t = title.to_ascii_lowercase();
-    let l = link.to_ascii_lowercase();
-    let noise = ["spy", "espionage", "intelligence", "army", "military", "honeypot"];
-    noise.iter().any(|k| t.contains(k) || l.contains(k))
+    finance_keywords
+        .iter()
+        .any(|k| t.contains(k) || l.contains(k))
 }
 
 pub async fn fetch_news(req: NewsRequest) -> Result<NewsResponse> {

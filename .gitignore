@@ -36,7 +36,6 @@ eli/crates/**/*.meta.json
 
 # Scratch data files (analysis outputs, one-off scripts)
 *.pyc
-0
 etf_data.txt
 macro_data.txt
 options_data.txt
@@ -52,3 +51,23 @@ gold_silver_analysis.md
 plots/
 data/
 eli/data/
+
+# Eli runtime/generated research artifacts
+eli_research/research_*.md
+eli_research/tmp_*.json
+eli_research/code_map_*.json
+eli_research/*.png
+eli_research/analysis_summary.txt
+eli_research/comprehensive_analysis.txt
+eli_research/final_analysis.txt
+eli_research/findings.txt
+eli_research/perf/
+eli_research/refactor/
+eli_research/wfc_scandal/
+
+# Local scratch workspaces
+artifacts/
+claims/
+scenario_a/
+scenario_b/
+tmp/

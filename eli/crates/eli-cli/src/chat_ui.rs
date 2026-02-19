@@ -130,13 +130,6 @@ impl ChatUi {
         self.messages.retain(|m| m.role != "Tool");
     }
 
-    /// Append content to the last message (for streaming)
-    pub fn append_to_last(&mut self, content: &str) {
-        if let Some(last) = self.messages.last_mut() {
-            last.content.push_str(content);
-        }
-    }
-
     /// Add a source
     pub fn add_source(&mut self, source: &str) {
         let trimmed = source.trim();
@@ -151,11 +144,6 @@ impl ChatUi {
         self.last_tool_ok = None;
         self.last_tool_summary = None;
         self.clear_tool_messages();
-    }
-
-    /// Cycle prompt mode: Ask -> Plan -> Auto -> Ask
-    pub fn cycle_mode(&mut self) {
-        self.prompt_mode = PromptMode::Auto;
     }
 
     /// Toggle whether full tool stdout/stderr is shown inline.
@@ -715,7 +703,7 @@ impl ChatUi {
         if !self.is_processing && self.show_tips {
             spans.push(Span::styled(
                 format!(
-                    " │ /compact reduce tokens │ /reset clear tokens │ /tip hide tips │ Opt+O toggle output ({})",
+                    " │ /compact reduce tokens │ /clear clear tokens │ /tip hide tips │ Opt+O toggle output ({})",
                     if self.show_tool_output { "on" } else { "off" }
                 ),
                 Style::default().fg(Color::DarkGray),
