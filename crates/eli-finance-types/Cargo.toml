@@ -1,0 +1,11 @@
+[package]
+name = "eli-finance-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared finance request/response contracts for Eli"
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true
