@@ -137,7 +137,7 @@ pub(crate) async fn sync_polymarket_events(
 
     {
         let mut event_offset = 0usize;
-        let event_pages = max_pages.max(100);
+        let event_pages = max_pages;
         for _ in 0..event_pages {
             let mut attempts = 0usize;
             let rows: Vec<PolyEventMetaRow> = loop {
@@ -257,7 +257,8 @@ pub(crate) async fn sync_polymarket_events(
         }
     }
 
-    let market_pages = max_pages.max(200); // exhaust all markets (safety cap at 200 pages = 100k markets)
+    // Respect user-requested pagination budget for Polymarket.
+    let market_pages = max_pages;
     for page in 0..market_pages {
         let mut attempts = 0usize;
         let rows: Vec<PolyMarketRow> = loop {
@@ -510,10 +511,14 @@ pub(crate) async fn sync_polymarket_events(
 
     let mut strict_fail_reasons = Vec::new();
     if !events_exhausted {
-        strict_fail_reasons.push("events pagination not exhausted".to_string());
+        strict_fail_reasons.push(format!(
+            "events pagination not exhausted within max_pages={max_pages}"
+        ));
     }
     if !markets_exhausted {
-        strict_fail_reasons.push("markets pagination not exhausted".to_string());
+        strict_fail_reasons.push(format!(
+            "markets pagination not exhausted within max_pages={max_pages}"
+        ));
     }
     let coverage = OddsSyncCoverage {
         requested_max_pages: max_pages,

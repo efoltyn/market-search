@@ -1323,6 +1323,8 @@ pub struct OddsSyncSourceResult {
     pub analytics: Option<OddsSyncSourceAnalytics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<OddsSyncCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<OddsSyncSourceDelta>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1364,6 +1366,97 @@ pub struct OddsSyncSourceAnalytics {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OddsSyncMarketDelta {
+    pub source: String,
+    pub ticker: String,
+    pub title: String,
+    pub event_ticker: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// One of: new, removed, updated.
+    pub change_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_probability_yes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_probability_yes: Option<f64>,
+    /// Decimal probability delta on 0..1 scale (current - previous).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probability_delta: Option<f64>,
+    /// Same delta in percentage points, useful for quick scanning (e.g. +2.50pp).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probability_delta_pct_points: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_yes_price: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_yes_price: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yes_price_delta: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_volume: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_volume: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_delta: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_status: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OddsSyncSourceDelta {
+    pub source: String,
+    pub previous_markets: usize,
+    pub current_markets: usize,
+    pub compared_markets: usize,
+    pub new_markets: usize,
+    pub removed_markets: usize,
+    pub changed_markets: usize,
+    pub unchanged_markets: usize,
+    pub probability_changed_markets: usize,
+    pub yes_price_changed_markets: usize,
+    pub volume_changed_markets: usize,
+    pub status_changed_markets: usize,
+    pub top_probability_moves: Vec<OddsSyncMarketDelta>,
+    pub top_yes_price_moves: Vec<OddsSyncMarketDelta>,
+    pub top_volume_moves: Vec<OddsSyncMarketDelta>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OddsSyncDeltaSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_sync_at: Option<DateTime<Utc>>,
+    pub current_sync_at: DateTime<Utc>,
+    pub previous_markets: usize,
+    pub current_markets: usize,
+    pub compared_markets: usize,
+    pub new_markets: usize,
+    pub removed_markets: usize,
+    pub changed_markets: usize,
+    pub unchanged_markets: usize,
+    pub probability_changed_markets: usize,
+    pub yes_price_changed_markets: usize,
+    pub volume_changed_markets: usize,
+    pub status_changed_markets: usize,
+    pub top_probability_moves: Vec<OddsSyncMarketDelta>,
+    pub top_yes_price_moves: Vec<OddsSyncMarketDelta>,
+    pub top_volume_moves: Vec<OddsSyncMarketDelta>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OddsSyncDeltaIndex {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_sync_at: Option<DateTime<Utc>>,
+    pub current_sync_at: DateTime<Utc>,
+    pub changed_markets: usize,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub market_deltas: std::collections::BTreeMap<String, OddsSyncMarketDelta>,
+    pub top_probability_moves: Vec<OddsSyncMarketDelta>,
+    pub top_yes_price_moves: Vec<OddsSyncMarketDelta>,
+    pub top_volume_moves: Vec<OddsSyncMarketDelta>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OddsSyncAnalysis {
     pub markets_with_probability: usize,
     pub markets_with_volume: usize,
@@ -1397,6 +1490,12 @@ pub struct OddsSyncResponse {
     pub merged_csv_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analysis: Option<OddsSyncAnalysis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<OddsSyncDeltaSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_state_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_delta_index_path: Option<String>,
     #[serde(default = "default_odds_field_semantics")]
     pub field_semantics: OddsFieldSemantics,
 }

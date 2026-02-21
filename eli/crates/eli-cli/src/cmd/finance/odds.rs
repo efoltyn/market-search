@@ -22,6 +22,13 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         || args.market.is_some();
 
     if has_search && !has_list_or_ticker {
+        let search_opts = CsvSearchOptions::from_cli(
+            &args.sort_by,
+            args.deltas_only,
+            args.min_delta_pp,
+            args.category.as_deref(),
+        )?;
+
         // Check if local CSV cache exists
         let cache_dir = directories::ProjectDirs::from("", "", "eli")
             .map(|d| d.cache_dir().join("odds"))
@@ -37,6 +44,7 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
                 args.min_volume,
                 args.top,
                 args.explain,
+                &search_opts,
             );
         }
 
@@ -50,8 +58,16 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
                 args.min_volume,
                 args.top,
                 args.explain,
+                &search_opts,
             )
             .await;
+        }
+
+        if search_opts.requires_delta_index() {
+            anyhow::bail!(
+                "delta-aware CSV search requested (sort/filter by delta), but local cache is missing at {}. Run `eli finance sync` first.",
+                csv_path.display()
+            );
         }
 
         // No CSV — fall back to live API search (Kalshi events → markets)
@@ -106,11 +122,13 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("fetch odds")?;
+    let enriched_resp =
+        enrich_odds_response_with_sync_delta(&resp, req.provider.as_deref())?;
 
     if let Some(out_path) = args.out {
         let wr = write_json_out_with_meta(
             out_path,
-            &resp,
+            &enriched_resp,
             "finance.odds",
             &[format!(
                 "provider={}",
@@ -132,13 +150,485 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+    let json = serde_json::to_string_pretty(&enriched_resp).context("serialize response")?;
     println!("{json}");
     Ok(())
 }
 
+#[derive(Clone)]
+struct SyncDeltaLookup {
+    by_market: std::collections::HashMap<String, eli_core::finance::OddsSyncMarketDelta>,
+    context: serde_json::Value,
+}
+
+fn sync_delta_key(source: &str, ticker: &str) -> String {
+    format!(
+        "{}::{}",
+        source.trim().to_ascii_lowercase(),
+        ticker.trim().to_ascii_uppercase()
+    )
+}
+
+fn load_sync_delta_lookup(cache_dir: &std::path::Path) -> Option<SyncDeltaLookup> {
+    let path = cache_dir.join("sync_last_delta.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let parsed: eli_core::finance::OddsSyncDeltaIndex = serde_json::from_str(&raw).ok()?;
+
+    let mut by_market = std::collections::HashMap::new();
+    for (key, delta) in parsed.market_deltas {
+        by_market.insert(key, delta.clone());
+        by_market.insert(sync_delta_key(&delta.source, &delta.ticker), delta);
+    }
+
+    let context = serde_json::json!({
+        "available": true,
+        "path": path.display().to_string(),
+        "previous_sync_at": parsed.previous_sync_at,
+        "current_sync_at": parsed.current_sync_at,
+        "changed_markets": parsed.changed_markets,
+        "top_probability_moves": parsed.top_probability_moves,
+        "top_yes_price_moves": parsed.top_yes_price_moves,
+        "top_volume_moves": parsed.top_volume_moves,
+    });
+    Some(SyncDeltaLookup { by_market, context })
+}
+
+fn attach_market_delta(
+    row_json: &mut serde_json::Value,
+    source: &str,
+    ticker: &str,
+    lookup: Option<&SyncDeltaLookup>,
+) {
+    let Some(lookup) = lookup else {
+        return;
+    };
+    let key = sync_delta_key(source, ticker);
+    if let Some(delta) = lookup.by_market.get(&key) {
+        if let Ok(delta_value) = serde_json::to_value(delta) {
+            row_json["delta_since_last_sync"] = delta_value;
+        }
+    }
+}
+
+fn enrich_odds_response_with_sync_delta(
+    resp: &eli_core::finance::OddsResponse,
+    provider_hint: Option<&str>,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(resp).context("serialize odds response")?;
+
+    let cache_dir = directories::ProjectDirs::from("", "", "eli")
+        .map(|d| d.cache_dir().join("odds"))
+        .unwrap_or_else(|| std::env::temp_dir().join("eli-odds-cache"));
+    let Some(lookup) = load_sync_state_lookup(&cache_dir) else {
+        return Ok(value);
+    };
+
+    let fallback_source = provider_hint.and_then(|p| match p {
+        "kalshi" | "polymarket" => Some(p),
+        _ => None,
+    });
+
+    let mut attached = 0usize;
+    for field in ["markets", "available_markets"] {
+        let Some(items) = value.get_mut(field).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for item in items {
+            let source = item
+                .get("source")
+                .and_then(|v| v.as_str())
+                .or(fallback_source);
+            let ticker = item.get("ticker").and_then(|v| v.as_str());
+            let (Some(source), Some(ticker)) = (source, ticker) else {
+                continue;
+            };
+            let key = sync_delta_key(source, ticker);
+            let Some(previous) = lookup.by_market.get(&key) else {
+                continue;
+            };
+            let current_probability_yes = item
+                .get("probability_yes")
+                .and_then(json_to_f64)
+                .or_else(|| item.get("probability").and_then(json_to_f64));
+            let current_yes_price = item.get("yes_price").and_then(json_to_i64);
+            let current_volume = item.get("volume").and_then(json_to_i64);
+            let current_status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let volume_comparable =
+                volume_scales_look_comparable(previous.volume, current_volume);
+            let comparable_current_volume = if volume_comparable {
+                current_volume
+            } else {
+                previous.volume
+            };
+
+            let probability_delta =
+                option_f64_delta(previous.probability_yes, current_probability_yes)
+                    .filter(|d| d.abs() > 0.0001);
+            let yes_price_delta = option_i64_delta(previous.yes_price, current_yes_price);
+            let volume_delta = if volume_comparable {
+                option_i64_delta(previous.volume, current_volume)
+            } else {
+                None
+            };
+            let status_changed = previous.status != current_status;
+
+            if probability_delta.is_none()
+                && yes_price_delta.is_none()
+                && volume_delta.is_none()
+                && !status_changed
+            {
+                continue;
+            }
+
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| previous.title.clone());
+            let event_ticker = item
+                .get("event_ticker")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| previous.event_ticker.clone());
+            let category = item
+                .get("category")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| previous.category.clone());
+
+            let delta = eli_core::finance::OddsSyncMarketDelta {
+                source: source.to_string(),
+                ticker: ticker.to_string(),
+                title,
+                event_ticker,
+                category,
+                change_kind: "updated".to_string(),
+                previous_probability_yes: previous.probability_yes,
+                current_probability_yes,
+                probability_delta,
+                probability_delta_pct_points: probability_delta.map(|d| d * 100.0),
+                previous_yes_price: previous.yes_price,
+                current_yes_price,
+                yes_price_delta,
+                previous_volume: previous.volume,
+                current_volume: comparable_current_volume,
+                volume_delta,
+                previous_status: previous.status.clone(),
+                current_status,
+            };
+
+            if let Ok(delta_value) = serde_json::to_value(delta) {
+                item["delta_since_last_sync"] = delta_value;
+                attached = attached.saturating_add(1);
+            }
+        }
+    }
+
+    // Avoid noisy null-ish metadata: only include context when at least one
+    // market was enriched with a delta payload.
+    if attached > 0 {
+        value["delta_context"] = serde_json::json!({
+            "available": true,
+            "source": "sync_state_snapshot",
+            "path": lookup.path,
+            "sync_at": lookup.sync_at,
+            "attached_markets": attached,
+        });
+    }
+
+    Ok(value)
+}
+
+#[derive(Clone)]
+struct SyncStateLookup {
+    by_market: std::collections::HashMap<String, SyncStateMarket>,
+    sync_at: Option<String>,
+    path: String,
+}
+
+#[derive(Clone)]
+struct SyncStateMarket {
+    title: String,
+    event_ticker: String,
+    category: Option<String>,
+    probability_yes: Option<f64>,
+    yes_price: Option<i64>,
+    volume: Option<i64>,
+    status: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SyncStateFile {
+    #[serde(default)]
+    last_sync_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    sources: std::collections::HashMap<String, SyncStateSource>,
+}
+
+#[derive(serde::Deserialize)]
+struct SyncStateSource {
+    #[serde(default)]
+    markets: std::collections::HashMap<String, SyncStateMarketRecord>,
+}
+
+#[derive(serde::Deserialize)]
+struct SyncStateMarketRecord {
+    ticker: String,
+    title: String,
+    event_ticker: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    probability_yes: Option<f64>,
+    #[serde(default)]
+    yes_price: Option<i64>,
+    #[serde(default)]
+    volume: Option<i64>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+fn load_sync_state_lookup(cache_dir: &std::path::Path) -> Option<SyncStateLookup> {
+    let path = cache_dir.join("sync_state.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let parsed: SyncStateFile = serde_json::from_str(&raw).ok()?;
+
+    let mut by_market = std::collections::HashMap::new();
+    for (source, source_state) in parsed.sources {
+        let source_norm = source.trim().to_ascii_lowercase();
+        for (ticker_key, market) in source_state.markets {
+            let ticker = if market.ticker.trim().is_empty() {
+                ticker_key
+            } else {
+                market.ticker
+            };
+            let key = sync_delta_key(&source_norm, &ticker);
+            by_market.insert(
+                key,
+                SyncStateMarket {
+                    title: market.title,
+                    event_ticker: market.event_ticker,
+                    category: market.category,
+                    probability_yes: market.probability_yes,
+                    yes_price: market.yes_price,
+                    volume: market.volume,
+                    status: market.status,
+                },
+            );
+        }
+    }
+
+    Some(SyncStateLookup {
+        by_market,
+        sync_at: parsed.last_sync_at.map(|d| d.to_rfc3339()),
+        path: path.display().to_string(),
+    })
+}
+
+fn json_to_f64(value: &serde_json::Value) -> Option<f64> {
+    value.as_f64().or_else(|| value.as_i64().map(|v| v as f64))
+}
+
+fn json_to_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|v| v.round() as i64))
+}
+
+fn option_f64_delta(previous: Option<f64>, current: Option<f64>) -> Option<f64> {
+    match (previous, current) {
+        (Some(p), Some(c)) => Some(c - p),
+        (None, Some(c)) => Some(c),
+        (Some(p), None) => Some(-p),
+        (None, None) => None,
+    }
+}
+
+fn option_i64_delta(previous: Option<i64>, current: Option<i64>) -> Option<i64> {
+    match (previous, current) {
+        (Some(p), Some(c)) if p != c => Some(c - p),
+        (None, Some(c)) if c != 0 => Some(c),
+        (Some(p), None) if p != 0 => Some(-p),
+        (None, None) => None,
+        _ => None,
+    }
+}
+
+fn volume_scales_look_comparable(previous: Option<i64>, current: Option<i64>) -> bool {
+    let (Some(previous), Some(current)) = (previous, current) else {
+        return true;
+    };
+    if previous <= 0 || current <= 0 {
+        return true;
+    }
+    let ratio = (current as f64) / (previous as f64);
+    (0.1..=10.0).contains(&ratio)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CsvSortBy {
+    Relevance,
+    Volume,
+    DeltaProb,
+    DeltaYesPrice,
+    DeltaVolume,
+}
+
+impl CsvSortBy {
+    fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "relevance" => Ok(Self::Relevance),
+            "volume" => Ok(Self::Volume),
+            "delta_prob" | "delta-prob" | "delta_probability" | "delta-probability" => {
+                Ok(Self::DeltaProb)
+            }
+            "delta_yes_price" | "delta-yes-price" | "delta_price" | "delta-price" => {
+                Ok(Self::DeltaYesPrice)
+            }
+            "delta_volume" | "delta-volume" => Ok(Self::DeltaVolume),
+            other => anyhow::bail!(
+                "invalid --sort-by '{other}' (expected relevance|volume|delta_prob|delta_yes_price|delta_volume)"
+            ),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Relevance => "relevance",
+            Self::Volume => "volume",
+            Self::DeltaProb => "delta_prob",
+            Self::DeltaYesPrice => "delta_yes_price",
+            Self::DeltaVolume => "delta_volume",
+        }
+    }
+
+    fn uses_delta(self) -> bool {
+        matches!(self, Self::DeltaProb | Self::DeltaYesPrice | Self::DeltaVolume)
+    }
+}
+
+#[derive(Clone)]
+struct CsvSearchOptions {
+    sort_by: CsvSortBy,
+    deltas_only: bool,
+    min_delta_pp: Option<f64>,
+    category_filter: Option<String>,
+}
+
+impl CsvSearchOptions {
+    fn from_cli(
+        sort_by_raw: &str,
+        deltas_only: bool,
+        min_delta_pp: Option<f64>,
+        category_filter: Option<&str>,
+    ) -> Result<Self> {
+        let sort_by = CsvSortBy::parse(sort_by_raw)?;
+        if let Some(v) = min_delta_pp {
+            if !v.is_finite() || v < 0.0 {
+                anyhow::bail!("--min-delta-pp must be a non-negative number");
+            }
+        }
+        let category_filter = category_filter
+            .map(|c| c.trim().to_ascii_lowercase())
+            .filter(|c| !c.is_empty());
+        Ok(Self {
+            sort_by,
+            deltas_only,
+            min_delta_pp,
+            category_filter,
+        })
+    }
+
+    fn requires_delta_index(&self) -> bool {
+        self.sort_by.uses_delta() || self.deltas_only || self.min_delta_pp.is_some()
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct DeltaMetrics {
+    has_delta: bool,
+    probability_pp_abs: f64,
+    yes_price_abs: f64,
+    volume_abs: f64,
+}
+
+fn delta_metrics(source: &str, ticker: &str, lookup: Option<&SyncDeltaLookup>) -> DeltaMetrics {
+    let Some(lookup) = lookup else {
+        return DeltaMetrics::default();
+    };
+    let key = sync_delta_key(source, ticker);
+    let Some(delta) = lookup.by_market.get(&key) else {
+        return DeltaMetrics::default();
+    };
+    DeltaMetrics {
+        has_delta: true,
+        probability_pp_abs: delta.probability_delta_pct_points.unwrap_or(0.0).abs(),
+        yes_price_abs: delta.yes_price_delta.unwrap_or(0).unsigned_abs() as f64,
+        volume_abs: delta.volume_delta.unwrap_or(0).unsigned_abs() as f64,
+    }
+}
+
+fn category_matches_filter(row: &str, filter: Option<&str>) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    row.to_ascii_lowercase().contains(filter)
+}
+
+#[derive(Clone)]
+struct SearchCandidate {
+    row_json: serde_json::Value,
+    match_score: i64,
+    volume_usd: f64,
+    delta: DeltaMetrics,
+}
+
+fn sort_search_candidates(candidates: &mut [SearchCandidate], sort_by: CsvSortBy) {
+    candidates.sort_by(|a, b| {
+        let delta_prob_cmp = b
+            .delta
+            .probability_pp_abs
+            .partial_cmp(&a.delta.probability_pp_abs)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        let delta_yes_price_cmp = b
+            .delta
+            .yes_price_abs
+            .partial_cmp(&a.delta.yes_price_abs)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        let delta_volume_cmp = b
+            .delta
+            .volume_abs
+            .partial_cmp(&a.delta.volume_abs)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        let volume_cmp = b
+            .volume_usd
+            .partial_cmp(&a.volume_usd)
+            .unwrap_or(std::cmp::Ordering::Equal);
+
+        match sort_by {
+            CsvSortBy::Relevance => b.match_score.cmp(&a.match_score).then_with(|| volume_cmp),
+            CsvSortBy::Volume => volume_cmp.then_with(|| b.match_score.cmp(&a.match_score)),
+            CsvSortBy::DeltaProb => delta_prob_cmp
+                .then_with(|| b.match_score.cmp(&a.match_score))
+                .then_with(|| volume_cmp),
+            CsvSortBy::DeltaYesPrice => delta_yes_price_cmp
+                .then_with(|| b.match_score.cmp(&a.match_score))
+                .then_with(|| volume_cmp),
+            CsvSortBy::DeltaVolume => delta_volume_cmp
+                .then_with(|| b.match_score.cmp(&a.match_score))
+                .then_with(|| volume_cmp),
+        }
+    });
+}
+
 /// Search the local prediction market CSV cache (from `eli finance sync`).
-/// Returns matching markets as JSON, sorted by volume descending.
+/// Returns matching markets as JSON, sorted by caller-selected ranking.
 fn cmd_finance_odds_search_csv(
     query: &str,
     limit: Option<usize>,
@@ -146,6 +636,7 @@ fn cmd_finance_odds_search_csv(
     min_volume_usd: Option<f64>,
     top: Option<usize>,
     explain: bool,
+    opts: &CsvSearchOptions,
 ) -> Result<()> {
     #[derive(Deserialize)]
     struct OddsCsvRow {
@@ -269,6 +760,18 @@ fn cmd_finance_odds_search_csv(
     let cache_dir = directories::ProjectDirs::from("", "", "eli")
         .map(|d| d.cache_dir().join("odds"))
         .unwrap_or_else(|| std::env::temp_dir().join("eli-odds-cache"));
+    let delta_index_path = cache_dir.join("sync_last_delta.json");
+    let delta_lookup = load_sync_delta_lookup(&cache_dir);
+    if opts.requires_delta_index() && delta_lookup.is_none() {
+        anyhow::bail!(
+            "delta-aware search requested, but sync delta index is missing at {}. Run `eli finance sync` first.",
+            delta_index_path.display()
+        );
+    }
+    let delta_context = delta_lookup
+        .as_ref()
+        .map(|d| d.context.clone())
+        .unwrap_or_else(|| serde_json::json!({ "available": false }));
 
     let csv_path = cache_dir.join("all_markets.csv");
     if !csv_path.exists() {
@@ -282,22 +785,31 @@ fn cmd_finance_odds_search_csv(
     if query.is_empty() {
         anyhow::bail!("--search query cannot be empty");
     }
+    let match_all = query == "*" || query.eq_ignore_ascii_case("all");
     let query_lower = query.to_ascii_lowercase();
-    let terms: Vec<String> = query_lower
-        .split_whitespace()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if terms.is_empty() {
+    let terms: Vec<String> = if match_all {
+        Vec::new()
+    } else {
+        query_lower
+            .split_whitespace()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    if !match_all && terms.is_empty() {
         anyhow::bail!("--search query cannot be empty");
     }
     let term_patterns = compile_term_patterns(&terms);
     let phrase_pattern = {
-        let q = query.trim();
-        if q.is_empty() {
+        if match_all {
             None
         } else {
-            regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(q))).ok()
+            let q = query.trim();
+            if q.is_empty() {
+                None
+            } else {
+                regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(q))).ok()
+            }
         }
     };
 
@@ -313,10 +825,10 @@ fn cmd_finance_odds_search_csv(
         .from_path(&csv_path)
         .with_context(|| format!("open {}", csv_path.display()))?;
 
-    let mut matches: Vec<serde_json::Value> = Vec::new();
-    let mut loose_matches: Vec<serde_json::Value> = Vec::new();
+    let mut matches: Vec<SearchCandidate> = Vec::new();
+    let mut loose_matches: Vec<SearchCandidate> = Vec::new();
     let mut semantic_query_expanded = false;
-    let federal_reserve_policy_query = query_lower.contains("federal reserve");
+    let federal_reserve_policy_query = !match_all && query_lower.contains("federal reserve");
     let fed_context_terms = [
         "fed",
         "federal reserve",
@@ -338,12 +850,16 @@ fn cmd_finance_odds_search_csv(
             row.source, row.ticker, row.title, row.event_ticker, row.category, row.topic
         );
         let searchable_lower = searchable.to_ascii_lowercase();
-        let mut matched_terms = compute_match_terms(&searchable, &term_patterns);
+        let mut matched_terms = if match_all {
+            Vec::new()
+        } else {
+            compute_match_terms(&searchable, &term_patterns)
+        };
         let mut expanded_match = false;
         let has_fed_context = fed_context_terms.iter().any(|t| searchable_lower.contains(t));
         let has_policy_action = policy_action_terms.iter().any(|t| searchable_lower.contains(t));
         let policy_like = has_fed_context && has_policy_action;
-        if matched_terms.is_empty() {
+        if !match_all && matched_terms.is_empty() {
             if federal_reserve_policy_query && policy_like {
                 matched_terms.push("fed_policy_expanded".to_string());
                 semantic_query_expanded = true;
@@ -352,7 +868,7 @@ fn cmd_finance_odds_search_csv(
                 continue;
             }
         }
-        if terms.len() >= 2 {
+        if !match_all && terms.len() >= 2 {
             let matched_unique: std::collections::BTreeSet<String> =
                 matched_terms.iter().cloned().collect();
             if matched_unique.len() < 2
@@ -365,6 +881,11 @@ fn cmd_finance_odds_search_csv(
 
         let country_hints = find_us_hints(&row);
         if country_normalized.as_deref() == Some("US") && country_hints.is_empty() {
+            continue;
+        }
+
+        let category_searchable = format!("{} {}", row.category, row.topic);
+        if !category_matches_filter(&category_searchable, opts.category_filter.as_deref()) {
             continue;
         }
 
@@ -385,6 +906,17 @@ fn cmd_finance_odds_search_csv(
         };
         let match_score =
             compute_match_score(&row, query, &matched_terms, volume_usd) + phrase_boost;
+        let source_for_delta = row.source.clone();
+        let ticker_for_delta = row.ticker.clone();
+        let delta = delta_metrics(&source_for_delta, &ticker_for_delta, delta_lookup.as_ref());
+        if opts.deltas_only && !delta.has_delta {
+            continue;
+        }
+        if let Some(min_pp) = opts.min_delta_pp {
+            if delta.probability_pp_abs < min_pp {
+                continue;
+            }
+        }
         let mut row_json = serde_json::json!({
             "source": row.source,
             "ticker": row.ticker,
@@ -414,11 +946,23 @@ fn cmd_finance_odds_search_csv(
                 "reasons": explain_reasons(&row, query, &matched_terms_vec, volume_usd)
             });
         }
+        attach_market_delta(
+            &mut row_json,
+            &source_for_delta,
+            &ticker_for_delta,
+            delta_lookup.as_ref(),
+        );
+        let candidate = SearchCandidate {
+            row_json,
+            match_score,
+            volume_usd,
+            delta,
+        };
         if federal_reserve_policy_query && !policy_like {
-            loose_matches.push(row_json);
+            loose_matches.push(candidate);
             continue;
         }
-        matches.push(row_json);
+        matches.push(candidate);
     }
 
     let mut semantic_filter_relaxed = false;
@@ -427,34 +971,32 @@ fn cmd_finance_odds_search_csv(
         matches = loose_matches;
     }
 
-    // Keep breadth by default; rank by relevance first, then liquidity.
-    matches.sort_by(|a, b| {
-        let sa = a["match_score"].as_i64().unwrap_or(0);
-        let sb = b["match_score"].as_i64().unwrap_or(0);
-        sb.cmp(&sa).then_with(|| {
-            let va = a["volume_usd"].as_f64().unwrap_or(0.0);
-            let vb = b["volume_usd"].as_f64().unwrap_or(0.0);
-            vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
-        })
-    });
+    sort_search_candidates(&mut matches, opts.sort_by);
 
     let total_matches = matches.len();
     let final_limit = top.or(limit).unwrap_or(25);
     matches.truncate(final_limit);
+    let markets: Vec<serde_json::Value> = matches.into_iter().map(|m| m.row_json).collect();
 
     let resp = serde_json::json!({
         "query": query,
         "source": "local_csv_cache",
         "csv_path": csv_path.display().to_string(),
         "total_matches": total_matches,
-        "returned_matches": matches.len(),
+        "returned_matches": markets.len(),
         "limit": final_limit,
+        "sort_by": opts.sort_by.as_str(),
+        "deltas_only": opts.deltas_only,
+        "min_delta_pp": opts.min_delta_pp,
+        "category_filter": opts.category_filter.clone(),
+        "match_all": match_all,
         "country": country_normalized,
         "min_volume_usd": min_volume_usd,
         "top": top,
         "semantic_filter_relaxed": semantic_filter_relaxed,
         "semantic_query_expanded": semantic_query_expanded,
-        "markets": matches,
+        "delta_context": delta_context,
+        "markets": markets,
     });
 
     let json = serde_json::to_string_pretty(&resp).context("serialize search results")?;
@@ -473,6 +1015,14 @@ async fn cmd_finance_odds_search_live_no_csv(
     if query.is_empty() {
         anyhow::bail!("--search query cannot be empty");
     }
+    let cache_dir = directories::ProjectDirs::from("", "", "eli")
+        .map(|d| d.cache_dir().join("odds"))
+        .unwrap_or_else(|| std::env::temp_dir().join("eli-odds-cache"));
+    let delta_lookup = load_sync_delta_lookup(&cache_dir);
+    let delta_context = delta_lookup
+        .as_ref()
+        .map(|d| d.context.clone())
+        .unwrap_or_else(|| serde_json::json!({ "available": false }));
 
     // Step 1: Search Kalshi events
     let kalshi_events_req = eli_core::finance::OddsRequest {
@@ -573,7 +1123,7 @@ async fn cmd_finance_odds_search_live_no_csv(
 
         if let Ok(resp) = eli_core::finance::fetch_odds(market_req).await {
             for m in &resp.markets {
-                live_markets.push(serde_json::json!({
+                let mut market_json = serde_json::json!({
                     "source": source,
                     "ticker": m.ticker,
                     "title": m.title,
@@ -585,7 +1135,14 @@ async fn cmd_finance_odds_search_live_no_csv(
                     "volume_usd": m.volume.map(|v| v as f64 / 100.0),
                     "status": m.status,
                     "probability": m.probability_yes,
-                }));
+                });
+                attach_market_delta(
+                    &mut market_json,
+                    source,
+                    &m.ticker,
+                    delta_lookup.as_ref(),
+                );
+                live_markets.push(market_json);
             }
         }
     }
@@ -598,6 +1155,7 @@ async fn cmd_finance_odds_search_live_no_csv(
         "events": all_events,
         "markets": live_markets,
         "total_markets": live_markets.len(),
+        "delta_context": delta_context,
     });
 
     let json = serde_json::to_string_pretty(&resp).context("serialize live search results")?;
@@ -613,7 +1171,8 @@ async fn cmd_finance_odds_search_live(
     country: Option<&str>,
     min_volume_usd: Option<f64>,
     top: Option<usize>,
-    explain: bool,
+    _explain: bool,
+    opts: &CsvSearchOptions,
 ) -> Result<()> {
     // First, run the normal CSV search to find matching events
     // We read the CSV and extract unique event_tickers + source
@@ -621,15 +1180,36 @@ async fn cmd_finance_odds_search_live(
     if query_trimmed.is_empty() {
         anyhow::bail!("--search query cannot be empty");
     }
+    let match_all = query_trimmed == "*" || query_trimmed.eq_ignore_ascii_case("all");
     let query_lower = query_trimmed.to_ascii_lowercase();
-    let terms: Vec<String> = query_lower
-        .split_whitespace()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if terms.is_empty() {
+    let terms: Vec<String> = if match_all {
+        Vec::new()
+    } else {
+        query_lower
+            .split_whitespace()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    if !match_all && terms.is_empty() {
         anyhow::bail!("--search query cannot be empty");
     }
+    let cache_dir = csv_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let delta_index_path = cache_dir.join("sync_last_delta.json");
+    let delta_lookup = load_sync_delta_lookup(cache_dir);
+    if opts.requires_delta_index() && delta_lookup.is_none() {
+        anyhow::bail!(
+            "delta-aware search requested, but sync delta index is missing at {}. Run `eli finance sync` first.",
+            delta_index_path.display()
+        );
+    }
+    let delta_context = delta_lookup
+        .as_ref()
+        .map(|d| d.context.clone())
+        .unwrap_or_else(|| serde_json::json!({ "available": false }));
 
     // Build regex patterns for matching
     let term_patterns: Vec<(String, regex::Regex)> = terms
@@ -660,9 +1240,19 @@ async fn cmd_finance_odds_search_live(
         .from_path(csv_path)
         .with_context(|| format!("open {}", csv_path.display()))?;
 
+    #[derive(Clone)]
+    struct LiveEventAggregate {
+        source: String,
+        category: String,
+        total_volume_usd: f64,
+        delta_prob_pp_abs_max: f64,
+        delta_yes_price_abs_max: f64,
+        delta_volume_abs_max: f64,
+    }
+
     // Find unique event_tickers that match the query
-    let mut event_map: std::collections::BTreeMap<String, (String, String, f64)> =
-        std::collections::BTreeMap::new(); // event_ticker -> (source, category, total_volume)
+    let mut event_map: std::collections::BTreeMap<String, LiveEventAggregate> =
+        std::collections::BTreeMap::new();
 
     for row in rdr.deserialize::<OddsCsvRow>() {
         let row = match row {
@@ -673,17 +1263,19 @@ async fn cmd_finance_odds_search_live(
             "{} {} {} {} {} {}",
             row.source, row.ticker, row.title, row.event_ticker, row.category, row.topic
         );
-        let matched: Vec<String> = term_patterns
-            .iter()
-            .filter_map(|(term, re)| re.is_match(&searchable).then_some(term.clone()))
-            .collect();
-        if matched.is_empty() {
-            continue;
-        }
-        if terms.len() >= 2 {
-            let unique: std::collections::BTreeSet<&String> = matched.iter().collect();
-            if unique.len() < 2 {
+        if !match_all {
+            let matched: Vec<String> = term_patterns
+                .iter()
+                .filter_map(|(term, re)| re.is_match(&searchable).then_some(term.clone()))
+                .collect();
+            if matched.is_empty() {
                 continue;
+            }
+            if terms.len() >= 2 {
+                let unique: std::collections::BTreeSet<&String> = matched.iter().collect();
+                if unique.len() < 2 {
+                    continue;
+                }
             }
         }
 
@@ -701,6 +1293,10 @@ async fn cmd_finance_odds_search_live(
                 continue;
             }
         }
+        let category_searchable = format!("{} {}", row.category, row.topic);
+        if !category_matches_filter(&category_searchable, opts.category_filter.as_deref()) {
+            continue;
+        }
 
         let vol_cents: f64 = row.volume.trim().parse().unwrap_or(0.0);
         let volume_usd = vol_cents / 100.0;
@@ -709,11 +1305,30 @@ async fn cmd_finance_odds_search_live(
                 continue;
             }
         }
+        let delta = delta_metrics(&row.source, &row.ticker, delta_lookup.as_ref());
+        if opts.deltas_only && !delta.has_delta {
+            continue;
+        }
+        if let Some(min_pp) = opts.min_delta_pp {
+            if delta.probability_pp_abs < min_pp {
+                continue;
+            }
+        }
 
         let entry = event_map
             .entry(row.event_ticker.clone())
-            .or_insert_with(|| (row.source.clone(), row.category.clone(), 0.0));
-        entry.2 += volume_usd;
+            .or_insert_with(|| LiveEventAggregate {
+                source: row.source.clone(),
+                category: row.category.clone(),
+                total_volume_usd: 0.0,
+                delta_prob_pp_abs_max: 0.0,
+                delta_yes_price_abs_max: 0.0,
+                delta_volume_abs_max: 0.0,
+            });
+        entry.total_volume_usd += volume_usd;
+        entry.delta_prob_pp_abs_max = entry.delta_prob_pp_abs_max.max(delta.probability_pp_abs);
+        entry.delta_yes_price_abs_max = entry.delta_yes_price_abs_max.max(delta.yes_price_abs);
+        entry.delta_volume_abs_max = entry.delta_volume_abs_max.max(delta.volume_abs);
     }
 
     if event_map.is_empty() {
@@ -721,22 +1336,50 @@ async fn cmd_finance_odds_search_live(
             "query": query_trimmed,
             "source": "live_api_via_csv",
             "note": "no matching events found in CSV cache",
+            "sort_by": opts.sort_by.as_str(),
+            "deltas_only": opts.deltas_only,
+            "min_delta_pp": opts.min_delta_pp,
+            "category_filter": opts.category_filter.clone(),
+            "match_all": match_all,
             "events_found": 0,
             "events": [],
             "markets": [],
             "total_markets": 0,
+            "delta_context": delta_context,
         });
         let json = serde_json::to_string_pretty(&resp).context("serialize")?;
         println!("{json}");
         return Ok(());
     }
 
-    // Sort events by total volume, take top N
-    let mut events_sorted: Vec<(String, String, String, f64)> = event_map
-        .into_iter()
-        .map(|(ticker, (source, cat, vol))| (ticker, source, cat, vol))
-        .collect();
-    events_sorted.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort events by selected ranking mode.
+    let mut events_sorted: Vec<(String, LiveEventAggregate)> = event_map.into_iter().collect();
+    events_sorted.sort_by(|a, b| {
+        let av = &a.1;
+        let bv = &b.1;
+        let vol_cmp = bv
+            .total_volume_usd
+            .partial_cmp(&av.total_volume_usd)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        let delta_prob_cmp = bv
+            .delta_prob_pp_abs_max
+            .partial_cmp(&av.delta_prob_pp_abs_max)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        let delta_yes_price_cmp = bv
+            .delta_yes_price_abs_max
+            .partial_cmp(&av.delta_yes_price_abs_max)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        let delta_volume_cmp = bv
+            .delta_volume_abs_max
+            .partial_cmp(&av.delta_volume_abs_max)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        match opts.sort_by {
+            CsvSortBy::Relevance | CsvSortBy::Volume => vol_cmp,
+            CsvSortBy::DeltaProb => delta_prob_cmp.then_with(|| vol_cmp),
+            CsvSortBy::DeltaYesPrice => delta_yes_price_cmp.then_with(|| vol_cmp),
+            CsvSortBy::DeltaVolume => delta_volume_cmp.then_with(|| vol_cmp),
+        }
+    });
     let final_limit = top.or(limit).unwrap_or(10).min(15);
     events_sorted.truncate(final_limit);
 
@@ -744,7 +1387,10 @@ async fn cmd_finance_odds_search_live(
     let mut all_events: Vec<serde_json::Value> = Vec::new();
     let mut all_markets: Vec<serde_json::Value> = Vec::new();
 
-    for (event_ticker, source, category, csv_volume) in &events_sorted {
+    for (event_ticker, aggregate) in &events_sorted {
+        let source = &aggregate.source;
+        let category = &aggregate.category;
+        let csv_volume = aggregate.total_volume_usd;
         let market_req = eli_core::finance::OddsRequest {
             provider: Some(source.clone()),
             disable_kalshi: source == "polymarket",
@@ -774,7 +1420,7 @@ async fn cmd_finance_odds_search_live(
                     .unwrap_or_default();
                 let mut event_markets: Vec<serde_json::Value> = Vec::new();
                 for m in &resp.markets {
-                    let mkt_json = serde_json::json!({
+                    let mut mkt_json = serde_json::json!({
                         "source": source,
                         "ticker": m.ticker,
                         "title": m.title,
@@ -787,6 +1433,7 @@ async fn cmd_finance_odds_search_live(
                         "status": m.status,
                         "probability": m.probability_yes,
                     });
+                    attach_market_delta(&mut mkt_json, source, &m.ticker, delta_lookup.as_ref());
                     all_markets.push(mkt_json.clone());
                     event_markets.push(mkt_json);
                 }
@@ -796,6 +1443,9 @@ async fn cmd_finance_odds_search_live(
                     "source": source,
                     "category": category,
                     "csv_volume_usd": csv_volume,
+                    "delta_abs_probability_pp_max": aggregate.delta_prob_pp_abs_max,
+                    "delta_abs_yes_price_cents_max": aggregate.delta_yes_price_abs_max,
+                    "delta_abs_volume_cents_max": aggregate.delta_volume_abs_max,
                     "markets": event_markets,
                 }));
             }
@@ -805,6 +1455,9 @@ async fn cmd_finance_odds_search_live(
                     "source": source,
                     "category": category,
                     "csv_volume_usd": csv_volume,
+                    "delta_abs_probability_pp_max": aggregate.delta_prob_pp_abs_max,
+                    "delta_abs_yes_price_cents_max": aggregate.delta_yes_price_abs_max,
+                    "delta_abs_volume_cents_max": aggregate.delta_volume_abs_max,
                     "error": format!("{e}"),
                     "markets": [],
                 }));
@@ -817,8 +1470,14 @@ async fn cmd_finance_odds_search_live(
         "source": "live_api_via_csv",
         "note": "CSV used for discovery, live API used for fresh prices",
         "events_found": all_events.len(),
+        "sort_by": opts.sort_by.as_str(),
+        "deltas_only": opts.deltas_only,
+        "min_delta_pp": opts.min_delta_pp,
+        "category_filter": opts.category_filter.clone(),
+        "match_all": match_all,
         "events": all_events,
         "total_markets": all_markets.len(),
+        "delta_context": delta_context,
     });
 
     let json = serde_json::to_string_pretty(&resp).context("serialize live search results")?;
@@ -860,6 +1519,8 @@ fn cmd_finance_odds_where(args: FinanceOddsWhereArgs) -> Result<()> {
         kalshi_csv_path: String,
         polymarket_csv_path: String,
         merged_csv_path: String,
+        sync_state_path: String,
+        sync_delta_index_path: String,
         csv_schema: Vec<&'static str>,
         id_language: OddsIdLanguage,
     }
@@ -878,6 +1539,8 @@ fn cmd_finance_odds_where(args: FinanceOddsWhereArgs) -> Result<()> {
             .display()
             .to_string(),
         merged_csv_path: cache_dir.join("all_markets.csv").display().to_string(),
+        sync_state_path: cache_dir.join("sync_state.json").display().to_string(),
+        sync_delta_index_path: cache_dir.join("sync_last_delta.json").display().to_string(),
         csv_schema: vec![
             "source",
             "ticker",
@@ -906,4 +1569,3 @@ fn cmd_finance_odds_where(args: FinanceOddsWhereArgs) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&resp)?);
     Ok(())
 }
-

@@ -737,7 +737,7 @@ struct FinanceOddsArgs {
     #[arg(long)]
     list_tags: bool,
 
-    /// Category filter (Kalshi list endpoints).
+    /// Category filter (Kalshi list endpoints, and local CSV search when --search is used).
     #[arg(long)]
     category: Option<String>,
 
@@ -753,9 +753,24 @@ struct FinanceOddsArgs {
     #[arg(long = "min-volume")]
     min_volume: Option<f64>,
 
-    /// Return top N markets by volume (local CSV search).
+    /// Return top N markets after ranking (local CSV search).
     #[arg(long)]
     top: Option<usize>,
+
+    /// Ranking for local CSV search output.
+    /// Options: relevance, volume, delta_prob, delta_yes_price, delta_volume.
+    #[arg(long = "sort-by", default_value = "relevance")]
+    sort_by: String,
+
+    /// Only include markets that changed since the last sync (requires sync delta index).
+    #[arg(long, default_value_t = false)]
+    deltas_only: bool,
+
+    /// Minimum absolute probability move (percentage points) since last sync.
+    /// Requires sync delta index.
+    #[arg(long = "min-delta-pp")]
+    min_delta_pp: Option<f64>,
+
     /// Include compact ranking explanations in local CSV search output.
     #[arg(long, default_value_t = false)]
     explain: bool,
