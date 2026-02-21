@@ -6,6 +6,7 @@ include!("chat/slash.rs");
 include!("args.rs");
 include!("dispatch.rs");
 include!("cmd/code.rs");
+include!("cmd/mcp.rs");
 include!("cmd/agent.rs");
 include!("cmd/web.rs");
 include!("cmd/finance/macro_schedule.rs");
