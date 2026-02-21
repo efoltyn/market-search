@@ -1,10 +1,23 @@
 pub async fn fetch_dashboard(req: DashboardRequest) -> Result<DashboardResponse> {
     let preset = req.preset.trim().to_ascii_lowercase();
-    if preset != "recession" {
-        return Err(Error::InvalidInput(
-            "unsupported --preset (v1 supports: recession)".to_string(),
-        ));
+    match preset.as_str() {
+        "recession" => fetch_dashboard_recession(req.max_ms).await,
+        "tech_megacap" => fetch_dashboard_generic(
+            "tech_megacap",
+            req.max_ms,
+            &[
+                ("snapshot_megacap", vec!["NVDA", "AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA"]),
+                ("snapshot_semis",   vec!["AMD", "INTC", "AVGO", "QCOM", "MU"]),
+            ],
+            &["AI chips", "semiconductor tariff", "big tech earnings"],
+        ).await,
+        _ => Err(Error::InvalidInput(format!(
+            "unsupported --preset '{preset}' (supported: recession, tech_megacap)"
+        ))),
     }
+}
+
+async fn fetch_dashboard_recession(max_ms: Option<u64>) -> Result<DashboardResponse> {
 
     let macro_fut = async {
         fetch_macro(MacroRequest {
@@ -27,7 +40,7 @@ pub async fn fetch_dashboard(req: DashboardRequest) -> Result<DashboardResponse>
         .await
     };
     let odds_fut = async {
-        if req.max_ms.unwrap_or(0) > 0 && req.max_ms.unwrap_or(0) <= 5_000 {
+        if max_ms.unwrap_or(0) > 0 && max_ms.unwrap_or(0) <= 5_000 {
             return Err(Error::Provider(
                 "skipped due tight max-ms budget".to_string(),
             ));
@@ -40,7 +53,7 @@ pub async fn fetch_dashboard(req: DashboardRequest) -> Result<DashboardResponse>
         Ok::<Vec<DashboardOddsSearch>, Error>(out)
     };
     let options_fut = async {
-        if req.max_ms.unwrap_or(0) > 0 && req.max_ms.unwrap_or(0) <= 5_000 {
+        if max_ms.unwrap_or(0) > 0 && max_ms.unwrap_or(0) <= 5_000 {
             return Err(Error::Provider(
                 "skipped due tight max-ms budget".to_string(),
             ));
@@ -73,11 +86,11 @@ pub async fn fetch_dashboard(req: DashboardRequest) -> Result<DashboardResponse>
         }
     }
 
-    let macro_ms = section_budget_ms(req.max_ms, 15_000);
-    let snapshot_ms = section_budget_ms(req.max_ms, 12_000);
-    let odds_ms = section_budget_ms(req.max_ms, 10_000);
-    let options_ms = section_budget_ms(req.max_ms, 20_000);
-    let rate_ms = section_budget_ms(req.max_ms, 20_000);
+    let macro_ms = section_budget_ms(max_ms, 15_000);
+    let snapshot_ms = section_budget_ms(max_ms, 12_000);
+    let odds_ms = section_budget_ms(max_ms, 10_000);
+    let options_ms = section_budget_ms(max_ms, 20_000);
+    let rate_ms = section_budget_ms(max_ms, 20_000);
 
     let macro_fut = async {
         if let Some(ms) = macro_ms {
@@ -310,7 +323,7 @@ pub async fn fetch_dashboard(req: DashboardRequest) -> Result<DashboardResponse>
     let as_of = health.values().filter_map(|h| h.as_of).max().unwrap_or(now);
     let age_seconds = (now - as_of).num_seconds().max(0);
     Ok(DashboardResponse {
-        preset,
+        preset: "recession".to_string(),
         generated_at: now,
         as_of,
         age_seconds,
@@ -319,6 +332,120 @@ pub async fn fetch_dashboard(req: DashboardRequest) -> Result<DashboardResponse>
         odds,
         options,
         rate_path,
+        sections: BTreeMap::new(),
+        section_health: Some(health),
+        warnings,
+    })
+}
+
+// Generic preset runner: runs snapshot groups + odds searches in parallel, returns
+// everything in `sections`. Adding a new preset is one new match arm in fetch_dashboard
+// — no type changes to DashboardResponse needed.
+async fn fetch_dashboard_generic(
+    preset_name: &str,
+    max_ms: Option<u64>,
+    snapshot_groups: &[(&str, Vec<&str>)],
+    odds_queries: &[&str],
+) -> Result<DashboardResponse> {
+    use futures::future::join_all;
+
+    let now = Utc::now();
+    let budget_ms = max_ms.unwrap_or(30_000);
+    let mut sections: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut health: BTreeMap<String, SectionHealth> = BTreeMap::new();
+
+    // Snapshot groups — run all in parallel.
+    let snap_futs: Vec<_> = snapshot_groups
+        .iter()
+        .map(|(name, tickers)| {
+            let tickers: Vec<String> = tickers.iter().map(|t| t.to_string()).collect();
+            let name = name.to_string();
+            async move {
+                let result = timeout(
+                    TokioDuration::from_millis(budget_ms.min(15_000)),
+                    fetch_snapshot(SnapshotRequest {
+                        tickers,
+                        provider: ProviderKind::Yahoo,
+                    }),
+                )
+                .await;
+                (name, result)
+            }
+        })
+        .collect();
+
+    for (name, result) in join_all(snap_futs).await {
+        match result {
+            Ok(Ok(v)) => {
+                let n = v.snapshots.len();
+                health.insert(name.clone(), SectionHealth {
+                    available: true,
+                    coverage_ratio: (n as f64 / 5.0).clamp(0.0, 1.0),
+                    confidence: 0.85,
+                    as_of: Some(v.generated_at),
+                    age_seconds: Some((now - v.generated_at).num_seconds().max(0)),
+                    notes: Vec::new(),
+                });
+                let value = serde_json::to_value(&v).unwrap_or(serde_json::Value::Null);
+                sections.insert(name, value);
+            }
+            Ok(Err(e)) => {
+                warnings.push(format!("{name}: {e}"));
+                health.insert(name.clone(), SectionHealth { available: false, coverage_ratio: 0.0, confidence: 0.0, as_of: None, age_seconds: None, notes: vec![e.to_string()] });
+            }
+            Err(_) => {
+                warnings.push(format!("{name}: timed out"));
+                health.insert(name.clone(), SectionHealth { available: false, coverage_ratio: 0.0, confidence: 0.0, as_of: None, age_seconds: None, notes: vec!["timed out".to_string()] });
+            }
+        }
+    }
+
+    // Odds searches — run all in parallel.
+    let odds_futs: Vec<_> = odds_queries
+        .iter()
+        .map(|q| {
+            let q = q.to_string();
+            async move {
+                let result = timeout(
+                    TokioDuration::from_millis(budget_ms.min(10_000)),
+                    async { search_odds_csv(&q, 20) },
+                )
+                .await;
+                (q, result)
+            }
+        })
+        .collect();
+
+    let mut odds_out: Vec<serde_json::Value> = Vec::new();
+    for (q, result) in join_all(odds_futs).await {
+        match result {
+            Ok(Ok(v)) => odds_out.push(serde_json::to_value(&v).unwrap_or(serde_json::Value::Null)),
+            Ok(Err(e)) => warnings.push(format!("odds({q}): {e}")),
+            Err(_) => warnings.push(format!("odds({q}): timed out")),
+        }
+    }
+    if !odds_out.is_empty() {
+        sections.insert("odds".to_string(), serde_json::Value::Array(odds_out));
+    }
+
+    if sections.is_empty() {
+        return Err(Error::Provider(format!("all sections failed for preset {preset_name}")));
+    }
+
+    let as_of = health.values().filter_map(|h| h.as_of).max().unwrap_or(now);
+    let age_seconds = (now - as_of).num_seconds().max(0);
+    Ok(DashboardResponse {
+        preset: preset_name.to_string(),
+        generated_at: now,
+        as_of,
+        age_seconds,
+        macro_data: None,
+        snapshots: None,
+        odds: None,
+        options: None,
+        rate_path: None,
+        sections,
         section_health: Some(health),
         warnings,
     })

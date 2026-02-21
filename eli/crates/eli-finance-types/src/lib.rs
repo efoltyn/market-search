@@ -1,5 +1,6 @@
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -691,6 +692,7 @@ pub struct DashboardResponse {
     pub generated_at: DateTime<Utc>,
     pub as_of: DateTime<Utc>,
     pub age_seconds: i64,
+    // Named sections for the built-in `recession` preset (kept for backwards compat).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub macro_data: Option<MacroResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -701,6 +703,11 @@ pub struct DashboardResponse {
     pub options: Option<OptionsResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_path: Option<RatePathResponse>,
+    // Generic escape hatch: new presets use this instead of adding typed fields.
+    // Each key is a section name; value is a JSON payload for that section.
+    // Allows adding new presets in service.rs without touching this struct.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub sections: BTreeMap<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_health: Option<BTreeMap<String, SectionHealth>>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
