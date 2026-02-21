@@ -3,34 +3,71 @@ async fn cmd_finance_fundamentals(args: FinanceFundamentalsArgs) -> Result<()> {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
     }
 
-    let ticker_for_meta = args.ticker.clone();
-    let req = eli_core::finance::FundamentalsRequest {
-        ticker: args.ticker,
-    };
-    let resp = eli_core::finance::fetch_fundamentals(req)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("fetch fundamentals")?;
+    let tickers: Vec<String> = args
+        .tickers
+        .iter()
+        .map(|t| t.trim().to_ascii_uppercase())
+        .filter(|t| !t.is_empty())
+        .collect();
 
-    if let Some(out_path) = args.out {
-        let wr = write_json_out_with_meta(
-            out_path,
-            &resp,
-            "finance.fundamentals",
-            &[format!("ticker={ticker_for_meta}")],
-        )?;
-        println!(
-            "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
-            serde_json::to_string(&wr.out_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-            serde_json::to_string(&wr.meta_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-        );
-        return Ok(());
+    if tickers.is_empty() {
+        anyhow::bail!("at least one ticker is required (e.g. --tickers NVDA or --tickers NVDA,AAPL)");
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    let futs = tickers.iter().map(|ticker| {
+        let req = eli_core::finance::FundamentalsRequest {
+            ticker: ticker.clone(),
+        };
+        eli_core::finance::fetch_fundamentals(req)
+    });
+
+    let results = futures::future::join_all(futs).await;
+    let resps: Vec<_> = results
+        .into_iter()
+        .map(|r| r.map_err(|e| anyhow::anyhow!(e)))
+        .collect::<Result<Vec<_>>>()?;
+
+    if resps.len() == 1 {
+        if let Some(out_path) = args.out {
+            let wr = write_json_out_with_meta(
+                out_path,
+                &resps[0],
+                "finance.fundamentals",
+                &[format!("ticker={}", tickers[0])],
+            )?;
+            println!(
+                "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
+                serde_json::to_string(&wr.out_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+                serde_json::to_string(&wr.meta_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+            );
+            return Ok(());
+        }
+        let json = serde_json::to_string_pretty(&resps[0]).context("serialize response")?;
+        println!("{json}");
+    } else {
+        if let Some(out_path) = args.out {
+            let tickers_str = tickers.join(",");
+            let wr = write_json_out_with_meta(
+                out_path,
+                &resps,
+                "finance.fundamentals",
+                &[format!("tickers={tickers_str}")],
+            )?;
+            println!(
+                "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
+                serde_json::to_string(&wr.out_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+                serde_json::to_string(&wr.meta_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+            );
+            return Ok(());
+        }
+        let json = serde_json::to_string_pretty(&resps).context("serialize response")?;
+        println!("{json}");
+    }
+
     Ok(())
 }
 

@@ -78,6 +78,9 @@ enum Command {
 
     /// Parse Rust source into a structural map (functions, structs, enums, impls, traits).
     Code(CodeArgs),
+
+    /// Start MCP (Model Context Protocol) server — exposes eli tools as native Claude Code tools via JSON-RPC stdio.
+    Mcp,
 }
 
 #[derive(Subcommand, Debug)]
@@ -151,12 +154,19 @@ struct RustFileSummary {
     items_total: usize,
     functions: usize,
     function_names: Vec<String>,
+    /// Full signatures: "pub async fn name(param: Type) -> ReturnType"
+    /// Lets an AI caller understand the API contract without reading source.
+    function_signatures: Vec<String>,
     structs: usize,
     struct_names: Vec<String>,
+    /// Per-struct field list: {struct_name: ["field: Type", ...]}
+    struct_fields: std::collections::BTreeMap<String, Vec<String>>,
     enums: usize,
     enum_names: Vec<String>,
     impls: usize,
     impl_targets: Vec<String>,
+    /// Methods per impl block: {"LlmAdapter for AnthropicAdapter": ["pub async fn chat(...)  -> ..."]}
+    impl_methods: std::collections::BTreeMap<String, Vec<String>>,
     traits: usize,
     trait_names: Vec<String>,
     modules: usize,
@@ -377,6 +387,19 @@ struct CodeArgs {
     /// Include per-file metrics in response (directory mode only).
     #[arg(long, default_value_t = false)]
     include_files: bool,
+
+    /// Search for symbol usages across all .rs files in path (comma-separated).
+    /// Uses multi-pattern matching. Returns every line containing any of the symbols
+    /// with file path and line number. Works on files and directories.
+    #[arg(long, value_delimiter = ',')]
+    find: Vec<String>,
+
+    /// Emit the complete public API surface for a directory: every pub fn (with full
+    /// signature), pub struct (with field types), pub enum (with variants), pub trait
+    /// (with method signatures), grouped by file. Ideal for understanding a module's
+    /// contract before writing new code.
+    #[arg(long, default_value_t = false)]
+    pub_api: bool,
 
     /// Optional output file for JSON response.
     #[arg(long)]
@@ -607,9 +630,9 @@ struct FinanceSnapshotArgs {
 
 #[derive(clap::Args, Debug)]
 struct FinanceFundamentalsArgs {
-    /// Ticker to fetch fundamentals for.
-    #[arg(long, visible_alias = "tickers")]
-    ticker: String,
+    /// Tickers to fetch (repeatable or comma-separated).
+    #[arg(long, visible_alias = "ticker", value_delimiter = ',')]
+    tickers: Vec<String>,
 
     /// Output format (currently: json).
     #[arg(long, default_value = "json")]

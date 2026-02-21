@@ -40,17 +40,122 @@ fn generate_struct_getters_quote(item: &syn::Item) -> Result<String> {
     Ok(tokens.to_string())
 }
 
+fn impl_fn_signature(item: &syn::ImplItemFn) -> String {
+    let vis = match &item.vis {
+        syn::Visibility::Public(_) => "pub ",
+        syn::Visibility::Restricted(_) => "pub(crate) ",
+        syn::Visibility::Inherited => "",
+    };
+    let asyncness = if item.sig.asyncness.is_some() { "async " } else { "" };
+    let name = item.sig.ident.to_string();
+    let params: String = item
+        .sig
+        .inputs
+        .iter()
+        .map(|arg| match arg {
+            syn::FnArg::Receiver(r) => {
+                if r.reference.is_some() {
+                    if r.mutability.is_some() { "&mut self".to_string() } else { "&self".to_string() }
+                } else {
+                    "self".to_string()
+                }
+            }
+            syn::FnArg::Typed(pt) => {
+                let pname = match pt.pat.as_ref() {
+                    syn::Pat::Ident(p) => p.ident.to_string(),
+                    _ => "_".to_string(),
+                };
+                format!("{pname}: {}", type_to_string(&pt.ty))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ret = match &item.sig.output {
+        syn::ReturnType::Default => String::new(),
+        syn::ReturnType::Type(_, ty) => format!(" -> {}", type_to_string(ty)),
+    };
+    format!("{vis}{asyncness}fn {name}({params}){ret}")
+}
+
+fn fn_signature(item: &syn::ItemFn) -> String {
+    let vis = match &item.vis {
+        syn::Visibility::Public(_) => "pub ",
+        syn::Visibility::Restricted(_) => "pub(crate) ",
+        syn::Visibility::Inherited => "",
+    };
+    let asyncness = if item.sig.asyncness.is_some() { "async " } else { "" };
+    let name = item.sig.ident.to_string();
+    let params: String = item
+        .sig
+        .inputs
+        .iter()
+        .map(|arg| match arg {
+            syn::FnArg::Receiver(r) => {
+                if r.reference.is_some() {
+                    if r.mutability.is_some() {
+                        "&mut self".to_string()
+                    } else {
+                        "&self".to_string()
+                    }
+                } else {
+                    "self".to_string()
+                }
+            }
+            syn::FnArg::Typed(pt) => {
+                let pname = match pt.pat.as_ref() {
+                    syn::Pat::Ident(p) => p.ident.to_string(),
+                    _ => "_".to_string(),
+                };
+                format!("{pname}: {}", type_to_string(&pt.ty))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ret = match &item.sig.output {
+        syn::ReturnType::Default => String::new(),
+        syn::ReturnType::Type(_, ty) => format!(" -> {}", type_to_string(ty)),
+    };
+    format!("{vis}{asyncness}fn {name}({params}){ret}")
+}
+
+fn struct_field_list(item: &syn::ItemStruct) -> Vec<String> {
+    match &item.fields {
+        syn::Fields::Named(named) => named
+            .named
+            .iter()
+            .map(|f| {
+                let name = f
+                    .ident
+                    .as_ref()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                format!("{name}: {}", type_to_string(&f.ty))
+            })
+            .collect(),
+        syn::Fields::Unnamed(unnamed) => unnamed
+            .unnamed
+            .iter()
+            .enumerate()
+            .map(|(i, f)| format!("{i}: {}", type_to_string(&f.ty)))
+            .collect(),
+        syn::Fields::Unit => Vec::new(),
+    }
+}
+
 fn summarize_rust_file(file: &syn::File) -> RustFileSummary {
     let mut summary = RustFileSummary {
         items_total: file.items.len(),
         functions: 0,
         function_names: Vec::new(),
+        function_signatures: Vec::new(),
         structs: 0,
         struct_names: Vec::new(),
+        struct_fields: std::collections::BTreeMap::new(),
         enums: 0,
         enum_names: Vec::new(),
         impls: 0,
         impl_targets: Vec::new(),
+        impl_methods: std::collections::BTreeMap::new(),
         traits: 0,
         trait_names: Vec::new(),
         modules: 0,
@@ -71,10 +176,12 @@ fn summarize_rust_file(file: &syn::File) -> RustFileSummary {
             syn::Item::Fn(v) => {
                 summary.functions += 1;
                 summary.function_names.push(v.sig.ident.to_string());
+                summary.function_signatures.push(fn_signature(v));
             }
             syn::Item::Struct(v) => {
                 summary.structs += 1;
                 summary.struct_names.push(v.ident.to_string());
+                summary.struct_fields.insert(v.ident.to_string(), struct_field_list(v));
             }
             syn::Item::Enum(v) => {
                 summary.enums += 1;
@@ -82,7 +189,22 @@ fn summarize_rust_file(file: &syn::File) -> RustFileSummary {
             }
             syn::Item::Impl(v) => {
                 summary.impls += 1;
-                summary.impl_targets.push(format_impl_target(v));
+                let target = format_impl_target(v);
+                summary.impl_targets.push(target.clone());
+                let methods: Vec<String> = v
+                    .items
+                    .iter()
+                    .filter_map(|item| {
+                        if let syn::ImplItem::Fn(m) = item {
+                            Some(impl_fn_signature(m))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !methods.is_empty() {
+                    summary.impl_methods.insert(target, methods);
+                }
             }
             syn::Item::Trait(v) => {
                 summary.traits += 1;
@@ -148,7 +270,34 @@ fn type_to_string(ty: &syn::Type) -> String {
 fn path_to_string(path: &syn::Path) -> String {
     path.segments
         .iter()
-        .map(|seg| seg.ident.to_string())
+        .map(|seg| {
+            let name = seg.ident.to_string();
+            match &seg.arguments {
+                syn::PathArguments::None => name,
+                syn::PathArguments::AngleBracketed(ab) => {
+                    let args: Vec<String> = ab
+                        .args
+                        .iter()
+                        .map(|a| match a {
+                            syn::GenericArgument::Type(t) => type_to_string(t),
+                            syn::GenericArgument::Lifetime(lt) => {
+                                format!("'{}", lt.ident)
+                            }
+                            _ => "_".to_string(),
+                        })
+                        .collect();
+                    format!("{name}<{}>", args.join(", "))
+                }
+                syn::PathArguments::Parenthesized(pb) => {
+                    let inputs: Vec<String> = pb.inputs.iter().map(type_to_string).collect();
+                    let ret = match &pb.output {
+                        syn::ReturnType::Default => String::new(),
+                        syn::ReturnType::Type(_, t) => format!(" -> {}", type_to_string(t)),
+                    };
+                    format!("{name}({}){ret}", inputs.join(", "))
+                }
+            }
+        })
         .join("::")
 }
 
@@ -397,6 +546,280 @@ fn truncate_ranked(mut rows: Vec<RustCodeFileMetric>, top: usize) -> Vec<RustCod
     rows
 }
 
+// ── find mode ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+struct FindMatch {
+    file: String,
+    line: usize,
+    context: String,
+}
+
+fn find_symbols_in_path(root: &Path, symbols: &[String]) -> Result<serde_json::Value> {
+    use aho_corasick::AhoCorasick;
+
+    let files = if root.is_file() {
+        vec![root.to_path_buf()]
+    } else {
+        collect_rust_files(root)?
+    };
+
+    let ac = AhoCorasick::new(symbols).context("build aho-corasick")?;
+    let mut results: std::collections::BTreeMap<String, Vec<FindMatch>> =
+        symbols.iter().map(|s| (s.clone(), Vec::new())).collect();
+
+    for file_path in &files {
+        let content = match std::fs::read_to_string(file_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let path_str = file_path.display().to_string();
+        for (line_idx, line) in content.lines().enumerate() {
+            for mat in ac.find_iter(line) {
+                // word-boundary check so `fetch_snapshot` doesn't match inside `fetch_snapshot_list`
+                let start = mat.start();
+                let end = mat.end();
+                let bytes = line.as_bytes();
+                let before_ok = start == 0
+                    || (!bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_');
+                let after_ok = end >= bytes.len()
+                    || (!bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_');
+                if !before_ok || !after_ok {
+                    continue;
+                }
+                let sym = &symbols[mat.pattern().as_usize()];
+                results.entry(sym.clone()).or_default().push(FindMatch {
+                    file: path_str.clone(),
+                    line: line_idx + 1,
+                    context: line.trim().to_string(),
+                });
+            }
+        }
+    }
+
+    let total_matches: usize = results.values().map(|v| v.len()).sum();
+    Ok(json!({
+        "mode": "find",
+        "root_path": root.display().to_string(),
+        "symbols": symbols,
+        "total_matches": total_matches,
+        "results": results,
+    }))
+}
+
+// ── pub-api mode ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+struct PubApiFile {
+    file: String,
+    /// pub fn / pub async fn with full parameter + return type signatures.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    functions: Vec<String>,
+    /// pub struct → field list "name: Type".
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    structs: std::collections::BTreeMap<String, Vec<String>>,
+    /// pub enum → variant list "Variant" | "Variant(T)" | "Variant { field: T }".
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    enums: std::collections::BTreeMap<String, Vec<String>>,
+    /// impl Target → pub method signatures.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    impl_methods: std::collections::BTreeMap<String, Vec<String>>,
+    /// pub trait → method signatures.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    traits: std::collections::BTreeMap<String, Vec<String>>,
+    /// pub type aliases.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    type_aliases: Vec<String>,
+}
+
+fn is_pub(vis: &syn::Visibility) -> bool {
+    matches!(
+        vis,
+        syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
+    )
+}
+
+fn trait_fn_signature(item: &syn::TraitItemFn) -> String {
+    let asyncness = if item.sig.asyncness.is_some() {
+        "async "
+    } else {
+        ""
+    };
+    let name = item.sig.ident.to_string();
+    let params: String = item
+        .sig
+        .inputs
+        .iter()
+        .map(|arg| match arg {
+            syn::FnArg::Receiver(r) => {
+                if r.reference.is_some() {
+                    if r.mutability.is_some() {
+                        "&mut self".to_string()
+                    } else {
+                        "&self".to_string()
+                    }
+                } else {
+                    "self".to_string()
+                }
+            }
+            syn::FnArg::Typed(pt) => {
+                let pname = match pt.pat.as_ref() {
+                    syn::Pat::Ident(p) => p.ident.to_string(),
+                    _ => "_".to_string(),
+                };
+                format!("{pname}: {}", type_to_string(&pt.ty))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ret = match &item.sig.output {
+        syn::ReturnType::Default => String::new(),
+        syn::ReturnType::Type(_, ty) => format!(" -> {}", type_to_string(ty)),
+    };
+    format!("{asyncness}fn {name}({params}){ret}")
+}
+
+fn enum_variant_str(var: &syn::Variant) -> String {
+    let name = var.ident.to_string();
+    match &var.fields {
+        syn::Fields::Unit => name,
+        syn::Fields::Unnamed(u) => {
+            let types: Vec<String> = u.unnamed.iter().map(|f| type_to_string(&f.ty)).collect();
+            format!("{}({})", name, types.join(", "))
+        }
+        syn::Fields::Named(n) => {
+            let fields: Vec<String> = n
+                .named
+                .iter()
+                .map(|f| {
+                    let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    format!("{fname}: {}", type_to_string(&f.ty))
+                })
+                .collect();
+            format!("{name} {{ {} }}", fields.join(", "))
+        }
+    }
+}
+
+fn extract_pub_api(source_path: &Path, root: &Path) -> Result<Option<PubApiFile>> {
+    let source = std::fs::read_to_string(source_path)
+        .with_context(|| format!("read {}", source_path.display()))?;
+    let parsed = syn::parse_file(&source)
+        .with_context(|| format!("parse {}", source_path.display()))?;
+
+    let rel = source_path
+        .strip_prefix(root)
+        .unwrap_or(source_path)
+        .display()
+        .to_string();
+
+    let mut api = PubApiFile {
+        file: rel,
+        functions: Vec::new(),
+        structs: std::collections::BTreeMap::new(),
+        enums: std::collections::BTreeMap::new(),
+        impl_methods: std::collections::BTreeMap::new(),
+        traits: std::collections::BTreeMap::new(),
+        type_aliases: Vec::new(),
+    };
+
+    for item in &parsed.items {
+        match item {
+            syn::Item::Fn(v) if is_pub(&v.vis) => {
+                api.functions.push(fn_signature(v));
+            }
+            syn::Item::Struct(v) if is_pub(&v.vis) => {
+                api.structs.insert(v.ident.to_string(), struct_field_list(v));
+            }
+            syn::Item::Enum(v) if is_pub(&v.vis) => {
+                let variants: Vec<String> = v.variants.iter().map(enum_variant_str).collect();
+                api.enums.insert(v.ident.to_string(), variants);
+            }
+            syn::Item::Impl(v) => {
+                let methods: Vec<String> = v
+                    .items
+                    .iter()
+                    .filter_map(|i| {
+                        if let syn::ImplItem::Fn(m) = i {
+                            if is_pub(&m.vis) {
+                                return Some(impl_fn_signature(m));
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+                if !methods.is_empty() {
+                    let target = format_impl_target(v);
+                    api.impl_methods.entry(target).or_default().extend(methods);
+                }
+            }
+            syn::Item::Trait(v) if is_pub(&v.vis) => {
+                let methods: Vec<String> = v
+                    .items
+                    .iter()
+                    .filter_map(|i| {
+                        if let syn::TraitItem::Fn(m) = i {
+                            Some(trait_fn_signature(m))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                api.traits.insert(v.ident.to_string(), methods);
+            }
+            syn::Item::Type(v) if is_pub(&v.vis) => {
+                api.type_aliases
+                    .push(format!("pub type {} = {}", v.ident, type_to_string(&v.ty)));
+            }
+            _ => {}
+        }
+    }
+
+    let empty = api.functions.is_empty()
+        && api.structs.is_empty()
+        && api.enums.is_empty()
+        && api.impl_methods.is_empty()
+        && api.traits.is_empty()
+        && api.type_aliases.is_empty();
+
+    if empty { Ok(None) } else { Ok(Some(api)) }
+}
+
+fn pub_api_for_path(root: &Path) -> Result<serde_json::Value> {
+    let files = if root.is_file() {
+        vec![root.to_path_buf()]
+    } else {
+        collect_rust_files(root)?
+    };
+
+    let mut api_files: Vec<PubApiFile> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for file_path in &files {
+        match extract_pub_api(file_path, root) {
+            Ok(Some(api)) => api_files.push(api),
+            Ok(None) => {}
+            Err(e) => errors.push(format!("{}: {e:#}", file_path.display())),
+        }
+    }
+
+    let total_fns: usize = api_files.iter().map(|f| f.functions.len()).sum();
+    let total_types: usize = api_files
+        .iter()
+        .map(|f| f.structs.len() + f.enums.len() + f.traits.len() + f.type_aliases.len())
+        .sum();
+
+    Ok(json!({
+        "mode": "pub_api",
+        "root_path": root.display().to_string(),
+        "files_with_pub_items": api_files.len(),
+        "total_pub_functions": total_fns,
+        "total_pub_types": total_types,
+        "files": api_files,
+        "errors": errors,
+    }))
+}
+
 async fn cmd_code_batch(args: &CodeArgs, root_path: &Path) -> Result<serde_json::Value> {
     if args.generate {
         anyhow::bail!("--generate works only for a single Rust file path");
@@ -542,6 +965,53 @@ async fn cmd_code(args: CodeArgs) -> Result<()> {
     let source_path = resolve_abs_path(&args.path);
     if !source_path.exists() {
         anyhow::bail!("path does not exist: {}", source_path.display());
+    }
+
+    // --find: multi-symbol search using aho-corasick (short-circuits other modes)
+    if !args.find.is_empty() {
+        let resp = find_symbols_in_path(&source_path, &args.find)?;
+        if let Some(out_path) = args.out {
+            let out_path = redirect_finance_output(out_path);
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let json = serde_json::to_string_pretty(&resp).context("serialize find response")?;
+            std::fs::write(&out_path, &json).context("write --out")?;
+            println!(
+                "{{\"ok\":true,\"path\":{}}}",
+                serde_json::to_string(&out_path.display().to_string()).unwrap_or_default()
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&resp).context("serialize find response")?
+            );
+        }
+        return Ok(());
+    }
+
+    // --pub-api: public API surface map (short-circuits other modes)
+    if args.pub_api {
+        let resp = pub_api_for_path(&source_path)?;
+        if let Some(out_path) = args.out {
+            let out_path = redirect_finance_output(out_path);
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let json =
+                serde_json::to_string_pretty(&resp).context("serialize pub-api response")?;
+            std::fs::write(&out_path, &json).context("write --out")?;
+            println!(
+                "{{\"ok\":true,\"path\":{}}}",
+                serde_json::to_string(&out_path.display().to_string()).unwrap_or_default()
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&resp).context("serialize pub-api response")?
+            );
+        }
+        return Ok(());
     }
 
     let resp = if source_path.is_file() {

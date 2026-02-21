@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "eli": {
+      "command": "eli",
+      "args": ["mcp"]
+    }
+  }
+}
