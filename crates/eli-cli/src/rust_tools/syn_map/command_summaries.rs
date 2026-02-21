@@ -644,6 +644,29 @@ fn sync_summary_parts(value: &serde_json::Value) -> Vec<String> {
             out.push(format!("extreme_prob_volume_share_pct={v_pct:.2}"));
         }
     }
+    if let Some(delta) = map.get("delta").and_then(|v| v.as_object()) {
+        if let Some(n) = delta.get("changed_markets").and_then(|v| v.as_i64()) {
+            out.push(format!("delta_changed_markets={n}"));
+        }
+        if let Some(n) = delta.get("new_markets").and_then(|v| v.as_i64()) {
+            out.push(format!("delta_new_markets={n}"));
+        }
+        if let Some(n) = delta.get("removed_markets").and_then(|v| v.as_i64()) {
+            out.push(format!("delta_removed_markets={n}"));
+        }
+        if let Some(arr) = delta
+            .get("top_probability_moves")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+        {
+            let ticker = arr.get("ticker").and_then(|v| v.as_str()).unwrap_or("?");
+            let pp = arr
+                .get("probability_delta_pct_points")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            out.push(format!("delta_top_prob_move={ticker}:{pp:+.2}pp"));
+        }
+    }
     out
 }
 
@@ -730,4 +753,3 @@ fn domain_of(url: &str) -> String {
     }
     s.split('/').next().unwrap_or(s).to_string()
 }
-

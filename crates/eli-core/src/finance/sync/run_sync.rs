@@ -1,10 +1,14 @@
 use super::super::providers::{sync_kalshi_events, sync_polymarket_events};
 use super::super::{
     default_odds_field_semantics, OddsListedEvent, OddsListedMarket, OddsSyncRequest,
-    OddsSyncResponse, OddsSyncSourceResult, RateLimiter,
+    OddsSyncResponse, OddsSyncSourceDelta, OddsSyncSourceResult, RateLimiter,
 };
 use super::analysis::{build_sync_analysis, build_sync_source_analytics, SyncAnalysisInput};
 use super::csv_cache_writer::{merge_markets_csv, write_markets_csv};
+use super::delta::{
+    build_delta_index, build_overall_delta, build_source_delta, load_sync_state, write_delta_index,
+    write_sync_state,
+};
 use crate::Result;
 use chrono::Utc;
 use std::path::PathBuf;
@@ -17,8 +21,13 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
             .map(|d| d.cache_dir().join("odds"))
             .unwrap_or_else(|| std::env::temp_dir().join("eli-odds-cache"))
     });
+    let sync_state_path = cache_dir.join("sync_state.json");
+    let sync_delta_index_path = cache_dir.join("sync_last_delta.json");
+    let mut sync_state = load_sync_state(&sync_state_path);
+    let previous_sync_at = sync_state.last_sync_at;
+    let current_sync_at = Utc::now();
 
-    let max_pages = req.max_pages.unwrap_or(10);
+    let max_pages = req.max_pages.unwrap_or(10).max(1);
 
     let sources = req
         .sources
@@ -32,6 +41,8 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
     let mut source_results = Vec::new();
     let mut csv_paths = Vec::new();
     let mut analysis_inputs: Vec<SyncAnalysisInput> = Vec::new();
+    let mut source_deltas: Vec<OddsSyncSourceDelta> = Vec::new();
+    let mut market_deltas = Vec::new();
 
     struct SourceSyncPayload {
         result: OddsSyncSourceResult,
@@ -61,6 +72,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                                 csv_path: csv_path.map(|p| p.to_string_lossy().to_string()),
                                 analytics,
                                 coverage: Some(coverage),
+                                delta: None,
                             },
                             events,
                             markets,
@@ -79,6 +91,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                             csv_path: None,
                             analytics: None,
                             coverage: None,
+                            delta: None,
                         },
                         events: Vec::new(),
                         markets: Vec::new(),
@@ -109,6 +122,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                                 csv_path: csv_path.map(|p| p.to_string_lossy().to_string()),
                                 analytics,
                                 coverage: Some(coverage),
+                                delta: None,
                             },
                             events,
                             markets,
@@ -127,6 +141,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                             csv_path: None,
                             analytics: None,
                             coverage: None,
+                            delta: None,
                         },
                         events: Vec::new(),
                         markets: Vec::new(),
@@ -138,26 +153,54 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         }
     );
 
-    if let Some(payload) = kalshi_result {
+    if let Some(mut payload) = kalshi_result {
         if let Some(ref p) = payload.result.csv_path {
             csv_paths.push(PathBuf::from(p));
         }
         if payload.result.ok {
+            let source = payload.result.source.clone();
+            let delta_build = build_source_delta(
+                &source,
+                &payload.markets,
+                sync_state.sources.get(&source),
+                current_sync_at,
+            );
+            log_source_delta_preview(&delta_build.source_delta);
+            payload.result.delta = Some(delta_build.source_delta.clone());
+            source_deltas.push(delta_build.source_delta);
+            market_deltas.extend(delta_build.market_deltas.into_iter());
+            sync_state
+                .sources
+                .insert(source.clone(), delta_build.next_state);
             analysis_inputs.push(SyncAnalysisInput {
-                source: payload.result.source.clone(),
+                source,
                 events: payload.events,
                 markets: payload.markets,
             });
         }
         source_results.push(payload.result);
     }
-    if let Some(payload) = poly_result {
+    if let Some(mut payload) = poly_result {
         if let Some(ref p) = payload.result.csv_path {
             csv_paths.push(PathBuf::from(p));
         }
         if payload.result.ok {
+            let source = payload.result.source.clone();
+            let delta_build = build_source_delta(
+                &source,
+                &payload.markets,
+                sync_state.sources.get(&source),
+                current_sync_at,
+            );
+            log_source_delta_preview(&delta_build.source_delta);
+            payload.result.delta = Some(delta_build.source_delta.clone());
+            source_deltas.push(delta_build.source_delta);
+            market_deltas.extend(delta_build.market_deltas.into_iter());
+            sync_state
+                .sources
+                .insert(source.clone(), delta_build.next_state);
             analysis_inputs.push(SyncAnalysisInput {
-                source: payload.result.source.clone(),
+                source,
                 events: payload.events,
                 markets: payload.markets,
             });
@@ -240,14 +283,110 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
     } else {
         Some(build_sync_analysis(&analysis_inputs))
     };
+    let delta = if source_deltas.is_empty() {
+        None
+    } else {
+        Some(build_overall_delta(
+            previous_sync_at,
+            current_sync_at,
+            &source_deltas,
+            &market_deltas,
+        ))
+    };
+    if let Some(ref summary) = delta {
+        eprintln!(
+            "[sync-delta] overall: previous_markets={} current_markets={} changed={} unchanged={} new={} removed={}",
+            summary.previous_markets,
+            summary.current_markets,
+            summary.changed_markets,
+            summary.unchanged_markets,
+            summary.new_markets,
+            summary.removed_markets
+        );
+    }
+
+    let mut persisted_sync_state_path = None;
+    let mut persisted_delta_index_path = None;
+    if !source_deltas.is_empty() {
+        sync_state.last_sync_at = Some(current_sync_at);
+        match write_sync_state(&sync_state_path, &sync_state) {
+            Ok(()) => {
+                persisted_sync_state_path = Some(sync_state_path.to_string_lossy().to_string());
+            }
+            Err(e) => {
+                eprintln!("[sync-delta] failed to persist sync state: {e}");
+            }
+        }
+
+        if let Some(ref summary) = delta {
+            let delta_index = build_delta_index(summary, &market_deltas);
+            match write_delta_index(&sync_delta_index_path, &delta_index) {
+                Ok(()) => {
+                    persisted_delta_index_path =
+                        Some(sync_delta_index_path.to_string_lossy().to_string());
+                }
+                Err(e) => {
+                    eprintln!("[sync-delta] failed to persist sync delta index: {e}");
+                }
+            }
+        }
+    }
 
     Ok(OddsSyncResponse {
-        generated_at: Utc::now(),
+        generated_at: current_sync_at,
         sources: source_results,
         total_events,
         total_markets,
         merged_csv_path: merged_path,
         analysis,
+        delta,
+        sync_state_path: persisted_sync_state_path,
+        sync_delta_index_path: persisted_delta_index_path,
         field_semantics: default_odds_field_semantics(),
     })
+}
+
+fn log_source_delta_preview(delta: &OddsSyncSourceDelta) {
+    eprintln!(
+        "[sync-delta] {}: previous={} current={} changed={} unchanged={} new={} removed={}",
+        delta.source,
+        delta.previous_markets,
+        delta.current_markets,
+        delta.changed_markets,
+        delta.unchanged_markets,
+        delta.new_markets,
+        delta.removed_markets
+    );
+    if !delta.top_probability_moves.is_empty() {
+        let preview = delta
+            .top_probability_moves
+            .iter()
+            .take(3)
+            .map(|m| {
+                format!(
+                    "{} {:+.2}pp",
+                    m.ticker,
+                    m.probability_delta_pct_points.unwrap_or(0.0)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "[sync-delta] {} top_probability_moves: {preview}",
+            delta.source
+        );
+    }
+    if !delta.top_volume_moves.is_empty() {
+        let preview = delta
+            .top_volume_moves
+            .iter()
+            .take(3)
+            .map(|m| format!("{} {:+}", m.ticker, m.volume_delta.unwrap_or(0)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "[sync-delta] {} top_volume_moves_cents: {preview}",
+            delta.source
+        );
+    }
 }
