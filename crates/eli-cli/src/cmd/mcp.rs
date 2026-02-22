@@ -314,6 +314,10 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
                         "type": "integer",
                         "description": "Optional page budget per source (default: 10)"
                     },
+                    "kalshi_backfill_profile": {
+                        "type": "string",
+                        "description": "Kalshi backfill profile: fast|balanced|full (default: balanced)"
+                    },
                     "strict": {
                         "type": "boolean",
                         "description": "Fail when coverage checks are incomplete"
@@ -530,6 +534,10 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
                     "major": {
                         "type": "boolean",
                         "description": "Macro only: keep just major US releases (CPI, PCE, GDP, jobs, FOMC, claims)"
+                    },
+                    "macro_profile": {
+                        "type": "string",
+                        "description": "Macro noise profile: broad | market | major (default: market)"
                     }
                 }
             }
@@ -851,6 +859,9 @@ fn mcp_build_cli_args(
             if let Some(max_pages) = args.get("max_pages").and_then(|n| n.as_u64()) {
                 v.extend([s("--max-pages"), max_pages.to_string()]);
             }
+            if let Some(profile) = args.get("kalshi_backfill_profile").and_then(|s| s.as_str()) {
+                v.extend([s("--kalshi-backfill-profile"), s(profile)]);
+            }
             if args.get("strict").and_then(|b| b.as_bool()).unwrap_or(false) {
                 v.push(s("--strict"));
             }
@@ -992,6 +1003,8 @@ fn mcp_build_cli_args(
                 .and_then(|k| k.as_str())
                 .unwrap_or("macro");
             v.extend([s("--kind"), s(kind)]);
+            let profile_arg = args.get("macro_profile").and_then(|p| p.as_str());
+            let mut macro_profile = profile_arg.unwrap_or("market").to_string();
             if let Some(date) = args.get("date").and_then(|d| d.as_str()) {
                 v.extend([s("--date"), s(date)]);
             } else {
@@ -1017,7 +1030,11 @@ fn mcp_build_cli_args(
             );
             if major {
                 v.push(s("--major"));
+                if profile_arg.is_none() {
+                    macro_profile = "major".to_string();
+                }
             }
+            v.extend([s("--macro-profile"), macro_profile]);
             Ok(v)
         }
         "finance_dashboard" => {

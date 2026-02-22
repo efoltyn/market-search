@@ -1,6 +1,7 @@
 async fn fetch_schedule_window(
     client: &reqwest::Client,
     kind: ScheduleKind,
+    macro_profile: ScheduleMacroProfile,
     start_date: chrono::NaiveDate,
     end_date: chrono::NaiveDate,
     tickers: &BTreeSet<String>,
@@ -124,6 +125,7 @@ async fn fetch_schedule_window(
     Ok(ScheduleResponse {
         generated_at: Utc::now(),
         kind,
+        macro_profile,
         start_date: start_date.to_string(),
         end_date: end_date.to_string(),
         earnings,

@@ -29,6 +29,27 @@ fn is_major_us_macro_title(title: &str) -> bool {
     include.iter().any(|k| t.contains(k)) && !exclude.iter().any(|k| t.contains(k))
 }
 
+fn is_low_signal_macro_title(title: &str) -> bool {
+    let t = title.to_ascii_lowercase();
+    let low_signal = [
+        "coinbase cryptocurrencies",
+        "ice bofa indices",
+        "nasdaq daily index data",
+        "sofr averages and index data",
+        "secured overnight financing rate data",
+        "overnight bank funding rate data",
+        "temporary open market operations",
+        "tri-party general collateral rate data",
+        "standard & poors",
+        "recession indicators series",
+        "interest rate spreads",
+        "key ecb interest rates",
+        "historical overnight ameribor unsecured interest rate",
+        "h.15 selected interest rates",
+    ];
+    low_signal.iter().any(|k| t.contains(k))
+}
+
 fn compact_schedule_warnings(warnings: Vec<String>) -> Vec<String> {
     if warnings.is_empty() {
         return warnings;
@@ -99,4 +120,3 @@ fn compact_schedule_warnings(warnings: Vec<String>) -> Vec<String> {
     }
     out
 }
-

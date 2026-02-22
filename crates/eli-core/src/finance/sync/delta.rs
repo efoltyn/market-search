@@ -1,11 +1,12 @@
 use super::super::{
-    OddsListedMarket, OddsSyncDeltaIndex, OddsSyncDeltaSummary, OddsSyncMarketDelta,
-    OddsSyncSourceDelta,
+    OddsListedMarket, OddsSyncBaselineQuality, OddsSyncDeltaIndex, OddsSyncDeltaSummary,
+    OddsSyncMarketDelta, OddsSyncSourceBaseline, OddsSyncSourceDelta,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::path::Path;
 
 const TOP_MOVERS_LIMIT: usize = 10;
@@ -22,8 +23,27 @@ pub(crate) struct OddsSyncState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct OddsSyncSourceState {
     pub(crate) synced_at: DateTime<Utc>,
+    #[serde(default)]
+    pub(crate) baseline_quality: SourceBaselineQuality,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) baseline_quality_reason: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub(crate) markets: HashMap<String, OddsSyncMarketState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SourceBaselineQuality {
+    Trusted,
+    Untrusted,
+    #[default]
+    Unknown,
+}
+
+impl SourceBaselineQuality {
+    pub(crate) fn is_trusted(&self) -> bool {
+        matches!(self, Self::Trusted)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,9 +92,7 @@ pub(crate) fn write_sync_state(path: &Path, state: &OddsSyncState) -> crate::Res
     }
     let raw = serde_json::to_string_pretty(state)
         .map_err(|e| crate::Error::Other(format!("serialize sync state: {e}")))?;
-    std::fs::write(path, raw)
-        .map_err(|e| crate::Error::Other(format!("write sync state {}: {e}", path.display())))?;
-    Ok(())
+    write_json_atomic(path, raw.as_bytes(), "sync state")
 }
 
 pub(crate) fn write_delta_index(path: &Path, index: &OddsSyncDeltaIndex) -> crate::Result<()> {
@@ -88,9 +106,7 @@ pub(crate) fn write_delta_index(path: &Path, index: &OddsSyncDeltaIndex) -> crat
     }
     let raw = serde_json::to_string_pretty(index)
         .map_err(|e| crate::Error::Other(format!("serialize delta index: {e}")))?;
-    std::fs::write(path, raw)
-        .map_err(|e| crate::Error::Other(format!("write delta index {}: {e}", path.display())))?;
-    Ok(())
+    write_json_atomic(path, raw.as_bytes(), "delta index")
 }
 
 pub(crate) fn build_source_delta(
@@ -206,6 +222,9 @@ pub(crate) fn build_source_delta(
         yes_price_changed_markets,
         volume_changed_markets,
         status_changed_markets,
+        baseline_quality: OddsSyncBaselineQuality::Trusted,
+        baseline_reset_applied: false,
+        baseline_reset_reason: None,
         top_probability_moves: top_probability_moves(&market_deltas, TOP_MOVERS_LIMIT),
         top_yes_price_moves: top_yes_price_moves(&market_deltas, TOP_MOVERS_LIMIT),
         top_volume_moves: top_volume_moves(&market_deltas, TOP_MOVERS_LIMIT),
@@ -213,6 +232,8 @@ pub(crate) fn build_source_delta(
 
     let next_state = OddsSyncSourceState {
         synced_at: current_sync_at,
+        baseline_quality: SourceBaselineQuality::Trusted,
+        baseline_quality_reason: None,
         markets: next_state_markets,
     };
 
@@ -221,6 +242,31 @@ pub(crate) fn build_source_delta(
         market_deltas,
         next_state,
     }
+}
+
+pub(crate) fn apply_source_delta_baseline_reset(
+    source_delta: &mut OddsSyncSourceDelta,
+    market_deltas: &mut Vec<OddsSyncMarketDelta>,
+    previous_markets: usize,
+    reason: Option<String>,
+) {
+    source_delta.previous_markets = previous_markets;
+    source_delta.compared_markets = 0;
+    source_delta.new_markets = 0;
+    source_delta.removed_markets = 0;
+    source_delta.changed_markets = 0;
+    source_delta.unchanged_markets = source_delta.current_markets;
+    source_delta.probability_changed_markets = 0;
+    source_delta.yes_price_changed_markets = 0;
+    source_delta.volume_changed_markets = 0;
+    source_delta.status_changed_markets = 0;
+    source_delta.top_probability_moves.clear();
+    source_delta.top_yes_price_moves.clear();
+    source_delta.top_volume_moves.clear();
+    source_delta.baseline_quality = OddsSyncBaselineQuality::Reset;
+    source_delta.baseline_reset_applied = true;
+    source_delta.baseline_reset_reason = reason;
+    market_deltas.clear();
 }
 
 pub(crate) fn build_overall_delta(
@@ -269,6 +315,7 @@ pub(crate) fn build_overall_delta(
 
 pub(crate) fn build_delta_index(
     summary: &OddsSyncDeltaSummary,
+    source_deltas: &[OddsSyncSourceDelta],
     market_deltas: &[OddsSyncMarketDelta],
 ) -> OddsSyncDeltaIndex {
     let mut market_deltas_map: BTreeMap<String, OddsSyncMarketDelta> = BTreeMap::new();
@@ -278,15 +325,77 @@ pub(crate) fn build_delta_index(
             delta.clone(),
         );
     }
+    let mut source_baselines: BTreeMap<String, OddsSyncSourceBaseline> = BTreeMap::new();
+    for source_delta in source_deltas {
+        source_baselines.insert(
+            source_delta.source.clone(),
+            OddsSyncSourceBaseline {
+                baseline_quality: source_delta.baseline_quality.clone(),
+                baseline_reset_applied: source_delta.baseline_reset_applied,
+                baseline_reset_reason: source_delta.baseline_reset_reason.clone(),
+            },
+        );
+    }
     OddsSyncDeltaIndex {
         previous_sync_at: summary.previous_sync_at,
         current_sync_at: summary.current_sync_at,
         changed_markets: summary.changed_markets,
         market_deltas: market_deltas_map,
+        source_baselines,
         top_probability_moves: summary.top_probability_moves.clone(),
         top_yes_price_moves: summary.top_yes_price_moves.clone(),
         top_volume_moves: summary.top_volume_moves.clone(),
     }
+}
+
+fn write_json_atomic(path: &Path, bytes: &[u8], label: &str) -> crate::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::Error::Other(format!(
+                "create {label} directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("sync_state.json");
+    let tmp_name = format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    );
+    let tmp_path = path.with_file_name(tmp_name);
+    let mut tmp_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp_path)
+        .map_err(|e| {
+            crate::Error::Other(format!("open temp {label} {}: {e}", tmp_path.display()))
+        })?;
+    tmp_file.write_all(bytes).map_err(|e| {
+        crate::Error::Other(format!("write temp {label} {}: {e}", tmp_path.display()))
+    })?;
+    tmp_file.sync_all().map_err(|e| {
+        crate::Error::Other(format!("fsync temp {label} {}: {e}", tmp_path.display()))
+    })?;
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        crate::Error::Other(format!(
+            "atomic rename {label} {} -> {}: {e}",
+            tmp_path.display(),
+            path.display()
+        ))
+    })?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir_file) = std::fs::File::open(parent) {
+            let _ = dir_file.sync_all();
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -503,6 +612,8 @@ mod tests {
         let now = Utc::now();
         let previous_state = OddsSyncSourceState {
             synced_at: now,
+            baseline_quality: SourceBaselineQuality::Trusted,
+            baseline_quality_reason: None,
             markets: HashMap::from([
                 (
                     "A".to_string(),

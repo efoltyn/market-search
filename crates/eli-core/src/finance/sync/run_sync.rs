@@ -1,13 +1,14 @@
 use super::super::providers::{sync_kalshi_events, sync_polymarket_events};
 use super::super::{
-    default_odds_field_semantics, OddsListedEvent, OddsListedMarket, OddsSyncRequest,
-    OddsSyncResponse, OddsSyncSourceDelta, OddsSyncSourceResult, RateLimiter,
+    default_odds_field_semantics, OddsListedEvent, OddsListedMarket, OddsSyncBaselineQuality,
+    OddsSyncCoverage, OddsSyncRequest, OddsSyncResponse, OddsSyncSourceDelta, OddsSyncSourceResult,
+    OddsSyncStatus, RateLimiter,
 };
 use super::analysis::{build_sync_analysis, build_sync_source_analytics, SyncAnalysisInput};
 use super::csv_cache_writer::{merge_markets_csv, write_markets_csv};
 use super::delta::{
-    build_delta_index, build_overall_delta, build_source_delta, load_sync_state, write_delta_index,
-    write_sync_state,
+    apply_source_delta_baseline_reset, build_delta_index, build_overall_delta, build_source_delta,
+    load_sync_state, write_delta_index, write_sync_state, SourceBaselineQuality,
 };
 use crate::Result;
 use chrono::Utc;
@@ -34,6 +35,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         .unwrap_or_else(|| vec!["kalshi".to_string(), "polymarket".to_string()]);
     let do_kalshi = sources.iter().any(|s| s.eq_ignore_ascii_case("kalshi"));
     let do_polymarket = sources.iter().any(|s| s.eq_ignore_ascii_case("polymarket"));
+    let kalshi_backfill_profile = req.kalshi_backfill_profile.clone();
 
     let kalshi_limiter = RateLimiter::new(250, 4000);
     let poly_limiter = RateLimiter::new(200, 4000);
@@ -54,7 +56,8 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         async {
             if do_kalshi {
                 let start = std::time::Instant::now();
-                match sync_kalshi_events(&kalshi_limiter, max_pages).await {
+                match sync_kalshi_events(&kalshi_limiter, max_pages, kalshi_backfill_profile).await
+                {
                     Ok((events, markets, coverage)) => {
                         let duration_ms = start.elapsed().as_millis() as u64;
                         let csv_path = write_markets_csv(&markets, "kalshi", &cache_dir).ok();
@@ -153,52 +156,71 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         }
     );
 
-    if let Some(mut payload) = kalshi_result {
+    for mut payload in [kalshi_result, poly_result].into_iter().flatten() {
         if let Some(ref p) = payload.result.csv_path {
             csv_paths.push(PathBuf::from(p));
         }
         if payload.result.ok {
             let source = payload.result.source.clone();
-            let delta_build = build_source_delta(
-                &source,
-                &payload.markets,
-                sync_state.sources.get(&source),
-                current_sync_at,
-            );
+            let previous_state = sync_state.sources.get(&source);
+            let previous_markets = previous_state.map(|s| s.markets.len()).unwrap_or(0);
+            let previous_is_trusted = previous_state
+                .map(|s| s.baseline_quality.is_trusted() && !s.markets.is_empty())
+                .unwrap_or(false);
+            let trusted_previous = if previous_is_trusted {
+                previous_state
+            } else {
+                None
+            };
+
+            let (current_quality, current_quality_reason) =
+                classify_source_quality(payload.result.coverage.as_ref());
+            let mut reset_reason = None;
+            if !previous_is_trusted {
+                let previous_reason = previous_state
+                    .and_then(|s| s.baseline_quality_reason.clone())
+                    .unwrap_or_else(|| "no trusted baseline available".to_string());
+                reset_reason = Some(format!("previous baseline not trusted: {previous_reason}"));
+            }
+            if !current_quality.is_trusted() {
+                let reason = current_quality_reason
+                    .clone()
+                    .unwrap_or_else(|| "current sync coverage not strict-pass".to_string());
+                reset_reason = Some(reason);
+            }
+
+            let compare_baseline = if reset_reason.is_some() {
+                None
+            } else {
+                trusted_previous
+            };
+            let mut delta_build =
+                build_source_delta(&source, &payload.markets, compare_baseline, current_sync_at);
+            if let Some(reason) = reset_reason {
+                apply_source_delta_baseline_reset(
+                    &mut delta_build.source_delta,
+                    &mut delta_build.market_deltas,
+                    previous_markets,
+                    Some(reason),
+                );
+            } else {
+                delta_build.source_delta.baseline_quality = current_quality.to_public_quality();
+                delta_build.source_delta.baseline_reset_applied = false;
+                delta_build.source_delta.baseline_reset_reason = None;
+            }
             log_source_delta_preview(&delta_build.source_delta);
             payload.result.delta = Some(delta_build.source_delta.clone());
             source_deltas.push(delta_build.source_delta);
             market_deltas.extend(delta_build.market_deltas.into_iter());
-            sync_state
-                .sources
-                .insert(source.clone(), delta_build.next_state);
-            analysis_inputs.push(SyncAnalysisInput {
-                source,
-                events: payload.events,
-                markets: payload.markets,
-            });
-        }
-        source_results.push(payload.result);
-    }
-    if let Some(mut payload) = poly_result {
-        if let Some(ref p) = payload.result.csv_path {
-            csv_paths.push(PathBuf::from(p));
-        }
-        if payload.result.ok {
-            let source = payload.result.source.clone();
-            let delta_build = build_source_delta(
-                &source,
-                &payload.markets,
-                sync_state.sources.get(&source),
-                current_sync_at,
-            );
-            log_source_delta_preview(&delta_build.source_delta);
-            payload.result.delta = Some(delta_build.source_delta.clone());
-            source_deltas.push(delta_build.source_delta);
-            market_deltas.extend(delta_build.market_deltas.into_iter());
-            sync_state
-                .sources
-                .insert(source.clone(), delta_build.next_state);
+            let preserve_existing_trusted = previous_state
+                .map(|s| s.baseline_quality.is_trusted())
+                .unwrap_or(false);
+            if current_quality.is_trusted() || !preserve_existing_trusted {
+                let mut next_state = delta_build.next_state;
+                next_state.baseline_quality = current_quality;
+                next_state.baseline_quality_reason = current_quality_reason.clone();
+                sync_state.sources.insert(source.clone(), next_state);
+            }
             analysis_inputs.push(SyncAnalysisInput {
                 source,
                 events: payload.events,
@@ -278,6 +300,20 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
 
     let total_events: usize = source_results.iter().map(|r| r.events_count).sum();
     let total_markets: usize = source_results.iter().map(|r| r.markets_count).sum();
+    let sync_status = if source_results.is_empty() {
+        OddsSyncStatus::Partial
+    } else if source_results.iter().all(|src| {
+        src.ok
+            && src
+                .coverage
+                .as_ref()
+                .map(|cov| cov.strict_pass)
+                .unwrap_or(false)
+    }) {
+        OddsSyncStatus::Complete
+    } else {
+        OddsSyncStatus::Partial
+    };
     let analysis = if analysis_inputs.is_empty() {
         None
     } else {
@@ -319,7 +355,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         }
 
         if let Some(ref summary) = delta {
-            let delta_index = build_delta_index(summary, &market_deltas);
+            let delta_index = build_delta_index(summary, &source_deltas, &market_deltas);
             match write_delta_index(&sync_delta_index_path, &delta_index) {
                 Ok(()) => {
                     persisted_delta_index_path =
@@ -334,6 +370,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
 
     Ok(OddsSyncResponse {
         generated_at: current_sync_at,
+        sync_status,
         sources: source_results,
         total_events,
         total_markets,
@@ -344,6 +381,40 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         sync_delta_index_path: persisted_delta_index_path,
         field_semantics: default_odds_field_semantics(),
     })
+}
+
+fn classify_source_quality(
+    coverage: Option<&OddsSyncCoverage>,
+) -> (SourceBaselineQuality, Option<String>) {
+    match coverage {
+        Some(cov) if cov.strict_pass => (SourceBaselineQuality::Trusted, None),
+        Some(cov) if !cov.strict_fail_reasons.is_empty() => (
+            SourceBaselineQuality::Untrusted,
+            Some(cov.strict_fail_reasons.join("; ")),
+        ),
+        Some(_) => (
+            SourceBaselineQuality::Untrusted,
+            Some("coverage marked non-strict-pass".to_string()),
+        ),
+        None => (
+            SourceBaselineQuality::Untrusted,
+            Some("coverage diagnostics missing".to_string()),
+        ),
+    }
+}
+
+trait SourceBaselineQualityExt {
+    fn to_public_quality(&self) -> OddsSyncBaselineQuality;
+}
+
+impl SourceBaselineQualityExt for SourceBaselineQuality {
+    fn to_public_quality(&self) -> OddsSyncBaselineQuality {
+        match self {
+            SourceBaselineQuality::Trusted => OddsSyncBaselineQuality::Trusted,
+            SourceBaselineQuality::Untrusted => OddsSyncBaselineQuality::Untrusted,
+            SourceBaselineQuality::Unknown => OddsSyncBaselineQuality::Reset,
+        }
+    }
 }
 
 fn log_source_delta_preview(delta: &OddsSyncSourceDelta) {

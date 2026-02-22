@@ -299,6 +299,7 @@ fn compact_web_search_json(resp: &eli_core::web::WebSearchResponse) -> serde_jso
         "providers": resp.providers,
         "stats": resp.stats,
         "run_delta": resp.run_delta,
+        "run_delta_meta": resp.run_delta_meta,
         "items": items,
         "view": "compact",
     })
@@ -335,6 +336,8 @@ fn compact_web_read_json(
         "blocked_reason": resp.blocked_reason,
         "attempts_count": resp.attempts.len(),
         "failed_attempts": failed_attempts,
+        "content_quality": resp.content_quality,
+        "quality_notes": resp.quality_notes,
         "fetched_at": resp.fetched_at,
         "view": "compact",
     })
@@ -1051,4 +1054,85 @@ fn schema_pattern_summary_parts(value: &serde_json::Value) -> Vec<String> {
     let path_count = format!("schema_paths={}", meta.path_index.len());
     let nullable = format!("nullable_fields={}", meta.vitals.nullable_paths);
     vec![root, path_count, nullable]
+}
+
+#[cfg(test)]
+mod web_cmd_tests {
+    use super::*;
+    use chrono::Utc;
+    use eli_core::web::{
+        WebContentQuality, WebReadFetchStatus, WebSearchMode, WebSearchResponse, WebSearchRunDelta,
+        WebSearchRunDeltaMeta, WebSearchStats,
+    };
+
+    #[test]
+    fn compact_web_search_includes_run_delta_meta() {
+        let resp = WebSearchResponse {
+            query: "fed meeting".to_string(),
+            mode: WebSearchMode::News,
+            generated_at: Utc::now(),
+            providers: Vec::new(),
+            items: Vec::new(),
+            stats: WebSearchStats {
+                total_raw_hits: 0,
+                deduped_hits: 0,
+                after_domain_filter: 0,
+                after_time_filter: 0,
+                returned_items: 0,
+                probed_items: 0,
+                warnings: vec!["run delta baseline reset because query/filters changed for this track key".to_string()],
+            },
+            run_delta: Some(WebSearchRunDelta {
+                new_urls: Vec::new(),
+                dropped_urls: Vec::new(),
+                rank_up: Vec::new(),
+                rank_down: Vec::new(),
+                unchanged: 0,
+            }),
+            run_delta_meta: Some(WebSearchRunDeltaMeta {
+                track_key: Some("fed-weekly".to_string()),
+                baseline_reset_applied: true,
+                previous_fingerprint: Some("abc".to_string()),
+                current_fingerprint: "def".to_string(),
+                reason: Some("request_fingerprint_changed".to_string()),
+            }),
+        };
+
+        let compact = compact_web_search_json(&resp);
+        assert_eq!(
+            compact
+                .get("run_delta_meta")
+                .and_then(|v| v.get("baseline_reset_applied"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn compact_web_read_includes_quality_fields() {
+        let resp = eli_core::web::WebReadResponse {
+            url: "https://example.com".to_string(),
+            final_url: Some("https://example.com/article".to_string()),
+            title: "Example".to_string(),
+            text: "hello world".to_string(),
+            fetch_status: WebReadFetchStatus::Partial,
+            blocked_reason: None,
+            attempts: Vec::new(),
+            content_quality: WebContentQuality::Low,
+            quality_notes: vec!["high_css_ratio".to_string()],
+            fetched_at: Utc::now(),
+        };
+        let compact = compact_web_read_json(&resp, 200);
+        assert_eq!(
+            compact.get("content_quality").and_then(|v| v.as_str()),
+            Some("low")
+        );
+        assert_eq!(
+            compact
+                .get("quality_notes")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
+    }
 }

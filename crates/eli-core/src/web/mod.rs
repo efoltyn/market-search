@@ -36,6 +36,14 @@ impl WebReadFetchStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebContentQuality {
+    High,
+    Medium,
+    Low,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebReadAttempt {
     pub attempt: usize,
@@ -64,6 +72,9 @@ pub struct WebReadResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
     pub attempts: Vec<WebReadAttempt>,
+    pub content_quality: WebContentQuality,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quality_notes: Vec<String>,
     pub fetched_at: DateTime<Utc>,
 }
 
@@ -231,6 +242,18 @@ pub struct WebSearchRunDelta {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebSearchRunDeltaMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_key: Option<String>,
+    pub baseline_reset_applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_fingerprint: Option<String>,
+    pub current_fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebSearchResponse {
     pub query: String,
     pub mode: WebSearchMode,
@@ -240,4 +263,6 @@ pub struct WebSearchResponse {
     pub stats: WebSearchStats,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_delta: Option<WebSearchRunDelta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_delta_meta: Option<WebSearchRunDeltaMeta>,
 }

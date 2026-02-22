@@ -1022,6 +1022,20 @@ impl Default for ScheduleKind {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScheduleMacroProfile {
+    Broad,
+    Market,
+    Major,
+}
+
+impl Default for ScheduleMacroProfile {
+    fn default() -> Self {
+        Self::Market
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScheduleRequest {
     pub kind: ScheduleKind,
@@ -1031,6 +1045,8 @@ pub struct ScheduleRequest {
     pub tickers: Vec<String>,
     #[serde(default)]
     pub major_only: bool,
+    #[serde(default)]
+    pub macro_profile: ScheduleMacroProfile,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1078,6 +1094,7 @@ pub struct MacroScheduleDay {
 pub struct ScheduleResponse {
     pub generated_at: DateTime<Utc>,
     pub kind: ScheduleKind,
+    pub macro_profile: ScheduleMacroProfile,
     pub start_date: String,
     pub end_date: String,
     pub earnings: Vec<EarningsScheduleEvent>,
@@ -1564,7 +1581,44 @@ pub struct OddsSyncRequest {
     #[serde(default)]
     pub max_pages: Option<usize>,
     #[serde(default)]
+    pub kalshi_backfill_profile: OddsSyncBackfillProfile,
+    #[serde(default)]
     pub strict: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OddsSyncBackfillProfile {
+    Fast,
+    Balanced,
+    Full,
+}
+
+impl Default for OddsSyncBackfillProfile {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OddsSyncBaselineQuality {
+    Trusted,
+    Reset,
+    Untrusted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OddsSyncStatus {
+    Complete,
+    Partial,
+}
+
+impl Default for OddsSyncStatus {
+    fn default() -> Self {
+        Self::Complete
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1698,6 +1752,11 @@ pub struct OddsSyncSourceDelta {
     pub yes_price_changed_markets: usize,
     pub volume_changed_markets: usize,
     pub status_changed_markets: usize,
+    pub baseline_quality: OddsSyncBaselineQuality,
+    #[serde(default)]
+    pub baseline_reset_applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_reset_reason: Option<String>,
     pub top_probability_moves: Vec<OddsSyncMarketDelta>,
     pub top_yes_price_moves: Vec<OddsSyncMarketDelta>,
     pub top_volume_moves: Vec<OddsSyncMarketDelta>,
@@ -1732,9 +1791,20 @@ pub struct OddsSyncDeltaIndex {
     pub changed_markets: usize,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub market_deltas: std::collections::BTreeMap<String, OddsSyncMarketDelta>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub source_baselines: std::collections::BTreeMap<String, OddsSyncSourceBaseline>,
     pub top_probability_moves: Vec<OddsSyncMarketDelta>,
     pub top_yes_price_moves: Vec<OddsSyncMarketDelta>,
     pub top_volume_moves: Vec<OddsSyncMarketDelta>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OddsSyncSourceBaseline {
+    pub baseline_quality: OddsSyncBaselineQuality,
+    #[serde(default)]
+    pub baseline_reset_applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_reset_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1764,6 +1834,8 @@ pub struct OddsSyncAnalysis {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OddsSyncResponse {
     pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub sync_status: OddsSyncStatus,
     pub sources: Vec<OddsSyncSourceResult>,
     pub total_events: usize,
     pub total_markets: usize,
