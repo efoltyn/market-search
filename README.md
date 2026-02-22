@@ -1,8 +1,8 @@
 # eli
 
-Native data tools for AI agents. Stock prices, macro indicators, prediction markets, options chains, SEC filings, web scraping — all as a single Rust binary returning structured JSON.
+Agent-native market and web ingestion tools as one Rust binary.
 
-**The agent is Claude Code, Codex, Gemini CLI, or any AI agent. The data is Eli.**
+Eli gives agents structured live data from public APIs (prices, macro, prediction markets, filings, calendars, web ingestion) so they can reason from state, not just narrative search output.
 
 ---
 
@@ -16,30 +16,18 @@ cargo install eli
 
 Installs `eli` to `~/.cargo/bin/eli`.
 
-For local development from source:
+Local dev install from source:
 
 ```bash
 # From /Users/elifoltyn/Desktop/eli-code/eli
 cargo install --path .
 ```
 
-## Workspace Crates
-
-`eli` is the install target. The workspace also contains internal crates that are published only to satisfy dependency resolution for `eli`:
-
-- [`eli-cli`](./crates/eli-cli/README.md) (internal command/runtime library)
-- [`eli-core`](./crates/eli-core/README.md) (internal tools/finance/web core)
-- [`eli-adapters`](./crates/eli-adapters/README.md) (internal provider adapters)
-- [`eli-finance-types`](./crates/eli-finance-types/README.md) (internal finance contracts)
-- [`eli-screen`](./crates/eli-screen/README.md) (internal screen automation)
-
 ---
 
-## Use as MCP Server (Claude Code, Codex, Gemini CLI, any MCP-compatible agent)
+## MCP Setup
 
-Any AI agent that supports MCP gets eli tools natively — no Bash calls, no parsing CLI output, just structured tool calls.
-
-Add to your project's `.mcp.json`:
+Add to `.mcp.json`:
 
 ```json
 {
@@ -52,73 +40,81 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-Restart your agent. Tools appear natively alongside the agent's built-in tools.
-
-**21 tools exposed:**
-- `finance_macro` — 31 FRED macro indicators in ~2s
-- `finance_snapshot` — price, market cap, daily returns
-- `finance_timeseries` — OHLCV for stocks or FRED series
-- `finance_yield_curve` — US Treasury curve with spreads
-- `finance_rate_path` — implied Fed trajectory from prediction markets
-- `finance_odds` — Kalshi + Polymarket live prices
-- `finance_options` — options chain with IV, put/call ratio, max pain
-- `finance_news` — headlines by ticker and date
-- `finance_prices` — crypto/commodity spot prices (Pyth)
-- `finance_fundamentals` — income statement, balance sheet, cash flow
-- `finance_sync` — bulk sync 22,500 prediction markets to local CSV
-- `finance_search` — ticker/series search
-- `finance_filings` — SEC filings (8-K, 10-K, 10-Q)
-- `finance_schedule` — earnings + macro release calendar
-- `finance_dashboard` — preset aggregate tools (recession, tech_megacap)
-- `web_search` — DuckDuckGo search
-- `web_read` — fetch and extract content from a URL
-- `web_crawl` — crawl a site, extract all pages
-- `web_extract` — extract key facts from URL, file, or text
-- `code_analyze` — parse Rust source: signatures, pub API surface, symbol search
-- `agent_run` — spawn an autonomous eli research worker
+Restart your agent. Eli tools become native MCP tools.
 
 ---
 
-## Use from the CLI
+## Tool Surface
+
+MCP currently exposes **22 tools**:
+
+- Finance: `finance_macro`, `finance_forex`, `finance_snapshot`, `finance_timeseries`, `finance_yield_curve`, `finance_rate_path`, `finance_odds`, `finance_options`, `finance_news`, `finance_prices`, `finance_fundamentals`, `finance_sync`, `finance_search`, `finance_filings`, `finance_schedule`, `finance_dashboard`
+- Web ingestion: `web_search`, `web_read`, `web_crawl`, `web_extract`
+- Code/agent: `code_analyze`, `agent_run`
+
+---
+
+## Positioning
+
+Eli complements built-in websearch in Claude/Codex/Gemini/Cursor/OpenClaw.
+
+- Use websearch for broad discovery and narrative context.
+- Use Eli for structured, reproducible, low-token data ingestion and deltas.
+
+---
+
+## Data Access (No Paid Data Keys Required)
+
+Finance/data tools use public endpoints including:
+- Yahoo Finance
+- FRED
+- Kalshi
+- Polymarket
+- SEC EDGAR
+- Google News RSS
+- Pyth Hermes
+
+No paid market-data subscription is required for normal Eli usage.
+
+---
+
+## CLI Examples
 
 ```bash
-# Financial data
-eli finance snapshot --ticker NVDA,AAPL,MSFT
-eli finance macro
-eli finance options --ticker SPY --summary
-eli finance sync
-eli finance odds --search "recession" --live
-eli finance yield-curve --compare 3mo,1y
+# Financial state
+eli finance snapshot --tickers NVDA,AAPL,SPY
+eli finance timeseries --tickers SPY,UNRATE --range 1y --granularity 1d
+eli finance macro --range 1y
+eli finance forex --range 1y --horizons 1w,1mo,3mo,1y
 
-# Web
-eli web search --query "tariff impact semiconductors" --mode news
-eli web crawl --url https://example.com
+# Prediction markets
+eli finance sync --sources kalshi,polymarket --max-pages 10
+eli finance odds --search "recession" --live --top 10
 
-# Codebase analysis
-eli code src/                        # hotspot ranking
-eli code src/ --pub-api              # complete public API surface
-eli code src/ --find "fetch_snapshot,SnapshotRequest"  # symbol search
+# Web ingestion
+eli web search --query "fed rate decision" --mode news --recency week
+eli web read --url https://example.com/article
+eli web extract --url https://example.com/article --bullets 8
 
-# Multi-agent
-eli agent run --task "Analyze AMD vs INTC correlation"
-eli agent swarm --task "Extract key claims" --input large_doc.md
+# Code analysis
+eli code src/ --pub-api
 ```
 
 ---
 
-## Keys
+## Workspace Crates
 
-```bash
-export OPENROUTER_API_KEY=...
-export OPENAI_API_KEY=...
-export ANTHROPIC_API_KEY=...
-```
+`eli` is the install target. Other workspace crates are internal components published for dependency resolution:
 
-Or set in `~/.config/eli/config.toml`.
+- [`eli-cli`](./crates/eli-cli/README.md)
+- [`eli-core`](./crates/eli-core/README.md)
+- [`eli-adapters`](./crates/eli-adapters/README.md)
+- [`eli-finance-types`](./crates/eli-finance-types/README.md)
+- [`eli-screen`](./crates/eli-screen/README.md)
 
 ---
 
-## Build from source (dev)
+## Build from Source (Dev)
 
 ```bash
 cd eli
