@@ -35,7 +35,7 @@ One tool for hard data. One tool for human context. Your AI connects them.
 ## Install
 
 ```bash
-cargo install eli-cli
+cargo install eli
 ```
 
 Or build from source:

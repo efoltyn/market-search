@@ -26,7 +26,7 @@ eli finance news --ticker NVDA --date 2026-02-05
 
 # Web scraping, search, content extraction
 eli web crawl <url>
-eli web search "query"
+eli web search --query "query" --mode auto
 eli web read <url>
 ```
 
@@ -120,7 +120,7 @@ No LLM tokens burned. No websearch. Direct REST calls.
 | Command | What It Does |
 |---------|-------------|
 | `eli web crawl <url>` | Crawl a site, extract content from all pages |
-| `eli web search "query"` | DuckDuckGo search |
+| `eli web search --query "query" --mode auto` | DuckDuckGo search |
 | `eli web read <url>` | Read and extract content from a URL |
 | `eli web extract` | Extract key facts from content |
 
@@ -210,7 +210,7 @@ This keeps a single build output in `eli/target_local` and refreshes the stable 
 CARGO_HOME=$(pwd)/.cargo_local_local \
 CARGO_TARGET_DIR=$(pwd)/target_local \
 CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
-cargo build -p eli-cli --bin eli
+cargo build -p eli --bin eli
 
 ln -sf $(pwd)/target_local/debug/eli ../bin/eli
 ```
@@ -223,7 +223,7 @@ bin/eli finance macro
 bin/eli finance options --ticker SPY --summary
 bin/eli finance sync
 bin/eli finance news --ticker AAPL --date 2026-02-05
-bin/eli web search "tariff impact on semiconductors"
+bin/eli web search --query "tariff impact on semiconductors" --mode news
 ```
 
 ### 4. Demo: Eli's own chat loop
@@ -387,7 +387,7 @@ eli web crawl --url https://example.com --view raw                   # raw outpu
 ### `eli web search`
 Search the web via DuckDuckGo.
 ```bash
-eli web search "Fed rate decision February 2026"
+eli web search --query "Fed rate decision February 2026" --mode news
 ```
 
 ### `eli web read`

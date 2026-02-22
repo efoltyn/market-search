@@ -3,8 +3,9 @@ name = "eli-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core logic for eli coding agent"
-publish = false
+repository.workspace = true
+description = "Internal core library for the `eli` crate. Use `cargo install eli`."
+readme = "README.md"
 
 [dependencies]
 tokio.workspace = true

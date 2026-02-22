@@ -3,7 +3,9 @@ name = "eli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "financial coding agent"
+readme = "README.md"
 
 [dependencies]
 tokio.workspace = true

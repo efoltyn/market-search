@@ -378,7 +378,7 @@ cd eli
 CARGO_HOME=$(pwd)/.cargo_local_local \
 CARGO_TARGET_DIR=$(pwd)/target_local \
 CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
-cargo build -p eli-cli --bin eli
+cargo build -p eli --bin eli
 
 ln -sf $(pwd)/target_local/debug/eli ../bin/eli
 ```
