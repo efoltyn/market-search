@@ -118,6 +118,47 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
             }
         },
         {
+            "name": "finance_forex",
+            "description": "Broad USD FX basket performance with multi-horizon deltas, event-window shifts, and largest move dates.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "range": {
+                        "type": "string",
+                        "description": "Lookback range (default: 1y)"
+                    },
+                    "granularity": {
+                        "type": "string",
+                        "description": "Candle granularity (default: 1d)"
+                    },
+                    "pairs": {
+                        "type": "string",
+                        "description": "Optional comma-separated Yahoo FX pairs (e.g. EURUSD=X,USDJPY=X)"
+                    },
+                    "groups": {
+                        "type": "string",
+                        "description": "Optional comma-separated groups (majors,g10,em,europe,americas,asia,commodity)"
+                    },
+                    "countries": {
+                        "type": "string",
+                        "description": "Optional comma-separated country tags (US,CA,JP,GB,EU)"
+                    },
+                    "currencies": {
+                        "type": "string",
+                        "description": "Optional comma-separated currency codes (CAD,JPY,MXN)"
+                    },
+                    "include_em": {
+                        "type": "boolean",
+                        "description": "Include selected EM pairs in default basket (default: true)"
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": "Largest daily USD-impact moves to include (default: 12)"
+                    }
+                }
+            }
+        },
+        {
             "name": "finance_snapshot",
             "description": "Point-in-time market snapshot: price, market cap, shares outstanding, daily/trailing returns, relative strength. Works for stocks and ETFs (SPY, QQQ, GLD, etc.).",
             "inputSchema": {
@@ -264,18 +305,75 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
             "description": "Bulk-sync all Kalshi + Polymarket prediction markets (~22,500) to local CSV cache. Takes ~10 seconds. Run once to enable fast finance_odds searches.",
             "inputSchema": {
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "sources": {
+                        "type": "string",
+                        "description": "Optional comma-separated sources: kalshi,polymarket"
+                    },
+                    "max_pages": {
+                        "type": "integer",
+                        "description": "Optional page budget per source (default: 10)"
+                    },
+                    "strict": {
+                        "type": "boolean",
+                        "description": "Fail when coverage checks are incomplete"
+                    }
+                }
             }
         },
         {
             "name": "web_search",
-            "description": "Search the web using DuckDuckGo.",
+            "description": "Smart web ingestion search with deterministic filtering, scoring, read probes, and optional run delta tracking.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
                         "description": "Search query"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "auto|news|finance|research|tech|encyclopedia"
+                    },
+                    "domains": {
+                        "type": "string",
+                        "description": "Optional comma-separated include domains"
+                    },
+                    "exclude_domains": {
+                        "type": "string",
+                        "description": "Optional comma-separated exclude domains"
+                    },
+                    "recency": {
+                        "type": "string",
+                        "description": "day|week|month|year"
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "Earliest publication date (YYYY-MM-DD)"
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "Latest publication date (YYYY-MM-DD)"
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": "Maximum number of ranked results to return"
+                    },
+                    "probe_top": {
+                        "type": "integer",
+                        "description": "Number of top results to read-probe for fetch diagnostics"
+                    },
+                    "max_parallel": {
+                        "type": "integer",
+                        "description": "Maximum parallel provider/probe calls"
+                    },
+                    "track_key": {
+                        "type": "string",
+                        "description": "Optional key to track run-to-run URL/rank deltas"
+                    },
+                    "full": {
+                        "type": "boolean",
+                        "description": "Return full verbose payload (default is compact)"
                     }
                 },
                 "required": ["query"]
@@ -283,16 +381,33 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
         },
         {
             "name": "web_read",
-            "description": "Fetch and extract content from a single URL.",
+            "description": "Fetch and extract content from one or many URLs with structured fetch diagnostics.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "URL to fetch and extract content from"
+                        "description": "Single URL to fetch and extract"
+                    },
+                    "urls": {
+                        "type": "array",
+                        "items": {"type":"string"},
+                        "description": "Optional list of URLs to fetch in batch"
+                    },
+                    "max_parallel": {
+                        "type": "integer",
+                        "description": "Maximum parallel fetches for batch mode"
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Max chars per article text in compact mode"
+                    },
+                    "full": {
+                        "type": "boolean",
+                        "description": "Return full verbose payload (default is compact)"
                     }
                 },
-                "required": ["url"]
+                "required": []
             }
         },
         {
@@ -603,6 +718,34 @@ fn mcp_build_cli_args(
             }
             Ok(v)
         }
+        "finance_forex" => {
+            let mut v = vec![s("finance"), s("forex")];
+            if let Some(range) = args.get("range").and_then(|r| r.as_str()) {
+                v.extend([s("--range"), s(range)]);
+            }
+            if let Some(granularity) = args.get("granularity").and_then(|g| g.as_str()) {
+                v.extend([s("--granularity"), s(granularity)]);
+            }
+            if let Some(pairs) = args.get("pairs").and_then(|p| p.as_str()) {
+                v.extend([s("--pairs"), s(pairs)]);
+            }
+            if let Some(groups) = args.get("groups").and_then(|g| g.as_str()) {
+                v.extend([s("--groups"), s(groups)]);
+            }
+            if let Some(countries) = args.get("countries").and_then(|c| c.as_str()) {
+                v.extend([s("--countries"), s(countries)]);
+            }
+            if let Some(currencies) = args.get("currencies").and_then(|c| c.as_str()) {
+                v.extend([s("--currencies"), s(currencies)]);
+            }
+            if let Some(include_em) = args.get("include_em").and_then(|b| b.as_bool()) {
+                v.extend([s("--include-em"), include_em.to_string()]);
+            }
+            if let Some(top) = args.get("top").and_then(|n| n.as_u64()) {
+                v.extend([s("--top"), top.to_string()]);
+            }
+            Ok(v)
+        }
         "finance_snapshot" => {
             let tickers = args
                 .get("tickers")
@@ -700,20 +843,85 @@ fn mcp_build_cli_args(
                 s(tickers),
             ])
         }
-        "finance_sync" => Ok(vec![s("finance"), s("sync")]),
+        "finance_sync" => {
+            let mut v = vec![s("finance"), s("sync")];
+            if let Some(sources) = args.get("sources").and_then(|s| s.as_str()) {
+                v.extend([s("--sources"), s(sources)]);
+            }
+            if let Some(max_pages) = args.get("max_pages").and_then(|n| n.as_u64()) {
+                v.extend([s("--max-pages"), max_pages.to_string()]);
+            }
+            if args.get("strict").and_then(|b| b.as_bool()).unwrap_or(false) {
+                v.push(s("--strict"));
+            }
+            Ok(v)
+        }
         "web_search" => {
             let query = args
                 .get("query")
                 .and_then(|q| q.as_str())
                 .ok_or_else(|| anyhow::anyhow!("query required"))?;
-            Ok(vec![s("web"), s("search"), s("--query"), s(query)])
+            let mut v = vec![s("web"), s("search"), s("--query"), s(query)];
+            if let Some(mode) = args.get("mode").and_then(|m| m.as_str()) {
+                v.extend([s("--mode"), s(mode)]);
+            }
+            if let Some(domains) = args.get("domains").and_then(|d| d.as_str()) {
+                v.extend([s("--domains"), s(domains)]);
+            }
+            if let Some(exclude) = args.get("exclude_domains").and_then(|d| d.as_str()) {
+                v.extend([s("--exclude-domains"), s(exclude)]);
+            }
+            if let Some(recency) = args.get("recency").and_then(|r| r.as_str()) {
+                v.extend([s("--recency"), s(recency)]);
+            }
+            if let Some(since) = args.get("since").and_then(|d| d.as_str()) {
+                v.extend([s("--since"), s(since)]);
+            }
+            if let Some(until) = args.get("until").and_then(|d| d.as_str()) {
+                v.extend([s("--until"), s(until)]);
+            }
+            if let Some(top) = args.get("top").and_then(|n| n.as_u64()) {
+                v.extend([s("--top"), top.to_string()]);
+            }
+            if let Some(probe_top) = args.get("probe_top").and_then(|n| n.as_u64()) {
+                v.extend([s("--probe-top"), probe_top.to_string()]);
+            }
+            if let Some(max_parallel) = args.get("max_parallel").and_then(|n| n.as_u64()) {
+                v.extend([s("--max-parallel"), max_parallel.to_string()]);
+            }
+            if let Some(track_key) = args.get("track_key").and_then(|k| k.as_str()) {
+                v.extend([s("--track-key"), s(track_key)]);
+            }
+            if args.get("full").and_then(|b| b.as_bool()).unwrap_or(false) {
+                v.push(s("--full"));
+            }
+            Ok(v)
         }
         "web_read" => {
-            let url = args
-                .get("url")
-                .and_then(|u| u.as_str())
-                .ok_or_else(|| anyhow::anyhow!("url required"))?;
-            Ok(vec![s("web"), s("read"), s("--url"), s(url)])
+            let mut v = vec![s("web"), s("read")];
+            if let Some(url) = args.get("url").and_then(|u| u.as_str()) {
+                v.extend([s("--url"), s(url)]);
+            }
+            if let Some(urls) = args.get("urls").and_then(|u| u.as_array()) {
+                for url in urls {
+                    if let Some(url_str) = url.as_str() {
+                        v.extend([s("--url"), s(url_str)]);
+                    }
+                }
+            }
+            if v.len() == 2 {
+                return Err(anyhow::anyhow!("url or urls required"));
+            }
+            if let Some(max_parallel) = args.get("max_parallel").and_then(|n| n.as_u64()) {
+                v.extend([s("--max-parallel"), max_parallel.to_string()]);
+            }
+            if let Some(max_chars) = args.get("max_chars").and_then(|n| n.as_u64()) {
+                v.extend([s("--max-chars"), max_chars.to_string()]);
+            }
+            if args.get("full").and_then(|b| b.as_bool()).unwrap_or(false) {
+                v.push(s("--full"));
+            }
+            Ok(v)
         }
         "web_crawl" => {
             let url = args
@@ -877,4 +1085,79 @@ async fn mcp_run_subprocess(args: Vec<String>) -> anyhow::Result<String> {
     }
 
     Ok(stdout)
+}
+
+#[cfg(test)]
+mod mcp_tool_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_build_cli_args_maps_finance_forex() {
+        let args = serde_json::json!({
+            "range": "6mo",
+            "granularity": "1h",
+            "groups": "majors,em",
+            "top": 20
+        });
+        let built = mcp_build_cli_args("finance_forex", &args).expect("build args");
+        assert_eq!(built[0], "finance");
+        assert_eq!(built[1], "forex");
+        assert!(built.contains(&"--range".to_string()));
+        assert!(built.contains(&"6mo".to_string()));
+        assert!(built.contains(&"--granularity".to_string()));
+        assert!(built.contains(&"1h".to_string()));
+    }
+
+    #[test]
+    fn mcp_build_cli_args_maps_web_search_advanced_filters() {
+        let args = serde_json::json!({
+            "query": "fed decision",
+            "mode": "news",
+            "domains": "reuters.com,bloomberg.com",
+            "exclude_domains": "example.com",
+            "recency": "week",
+            "since": "2026-01-01",
+            "until": "2026-01-31",
+            "top": 10,
+            "probe_top": 3,
+            "max_parallel": 4,
+            "track_key": "fed-weekly",
+            "full": true
+        });
+        let built = mcp_build_cli_args("web_search", &args).expect("build args");
+        assert_eq!(built[0], "web");
+        assert_eq!(built[1], "search");
+        assert!(built.contains(&"--mode".to_string()));
+        assert!(built.contains(&"news".to_string()));
+        assert!(built.contains(&"--domains".to_string()));
+        assert!(built.contains(&"--exclude-domains".to_string()));
+        assert!(built.contains(&"--track-key".to_string()));
+        assert!(built.contains(&"--full".to_string()));
+    }
+
+    #[test]
+    fn mcp_build_cli_args_maps_web_read_single_and_batch() {
+        let single = serde_json::json!({
+            "url": "https://example.com/a"
+        });
+        let built_single = mcp_build_cli_args("web_read", &single).expect("single args");
+        assert_eq!(built_single[0], "web");
+        assert_eq!(built_single[1], "read");
+        assert!(built_single.contains(&"--url".to_string()));
+
+        let batch = serde_json::json!({
+            "urls": ["https://example.com/a", "https://example.com/b"],
+            "max_parallel": 8,
+            "max_chars": 1600,
+            "full": true
+        });
+        let built_batch = mcp_build_cli_args("web_read", &batch).expect("batch args");
+        let url_flag_count = built_batch.iter().filter(|arg| *arg == "--url").count();
+        assert_eq!(url_flag_count, 2);
+        assert!(built_batch.contains(&"--max-parallel".to_string()));
+        assert!(built_batch.contains(&"8".to_string()));
+        assert!(built_batch.contains(&"--max-chars".to_string()));
+        assert!(built_batch.contains(&"1600".to_string()));
+        assert!(built_batch.contains(&"--full".to_string()));
+    }
 }

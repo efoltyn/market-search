@@ -150,6 +150,31 @@ pub fn parse_as_of(raw: &str) -> Result<DateTime<Utc>> {
     ))
 }
 
+pub fn parse_event_at(raw: &str) -> Result<DateTime<Utc>> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(FinanceTypesError::InvalidInput(
+            "empty event-at".to_string(),
+        ));
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    let date = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+        FinanceTypesError::InvalidInput(format!(
+            "invalid event-at '{raw}' (use YYYY-MM-DD or RFC3339)"
+        ))
+    })?;
+    Ok(DateTime::<Utc>::from_naive_utc_and_offset(
+        date.and_hms_opt(0, 0, 0).ok_or_else(|| {
+            FinanceTypesError::InvalidInput(format!("invalid event-at date: '{raw}'"))
+        })?,
+        Utc,
+    ))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeseriesRequest {
     pub tickers: Vec<String>,
@@ -564,6 +589,262 @@ pub struct MacroIndicator {
 pub struct MacroResponse {
     pub generated_at: DateTime<Utc>,
     pub indicators: Vec<MacroIndicator>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexRequest {
+    /// Optional explicit Yahoo FX tickers (e.g. EURUSD=X, USDJPY=X).
+    /// If empty, uses Eli's curated FX basket.
+    #[serde(default)]
+    pub pairs: Vec<String>,
+    /// Optional currency codes to compare against USD (e.g. CAD,JPY,EUR).
+    #[serde(default)]
+    pub currencies: Vec<String>,
+    /// Optional country codes mapped to currencies (e.g. US,CA,JP,GB,EU).
+    #[serde(default)]
+    pub countries: Vec<String>,
+    /// Optional preset groups (majors, g10, em, europe, americas, asia, commodity).
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// Include selected EM USD pairs in the default basket.
+    #[serde(default)]
+    pub include_em: bool,
+    pub range: Span,
+    pub granularity: Span,
+    #[serde(default)]
+    pub as_of: Option<DateTime<Utc>>,
+    /// Optional event timestamp (RFC3339 or YYYY-MM-DD) to run pre/post window analysis.
+    #[serde(default)]
+    pub event_at: Option<DateTime<Utc>>,
+    /// Optional pre/post window around event_at (e.g. 6h,12h,1d,3d).
+    #[serde(default)]
+    pub event_window: Option<Span>,
+    /// Optional historical comparison anchors.
+    #[serde(default)]
+    pub compare_as_of: Vec<DateTime<Utc>>,
+    /// Optional horizon windows for change calculations (e.g. 1d,1w,1mo,3mo,1y).
+    /// If empty, Eli uses defaults.
+    #[serde(default)]
+    pub horizons: Vec<Span>,
+    /// Optional cap on resolved pair count (after filters, before fetch).
+    #[serde(default)]
+    pub max_pairs: Option<usize>,
+    /// Optional number of latest close points to include per pair.
+    #[serde(default)]
+    pub recent_points: Option<usize>,
+    /// Number of largest daily USD-impact moves to include.
+    #[serde(default)]
+    pub top: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexPricePoint {
+    pub t: DateTime<Utc>,
+    pub c: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexPairPerformance {
+    pub ticker: String,
+    pub pair: String,
+    pub base_currency: String,
+    pub quote_currency: String,
+    pub first_observation_at: DateTime<Utc>,
+    pub last_observation_at: DateTime<Utc>,
+    pub observations: usize,
+    pub start_rate: f64,
+    pub end_rate: f64,
+    pub change_pct: f64,
+    /// Positive means USD strengthened vs this pair's non-USD side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usd_change_pct: Option<f64>,
+    /// Change map keyed by horizon label (e.g. "1d", "1w", "1mo").
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub horizon_change_pct: BTreeMap<String, f64>,
+    /// Annualized volatility estimate in percent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annualized_vol_pct: Option<f64>,
+    /// Optional compact tail series for context (latest closes only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub recent_prices: Vec<ForexPricePoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub biggest_daily_drop_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub biggest_daily_drop_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub biggest_daily_rise_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub biggest_daily_rise_date: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexHitEvent {
+    pub ticker: String,
+    pub pair: String,
+    pub date: String,
+    pub daily_change_pct: f64,
+    /// Positive means USD strengthened on that day.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usd_impact_pct: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexPairMove {
+    pub pair: String,
+    pub usd_change_pct: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexDateCluster {
+    pub date: String,
+    pub move_count: usize,
+    pub max_abs_usd_impact_pct: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexEventPairShift {
+    pub pair: String,
+    pub pre_usd_change_pct: f64,
+    pub post_usd_change_pct: f64,
+    pub shift_pct: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexSessionAttribution {
+    pub session: String,
+    pub move_count: usize,
+    pub avg_usd_impact_pct: f64,
+    pub max_abs_usd_impact_pct: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexEventWindowSummary {
+    pub event_at: DateTime<Utc>,
+    pub window: Span,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_usd_strength_score_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_usd_strength_score_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shift_usd_strength_pct: Option<f64>,
+    pub pre_pairs_up: usize,
+    pub pre_pairs_down: usize,
+    pub post_pairs_up: usize,
+    pub post_pairs_down: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub top_pair_shifts: Vec<ForexEventPairShift>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub session_attribution: Vec<ForexSessionAttribution>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexComparisonPoint {
+    pub as_of: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usd_strength_score_pct: Option<f64>,
+    pub usd_pairs_up: usize,
+    pub usd_pairs_down: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strongest_usd_pair: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weakest_usd_pair: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexComparisonDelta {
+    pub as_of: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_usd_strength_pct: Option<f64>,
+    pub delta_usd_pairs_up: i64,
+    pub delta_usd_pairs_down: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexDeltaPairMove {
+    pub pair: String,
+    pub previous_usd_change_pct: f64,
+    pub current_usd_change_pct: f64,
+    pub delta_usd_change_pct: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexDeltaContext {
+    pub previous_as_of: DateTime<Utc>,
+    pub current_as_of: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_synced_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_synced_at: Option<DateTime<Utc>>,
+    pub compared_pairs: usize,
+    pub changed_pairs: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub top_pair_deltas: Vec<ForexDeltaPairMove>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexUsdBenchmark {
+    pub source: String,
+    pub symbol: String,
+    pub as_of: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_pct: Option<f64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub horizon_change_pct: BTreeMap<String, f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexSummary {
+    /// Average USD % change across pairs where USD impact is defined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usd_strength_score_pct: Option<f64>,
+    pub usd_pairs_up: usize,
+    pub usd_pairs_down: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strongest_usd_pair: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weakest_usd_pair: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub top_usd_gainers: Vec<ForexPairMove>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub top_usd_losers: Vec<ForexPairMove>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub hot_dates: Vec<ForexDateCluster>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexSelection {
+    pub requested_groups: Vec<String>,
+    pub requested_countries: Vec<String>,
+    pub requested_currencies: Vec<String>,
+    pub resolved_currencies: Vec<String>,
+    pub resolved_pairs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForexResponse {
+    pub generated_at: DateTime<Utc>,
+    pub as_of: DateTime<Utc>,
+    pub range: Span,
+    pub granularity: Span,
+    pub basket: String,
+    pub pair_count: usize,
+    pub selection: ForexSelection,
+    pub pairs: Vec<ForexPairPerformance>,
+    pub summary: ForexSummary,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub comparisons: Vec<ForexComparisonPoint>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub comparison_deltas: Vec<ForexComparisonDelta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_window: Option<ForexEventWindowSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_context: Option<ForexDeltaContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usd_benchmark: Option<ForexUsdBenchmark>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub biggest_daily_usd_moves: Vec<ForexHitEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
