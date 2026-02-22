@@ -668,6 +668,9 @@ pub struct FinanceScheduleArgs {
     /// Macro-only: keep only major US releases (CPI, PCE, GDP, jobs, FOMC, claims).
     #[arg(long, default_value_t = false)]
     pub major: bool,
+    /// Macro filtering profile: broad | market | major.
+    #[arg(long = "macro-profile", default_value = "market")]
+    pub macro_profile: String,
     /// Output format (json only).
     #[arg(long, default_value = "json")]
     pub format: String,
@@ -899,6 +902,9 @@ struct FinanceOddsArgs {
     /// Options: relevance, volume, delta_prob, delta_yes_price, delta_volume.
     #[arg(long = "sort-by", default_value = "relevance")]
     sort_by: String,
+    /// Query profile: auto | macro | broad.
+    #[arg(long, default_value = "auto")]
+    profile: String,
 
     /// Only include markets that changed since the last sync (requires sync delta index).
     #[arg(long, default_value_t = false)]
@@ -994,6 +1000,10 @@ struct FinanceSyncArgs {
     /// Coverage budget hint per source (default: 10). Eli keeps a high baseline for tagging/filtering.
     #[arg(long, default_value = "10")]
     max_pages: usize,
+
+    /// Kalshi series backfill profile: fast | balanced | full.
+    #[arg(long = "kalshi-backfill-profile", default_value = "balanced")]
+    kalshi_backfill_profile: String,
 
     /// Fail if pagination/coverage checks indicate incomplete source exhaustion.
     #[arg(long)]

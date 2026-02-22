@@ -1,8 +1,8 @@
 use crate::web::providers::{community, finance_ext, papers, read, wiki};
 use crate::web::{
     WebHit, WebProviderAttempt, WebRankShift, WebReadProbeSummary, WebSearchItem, WebSearchMode,
-    WebSearchRecency, WebSearchRequest, WebSearchResponse, WebSearchRunDelta, WebSearchScores,
-    WebSearchStats,
+    WebSearchRecency, WebSearchRequest, WebSearchResponse, WebSearchRunDelta,
+    WebSearchRunDeltaMeta, WebSearchScores, WebSearchStats,
 };
 use crate::{Error, Result};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -284,25 +284,46 @@ pub async fn search_smart(mut req: WebSearchRequest) -> Result<WebSearchResponse
         items.push(candidate.to_item(idx + 1));
     }
 
-    let run_delta = if let Some(track_key) = req.track_key.as_deref() {
+    let (run_delta, run_delta_meta) = if let Some(track_key) = req.track_key.as_deref() {
         let fingerprint = request_fingerprint(&req);
         match load_update_run_delta(track_key, &fingerprint, &items) {
             Ok(outcome) => {
-                if outcome.reset_for_request_change {
+                let delta = if outcome.reset_for_request_change {
                     warnings.push(
                         "run delta baseline reset because query/filters changed for this track key"
                             .to_string(),
                     );
-                }
-                Some(outcome.delta)
+                    finalize_run_delta(outcome.delta, true)
+                } else {
+                    finalize_run_delta(outcome.delta, false)
+                };
+                (
+                    Some(delta),
+                    Some(WebSearchRunDeltaMeta {
+                        track_key: Some(track_key.to_string()),
+                        baseline_reset_applied: outcome.reset_for_request_change,
+                        previous_fingerprint: outcome.previous_fingerprint,
+                        current_fingerprint: outcome.current_fingerprint,
+                        reason: outcome.reset_reason,
+                    }),
+                )
             }
             Err(err) => {
                 warnings.push(format!("run delta tracking failed: {err}"));
-                None
+                (
+                    None,
+                    Some(WebSearchRunDeltaMeta {
+                        track_key: Some(track_key.to_string()),
+                        baseline_reset_applied: false,
+                        previous_fingerprint: None,
+                        current_fingerprint: fingerprint,
+                        reason: Some("tracking_failed".to_string()),
+                    }),
+                )
             }
         }
     } else {
-        None
+        (None, None)
     };
 
     Ok(WebSearchResponse {
@@ -321,6 +342,7 @@ pub async fn search_smart(mut req: WebSearchRequest) -> Result<WebSearchResponse
             warnings,
         },
         run_delta,
+        run_delta_meta,
     })
 }
 
@@ -389,6 +411,11 @@ async fn fetch_duckduckgo(query: &str, recency: Option<WebSearchRecency>) -> Res
         .text()
         .await
         .map_err(|e| Error::Provider(format!("duckduckgo read failed: {e}")))?;
+    if looks_like_ddg_challenge(&html) {
+        return Err(Error::Provider(
+            "duckduckgo fetch blocked: captcha_or_bot_challenge".to_string(),
+        ));
+    }
     let document = Html::parse_document(&html);
     let result_selector = Selector::parse(".result")
         .map_err(|e| Error::Provider(format!("duckduckgo selector parse failed: {e}")))?;
@@ -402,7 +429,12 @@ async fn fetch_duckduckgo(query: &str, recency: Option<WebSearchRecency>) -> Res
         let Some(title_el) = element.select(&title_selector).next() else {
             continue;
         };
-        let title = title_el.text().collect::<Vec<_>>().join("").trim().to_string();
+        let title = title_el
+            .text()
+            .collect::<Vec<_>>()
+            .join("")
+            .trim()
+            .to_string();
         if title.is_empty() {
             continue;
         }
@@ -455,6 +487,15 @@ fn decode_ddg_url(url: &str) -> String {
         return urlencoding::decode(rest).unwrap_or_default().to_string();
     }
     url.to_string()
+}
+
+fn looks_like_ddg_challenge(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    lower.contains("anomaly.js")
+        || lower.contains("anomaly-modal")
+        || lower.contains("challenge-form")
+        || lower.contains("captcha")
+        || lower.contains("are you a robot")
 }
 
 fn normalize_domains(domains: &[String]) -> Vec<String> {
@@ -617,7 +658,10 @@ fn source_trust_score(url: &str, source: &str, provenance: &str) -> f64 {
         "federalreserve.gov",
         "sec.gov",
     ];
-    if high_trust_domains.iter().any(|d| domain_matches(&domain, d)) {
+    if high_trust_domains
+        .iter()
+        .any(|d| domain_matches(&domain, d))
+    {
         return 0.96;
     }
     if domain_matches(&domain, "wikipedia.org") || provenance == "encyclopedic" {
@@ -690,6 +734,9 @@ fn search_runs_path() -> std::path::PathBuf {
 struct RunDeltaOutcome {
     delta: WebSearchRunDelta,
     reset_for_request_change: bool,
+    previous_fingerprint: Option<String>,
+    current_fingerprint: String,
+    reset_reason: Option<String>,
 }
 
 fn request_fingerprint(req: &WebSearchRequest) -> String {
@@ -729,17 +776,27 @@ fn load_update_run_delta(
         .unwrap_or_default();
 
     let current_urls = items.iter().map(|i| i.url.clone()).collect::<Vec<_>>();
-    let (previous_urls, reset_for_request_change) = match state.tracks.get(track_key) {
-        Some(entry)
-            if !entry.request_fingerprint.is_empty()
-                && entry.request_fingerprint != fingerprint =>
-        {
-            (Vec::<String>::new(), true)
-        }
-        Some(entry) => (entry.urls.clone(), false),
-        None => (Vec::<String>::new(), false),
-    };
-    let delta = compute_effective_run_delta(&previous_urls, &current_urls, reset_for_request_change);
+    let (previous_urls, reset_for_request_change, previous_fingerprint) =
+        match state.tracks.get(track_key) {
+            Some(entry)
+                if !entry.request_fingerprint.is_empty()
+                    && entry.request_fingerprint != fingerprint =>
+            {
+                (
+                    Vec::<String>::new(),
+                    true,
+                    Some(entry.request_fingerprint.clone()),
+                )
+            }
+            Some(entry) => (
+                entry.urls.clone(),
+                false,
+                Some(entry.request_fingerprint.clone()),
+            ),
+            None => (Vec::<String>::new(), false, None),
+        };
+    let delta =
+        compute_effective_run_delta(&previous_urls, &current_urls, reset_for_request_change);
 
     state.tracks.insert(
         track_key.to_string(),
@@ -762,17 +819,28 @@ fn load_update_run_delta(
         }
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| Error::Other(format!("create web search cache dir {}: {e}", parent.display())))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            Error::Other(format!(
+                "create web search cache dir {}: {e}",
+                parent.display()
+            ))
+        })?;
     }
     let serialized = serde_json::to_string_pretty(&state)
         .map_err(|e| Error::Other(format!("serialize web search run state: {e}")))?;
-    std::fs::write(&path, serialized)
-        .map_err(|e| Error::Other(format!("write web search run state {}: {e}", path.display())))?;
+    std::fs::write(&path, serialized).map_err(|e| {
+        Error::Other(format!(
+            "write web search run state {}: {e}",
+            path.display()
+        ))
+    })?;
 
     Ok(RunDeltaOutcome {
         delta,
         reset_for_request_change,
+        previous_fingerprint,
+        current_fingerprint: fingerprint.to_string(),
+        reset_reason: reset_for_request_change.then_some("request_fingerprint_changed".to_string()),
     })
 }
 
@@ -784,6 +852,16 @@ fn empty_run_delta() -> WebSearchRunDelta {
         rank_down: Vec::new(),
         unchanged: 0,
     }
+}
+
+fn finalize_run_delta(
+    delta: WebSearchRunDelta,
+    reset_for_request_change: bool,
+) -> WebSearchRunDelta {
+    if reset_for_request_change {
+        return empty_run_delta();
+    }
+    delta
 }
 
 fn compute_effective_run_delta(
@@ -862,7 +940,11 @@ mod tests {
         assert!(domain_passes_filters("www.reuters.com", &include, &[]));
         assert!(domain_passes_filters("reuters.com", &include, &[]));
         assert!(!domain_passes_filters("example.com", &include, &[]));
-        assert!(!domain_passes_filters("sports.reuters.com", &include, &exclude));
+        assert!(!domain_passes_filters(
+            "sports.reuters.com",
+            &include,
+            &exclude
+        ));
     }
 
     #[test]
@@ -974,6 +1056,15 @@ mod tests {
     }
 
     #[test]
+    fn detects_duckduckgo_challenge_pages() {
+        let html = r#"<html><body><form id="challenge-form"></form><div class="anomaly-modal"></div></body></html>"#;
+        assert!(looks_like_ddg_challenge(html));
+        assert!(!looks_like_ddg_challenge(
+            "<html><body><div class='result'>ok</div></body></html>"
+        ));
+    }
+
+    #[test]
     fn effective_run_delta_is_empty_when_reset_is_true() {
         let previous = vec!["https://a.com".to_string()];
         let current = vec!["https://b.com".to_string()];
@@ -983,5 +1074,38 @@ mod tests {
         assert!(delta.rank_up.is_empty());
         assert!(delta.rank_down.is_empty());
         assert_eq!(delta.unchanged, 0);
+    }
+
+    #[test]
+    fn finalize_run_delta_enforces_reset_invariant() {
+        let delta = WebSearchRunDelta {
+            new_urls: vec!["https://x.com".to_string()],
+            dropped_urls: vec!["https://y.com".to_string()],
+            rank_up: vec![WebRankShift {
+                url: "https://x.com".to_string(),
+                from_rank: 2,
+                to_rank: 1,
+            }],
+            rank_down: vec![WebRankShift {
+                url: "https://z.com".to_string(),
+                from_rank: 1,
+                to_rank: 2,
+            }],
+            unchanged: 3,
+        };
+
+        let reset = finalize_run_delta(delta.clone(), true);
+        assert!(reset.new_urls.is_empty());
+        assert!(reset.dropped_urls.is_empty());
+        assert!(reset.rank_up.is_empty());
+        assert!(reset.rank_down.is_empty());
+        assert_eq!(reset.unchanged, 0);
+
+        let kept = finalize_run_delta(delta.clone(), false);
+        assert_eq!(kept.new_urls, delta.new_urls);
+        assert_eq!(kept.dropped_urls, delta.dropped_urls);
+        assert_eq!(kept.rank_up.len(), delta.rank_up.len());
+        assert_eq!(kept.rank_down.len(), delta.rank_down.len());
+        assert_eq!(kept.unchanged, delta.unchanged);
     }
 }

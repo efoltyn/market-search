@@ -1,4 +1,9 @@
 pub async fn fetch_schedule(req: ScheduleRequest) -> Result<ScheduleResponse> {
+    let mut macro_profile = req.macro_profile.clone();
+    if req.major_only {
+        macro_profile = ScheduleMacroProfile::Major;
+    }
+
     let start_date = parse_schedule_date(&req.start_date)?;
     let end_date = parse_schedule_date(&req.end_date)?;
     if end_date < start_date {
@@ -35,8 +40,15 @@ pub async fn fetch_schedule(req: ScheduleRequest) -> Result<ScheduleResponse> {
                 .ok_or_else(|| Error::Provider("date window overflow".to_string()))?,
         );
         let chunk =
-            fetch_schedule_window(&client, req.kind.clone(), chunk_start, chunk_end, &tickers)
-                .await?;
+            fetch_schedule_window(
+                &client,
+                req.kind.clone(),
+                macro_profile.clone(),
+                chunk_start,
+                chunk_end,
+                &tickers,
+            )
+            .await?;
         earnings.extend(chunk.earnings);
         macro_events.extend(chunk.macro_events);
         macro_days.extend(chunk.macro_days);
@@ -50,16 +62,40 @@ pub async fn fetch_schedule(req: ScheduleRequest) -> Result<ScheduleResponse> {
             .ok_or_else(|| Error::Provider("date iteration overflow".to_string()))?;
     }
 
-    // De-dupe noisy repeated macro rows and optionally keep only major US releases.
-    if req.major_only {
-        macro_events.retain(|e| is_major_us_macro_title(&e.title));
-    }
+    // Row quality assertions: keep only usable rows.
+    earnings.retain(|e| {
+        !e.symbol.trim().is_empty()
+            && !e.company_name.trim().is_empty()
+            && !e.company_name.eq_ignore_ascii_case("n/a")
+    });
+    macro_events.retain(|e| !e.title.trim().is_empty());
+
+    // De-dupe noisy repeated macro rows and apply profile filtering.
     {
         let mut seen = BTreeSet::new();
         macro_events.retain(|e| seen.insert((e.date.clone(), e.title.clone())));
     }
     macro_events.sort_by(|a, b| a.date.cmp(&b.date).then(a.title.cmp(&b.title)));
-    if req.major_only {
+    match macro_profile {
+        ScheduleMacroProfile::Broad => {}
+        ScheduleMacroProfile::Major => {
+            macro_events.retain(|e| is_major_us_macro_title(&e.title));
+        }
+        ScheduleMacroProfile::Market => {
+            let mut title_counts: BTreeMap<String, usize> = BTreeMap::new();
+            for e in &macro_events {
+                *title_counts.entry(e.title.clone()).or_insert(0) += 1;
+            }
+            macro_events.retain(|e| {
+                if is_major_us_macro_title(&e.title) {
+                    return true;
+                }
+                let repeated = title_counts.get(&e.title).copied().unwrap_or(0) >= 3;
+                !(repeated && is_low_signal_macro_title(&e.title))
+            });
+        }
+    }
+    if macro_profile == ScheduleMacroProfile::Major {
         let mut last_fomc_date: Option<chrono::NaiveDate> = None;
         macro_events.retain(|e| {
             if e.title != "FOMC Press Release" {
@@ -93,6 +129,7 @@ pub async fn fetch_schedule(req: ScheduleRequest) -> Result<ScheduleResponse> {
     Ok(ScheduleResponse {
         generated_at: Utc::now(),
         kind: req.kind,
+        macro_profile,
         start_date: req.start_date,
         end_date: req.end_date,
         earnings,
@@ -101,4 +138,3 @@ pub async fn fetch_schedule(req: ScheduleRequest) -> Result<ScheduleResponse> {
         warnings,
     })
 }
-

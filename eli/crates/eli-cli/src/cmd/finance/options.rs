@@ -67,11 +67,25 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
     } else {
         Some(args.sources)
     };
+    let kalshi_backfill_profile = match args
+        .kalshi_backfill_profile
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "fast" => eli_core::finance::OddsSyncBackfillProfile::Fast,
+        "balanced" => eli_core::finance::OddsSyncBackfillProfile::Balanced,
+        "full" => eli_core::finance::OddsSyncBackfillProfile::Full,
+        other => anyhow::bail!(
+            "invalid --kalshi-backfill-profile '{other}' (expected: fast|balanced|full)"
+        ),
+    };
 
     let req = eli_core::finance::OddsSyncRequest {
         sources,
         cache_dir: args.cache_dir.map(|p| p.to_string_lossy().to_string()),
         max_pages: Some(args.max_pages),
+        kalshi_backfill_profile,
         strict: args.strict,
     };
 
@@ -134,4 +148,3 @@ async fn cmd_finance_news(args: FinanceNewsArgs) -> Result<()> {
     println!("{}", json);
     Ok(())
 }
-

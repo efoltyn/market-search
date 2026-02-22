@@ -1,9 +1,11 @@
 use crate::web::{
-    WebReadAttempt, WebReadBatchResponse, WebReadFetchStatus, WebReadProbeSummary, WebReadResponse,
+    WebContentQuality, WebReadAttempt, WebReadBatchResponse, WebReadFetchStatus,
+    WebReadProbeSummary, WebReadResponse,
 };
 use crate::Result;
 use futures::StreamExt;
 use readability::extractor;
+use regex::Regex;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 use std::io::Cursor;
@@ -12,6 +14,9 @@ use tokio::time::{sleep, Duration};
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 const SUCCESS_CHARS_THRESHOLD: usize = 180;
 const PARTIAL_CHARS_THRESHOLD: usize = 1;
+const LOW_SIGNAL_TAGS: [&str; 10] = [
+    "script", "style", "nav", "footer", "header", "aside", "noscript", "svg", "template", "form",
+];
 
 pub async fn read_url(url: &str) -> Result<WebReadResponse> {
     Ok(read_url_with_diagnostics(url).await)
@@ -41,6 +46,8 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
                     text_chars: None,
                     blocked_reason: Some("invalid_url".to_string()),
                 }],
+                content_quality: WebContentQuality::Low,
+                quality_notes: vec!["invalid_url".to_string()],
                 fetched_at,
             };
         }
@@ -70,6 +77,8 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
                     text_chars: None,
                     blocked_reason: Some("network_error".to_string()),
                 }],
+                content_quality: WebContentQuality::Low,
+                quality_notes: vec!["client_init_failed".to_string()],
                 fetched_at,
             };
         }
@@ -164,7 +173,10 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
                         blocked_reason: Some(reason.clone()),
                     });
                     failure_reason = Some(reason.clone());
-                    if try_idx == 0 && (status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) {
+                    if try_idx == 0
+                        && (status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                            || status.is_server_error())
+                    {
                         sleep(Duration::from_millis(300)).await;
                         continue;
                     }
@@ -210,10 +222,11 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
     };
 
     let extraction_url = final_url.as_deref().unwrap_or(url);
+    let cleaned_html = strip_low_signal_html(&raw_html);
     let mut title = String::new();
     let mut text = String::new();
 
-    match extract_with_readability(extraction_url, &raw_html) {
+    match extract_with_readability(extraction_url, &cleaned_html) {
         Ok((t, extracted)) => {
             title = t;
             text = extracted;
@@ -228,22 +241,38 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
                 blocked_reason: None,
             });
         }
-        Err(err) => {
-            attempts.push(WebReadAttempt {
-                attempt: attempts.len() + 1,
-                method: "extract_readability".to_string(),
-                ok: false,
-                http_status: None,
-                error: Some(err),
-                extractor: Some("readability".to_string()),
-                text_chars: None,
-                blocked_reason: Some("empty_or_js_rendered".to_string()),
-            });
-        }
+        Err(err) => match extract_with_readability(extraction_url, &raw_html) {
+            Ok((t, extracted)) => {
+                title = t;
+                text = extracted;
+                attempts.push(WebReadAttempt {
+                    attempt: attempts.len() + 1,
+                    method: "extract_readability_raw_fallback".to_string(),
+                    ok: true,
+                    http_status: None,
+                    error: Some(err),
+                    extractor: Some("readability".to_string()),
+                    text_chars: Some(text.chars().count()),
+                    blocked_reason: None,
+                });
+            }
+            Err(raw_err) => {
+                attempts.push(WebReadAttempt {
+                    attempt: attempts.len() + 1,
+                    method: "extract_readability".to_string(),
+                    ok: false,
+                    http_status: None,
+                    error: Some(format!("{err}; raw_fallback={raw_err}")),
+                    extractor: Some("readability".to_string()),
+                    text_chars: None,
+                    blocked_reason: Some("empty_or_js_rendered".to_string()),
+                });
+            }
+        },
     }
 
     if text.chars().count() < SUCCESS_CHARS_THRESHOLD {
-        let semantic_text = extract_semantic_fallback(&raw_html);
+        let semantic_text = extract_semantic_fallback(&cleaned_html);
         let semantic_ok = semantic_text.chars().count() >= PARTIAL_CHARS_THRESHOLD;
         attempts.push(WebReadAttempt {
             attempt: attempts.len() + 1,
@@ -258,8 +287,28 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
         if semantic_text.chars().count() > text.chars().count() {
             text = semantic_text;
         }
-        if title.trim().is_empty() {
-            title = extract_title_from_html(&raw_html);
+    }
+
+    if text.chars().count() < SUCCESS_CHARS_THRESHOLD {
+        let body_text = extract_body_fallback(&cleaned_html);
+        let (body_quality, body_notes) = assess_content_quality(&body_text, &raw_html);
+        let body_ok = body_text.chars().count() >= PARTIAL_CHARS_THRESHOLD
+            && body_quality != WebContentQuality::Low;
+        attempts.push(WebReadAttempt {
+            attempt: attempts.len() + 1,
+            method: "extract_body_fallback".to_string(),
+            ok: body_ok,
+            http_status: None,
+            error: (!body_ok).then_some(format!(
+                "body fallback rejected due to low quality: {}",
+                body_notes.join(", ")
+            )),
+            extractor: Some("scraper".to_string()),
+            text_chars: Some(body_text.chars().count()),
+            blocked_reason: (!body_ok).then_some("empty_or_js_rendered".to_string()),
+        });
+        if body_ok && body_text.chars().count() > text.chars().count() {
+            text = body_text;
         }
     }
 
@@ -268,16 +317,18 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
     }
 
     let text_chars = text.chars().count();
-    let (fetch_status, blocked_reason) = if text_chars >= SUCCESS_CHARS_THRESHOLD {
-        (WebReadFetchStatus::Success, None)
-    } else if text_chars >= PARTIAL_CHARS_THRESHOLD {
-        (WebReadFetchStatus::Partial, None)
-    } else {
-        (
-            WebReadFetchStatus::Error,
-            Some("empty_or_js_rendered".to_string()),
-        )
-    };
+    let (content_quality, quality_notes) = assess_content_quality(&text, &raw_html);
+    let (fetch_status, blocked_reason) =
+        if text_chars >= SUCCESS_CHARS_THRESHOLD && content_quality != WebContentQuality::Low {
+            (WebReadFetchStatus::Success, None)
+        } else if text_chars >= PARTIAL_CHARS_THRESHOLD {
+            (WebReadFetchStatus::Partial, None)
+        } else {
+            (
+                WebReadFetchStatus::Error,
+                Some("empty_or_js_rendered".to_string()),
+            )
+        };
 
     WebReadResponse {
         url: url.to_string(),
@@ -287,11 +338,16 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
         fetch_status,
         blocked_reason,
         attempts,
+        content_quality,
+        quality_notes,
         fetched_at,
     }
 }
 
-pub async fn read_urls_with_diagnostics(urls: &[String], max_parallel: usize) -> WebReadBatchResponse {
+pub async fn read_urls_with_diagnostics(
+    urls: &[String],
+    max_parallel: usize,
+) -> WebReadBatchResponse {
     let requested = urls.len();
     let mut seen = HashSet::<String>::new();
     let mut deduped_urls = Vec::<String>::new();
@@ -369,6 +425,8 @@ fn failed_web_read_response(
         fetch_status,
         blocked_reason: Some(reason),
         attempts,
+        content_quality: WebContentQuality::Low,
+        quality_notes: vec!["fetch_failed".to_string()],
         fetched_at,
     }
 }
@@ -428,11 +486,17 @@ fn failure_status_for_reason(reason: &str) -> WebReadFetchStatus {
     }
 }
 
-fn extract_with_readability(url: &str, raw_html: &str) -> std::result::Result<(String, String), String> {
+fn extract_with_readability(
+    url: &str,
+    raw_html: &str,
+) -> std::result::Result<(String, String), String> {
     let url_obj = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
     let mut reader = Cursor::new(raw_html.as_bytes());
     let product = extractor::extract(&mut reader, &url_obj).map_err(|e| e.to_string())?;
-    Ok((product.title.trim().to_string(), product.text.trim().to_string()))
+    Ok((
+        product.title.trim().to_string(),
+        product.text.trim().to_string(),
+    ))
 }
 
 fn extract_semantic_fallback(raw_html: &str) -> String {
@@ -443,7 +507,6 @@ fn extract_semantic_fallback(raw_html: &str) -> String {
         "[role='main']",
         ".article-body",
         ".post-content",
-        "body",
     ];
 
     for css in selectors {
@@ -472,6 +535,127 @@ fn extract_semantic_fallback(raw_html: &str) -> String {
         }
     }
     String::new()
+}
+
+fn extract_body_fallback(raw_html: &str) -> String {
+    let document = Html::parse_document(raw_html);
+    let Ok(body_selector) = Selector::parse("body") else {
+        return String::new();
+    };
+    let mut text = String::new();
+    for el in document.select(&body_selector) {
+        let chunk = el
+            .text()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if chunk.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&chunk);
+    }
+    text.trim().to_string()
+}
+
+fn strip_low_signal_html(raw_html: &str) -> String {
+    let mut cleaned = raw_html.to_string();
+    for tag in LOW_SIGNAL_TAGS {
+        let pattern = format!(r"(?is)<{tag}\b[^>]*>.*?</{tag}>");
+        if let Ok(re) = Regex::new(&pattern) {
+            cleaned = re.replace_all(&cleaned, " ").into_owned();
+        }
+    }
+    if let Ok(cookie_re) = Regex::new(
+        r#"(?is)<(div|section|aside)[^>]*(id|class)\s*=\s*["'][^"']*(cookie|consent|newsletter|subscribe|popup|banner)[^"']*["'][^>]*>.*?</\1>"#,
+    ) {
+        cleaned = cookie_re.replace_all(&cleaned, " ").into_owned();
+    }
+    cleaned
+}
+
+fn assess_content_quality(text: &str, raw_html: &str) -> (WebContentQuality, Vec<String>) {
+    let text_chars = text.chars().count();
+    if text_chars == 0 {
+        return (WebContentQuality::Low, vec!["empty_text".to_string()]);
+    }
+
+    let text_tokens = text.split_whitespace().collect::<Vec<_>>();
+    if text_tokens.is_empty() {
+        return (WebContentQuality::Low, vec!["empty_tokens".to_string()]);
+    }
+
+    let html_chars = raw_html.chars().count().max(1);
+    let density = text_chars as f64 / html_chars as f64;
+    let mut notes = Vec::new();
+
+    let css_like_tokens = text_tokens
+        .iter()
+        .filter(|tok| {
+            let t = tok.to_ascii_lowercase();
+            t.contains('{')
+                || t.contains('}')
+                || t.contains("color:")
+                || t.contains("font-")
+                || t.contains("padding")
+                || t.contains("margin")
+                || t.contains("display:")
+                || t.contains("px")
+        })
+        .count();
+    let code_like_tokens = text_tokens
+        .iter()
+        .filter(|tok| {
+            let t = tok.to_ascii_lowercase();
+            t.contains("function")
+                || t.contains("const")
+                || t.contains("var")
+                || t.contains("=>")
+                || t.contains("import ")
+                || t.contains("export ")
+                || t.contains(';')
+        })
+        .count();
+
+    let css_ratio = css_like_tokens as f64 / text_tokens.len() as f64;
+    let code_ratio = code_like_tokens as f64 / text_tokens.len() as f64;
+
+    let mut unique = std::collections::HashSet::new();
+    for token in &text_tokens {
+        unique.insert(token.to_ascii_lowercase());
+    }
+    let repetition_ratio = 1.0 - (unique.len() as f64 / text_tokens.len() as f64);
+
+    if density < 0.03 {
+        notes.push(format!("low_text_density={density:.4}"));
+    }
+    if css_ratio > 0.10 {
+        notes.push(format!("high_css_ratio={css_ratio:.3}"));
+    }
+    if code_ratio > 0.10 {
+        notes.push(format!("high_code_ratio={code_ratio:.3}"));
+    }
+    if repetition_ratio > 0.65 {
+        notes.push(format!("high_repetition_ratio={repetition_ratio:.3}"));
+    }
+
+    let quality =
+        if density >= 0.08 && css_ratio <= 0.04 && code_ratio <= 0.05 && repetition_ratio <= 0.45 {
+            WebContentQuality::High
+        } else if density >= 0.03 && css_ratio <= 0.10 && code_ratio <= 0.12 {
+            WebContentQuality::Medium
+        } else {
+            WebContentQuality::Low
+        };
+
+    if notes.is_empty() {
+        notes.push("quality_ok".to_string());
+    }
+    (quality, notes)
 }
 
 fn extract_title_from_html(raw_html: &str) -> String {
@@ -512,7 +696,10 @@ mod tests {
             infer_blocked_reason_from_body(body),
             Some("captcha_or_bot_challenge")
         );
-        assert_eq!(infer_blocked_reason_from_body("<html>plain content</html>"), None);
+        assert_eq!(
+            infer_blocked_reason_from_body("<html>plain content</html>"),
+            None
+        );
     }
 
     #[test]
@@ -531,5 +718,31 @@ mod tests {
         let text = extract_semantic_fallback(html);
         assert!(text.contains("First sentence"));
         assert!(text.contains("Second sentence"));
+    }
+
+    #[test]
+    fn strip_low_signal_html_removes_script_and_style_blocks() {
+        let html = r#"
+            <html>
+              <head>
+                <style>.hero { color: red; }</style>
+                <script>const x = 1;</script>
+              </head>
+              <body><main>Readable text here.</main></body>
+            </html>
+        "#;
+        let stripped = strip_low_signal_html(html);
+        assert!(!stripped.contains("const x = 1"));
+        assert!(!stripped.contains(".hero"));
+        assert!(stripped.contains("Readable text here"));
+    }
+
+    #[test]
+    fn assess_content_quality_flags_css_noise() {
+        let noisy_text = "color: red; margin: 0; padding: 0; display: block; font-size: 12px;";
+        let html = "<html><body>test</body></html>";
+        let (quality, notes) = assess_content_quality(noisy_text, html);
+        assert_eq!(quality, WebContentQuality::Low);
+        assert!(notes.iter().any(|n| n.contains("high_css_ratio")));
     }
 }

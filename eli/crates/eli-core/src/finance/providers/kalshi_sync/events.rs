@@ -11,6 +11,7 @@
 pub(crate) async fn sync_kalshi_events(
     limiter: &RateLimiter,
     max_pages: usize,
+    backfill_profile: OddsSyncBackfillProfile,
 ) -> std::result::Result<
     (
         Vec<OddsListedEvent>,
@@ -19,14 +20,17 @@ pub(crate) async fn sync_kalshi_events(
     ),
     String,
 > {
-    eprintln!("[kalshi] starting sync (max_pages={})", max_pages);
+    eprintln!(
+        "[kalshi] starting sync (max_pages={}, backfill_profile={:?})",
+        max_pages, backfill_profile
+    );
     let mut events_pages_fetched = 0usize;
     let mut events_exhausted = false;
     let mut markets_pages_fetched = 0usize;
     let markets_exhausted; // set at the end based on coverage
-    let mut series_backfill_calls = 0usize;
-    let mut series_backfill_cap: Option<usize> = None;
-    let mut series_backfill_truncated: Option<bool> = None;
+    let series_backfill_calls;
+    let series_backfill_cap: Option<usize>;
+    let series_backfill_truncated: Option<bool>;
     let mut category_map: HashMap<String, String> = HashMap::new();
     let mut series_category_map: HashMap<String, String> = HashMap::new();
     let mut series_catalog: Vec<(String, Option<String>)> = Vec::new();
@@ -312,23 +316,27 @@ pub(crate) async fn sync_kalshi_events(
         fetch_series.retain(|s| seen.insert(s.clone()));
 
         let considered_series = fetch_series.len();
-        // Coverage is intentionally baseline-high so tagging/filtering quality does not
-        // degrade on low --max-pages settings. max_pages only increases budget.
         let requested_cap = max_pages.saturating_mul(75);
-        let baseline_cap = 2_500usize;
+        let (profile_name, baseline_cap, hard_cap) = match backfill_profile {
+            OddsSyncBackfillProfile::Fast => ("fast", 350usize, 1_500usize),
+            OddsSyncBackfillProfile::Balanced => ("balanced", 1_200usize, 6_000usize),
+            OddsSyncBackfillProfile::Full => ("full", 3_500usize, 20_000usize),
+        };
         let discovered_cap = considered_series.saturating_add(50);
         let series_cap = requested_cap
             .max(baseline_cap)
             .max(discovered_cap)
-            .min(20_000);
+            .min(hard_cap);
         series_backfill_cap = Some(series_cap);
         eprintln!(
-            "[kalshi] fetching markets for {} non-sports series (cap: {}, requested_budget={}, baseline={}, discovered+headroom={})",
+            "[kalshi] fetching markets for {} non-sports series (cap: {}, profile={}, requested_budget={}, baseline={}, discovered+headroom={}, hard_cap={})",
             considered_series.min(series_cap),
             series_cap,
+            profile_name,
             requested_cap,
             baseline_cap,
             discovered_cap,
+            hard_cap,
         );
 
         let mut calls = 0usize;
@@ -423,6 +431,10 @@ pub(crate) async fn sync_kalshi_events(
             }
         }
     }
+    eprintln!(
+        "[kalshi] category assignment hits: direct={} series_prefix={}",
+        direct_hits, series_hits
+    );
 
     // Phase 5: Final sports filter (belt and suspenders).
     let pre_filter = all_markets.len();

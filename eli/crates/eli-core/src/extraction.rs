@@ -15,6 +15,10 @@ pub struct ExtractResponse {
     pub source: String,
     pub bullets: Vec<String>,
     pub word_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_quality: Option<crate::web::WebContentQuality>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quality_notes: Vec<String>,
     pub extracted_at: DateTime<Utc>,
 }
 
@@ -42,6 +46,8 @@ pub fn extract_facts(req: ExtractRequest) -> Result<ExtractResponse> {
                 source: req.source,
                 bullets: docs_bullets,
                 word_count,
+                source_quality: None,
+                quality_notes: Vec::new(),
                 extracted_at: Utc::now(),
             });
         }
@@ -79,6 +85,8 @@ pub fn extract_facts(req: ExtractRequest) -> Result<ExtractResponse> {
         source: req.source,
         bullets,
         word_count,
+        source_quality: None,
+        quality_notes: Vec::new(),
         extracted_at: Utc::now(),
     })
 }
@@ -226,10 +234,19 @@ fn extract_docs_style_facts(content: &str, bullets: usize) -> Vec<String> {
         .replace("website:use spider::tokio;", "website:\nuse spider::tokio;")
         .replace("events:use spider::tokio;", "events:\nuse spider::tokio;")
         .replace("key:use spider::tokio;", "key:\nuse spider::tokio;")
-        .replace("instance:use spider::tokio;", "instance:\nuse spider::tokio;")
-        .replace("}Subscribe to crawl events:", "\nSubscribe to crawl events:")
+        .replace(
+            "instance:use spider::tokio;",
+            "instance:\nuse spider::tokio;",
+        )
+        .replace(
+            "}Subscribe to crawl events:",
+            "\nSubscribe to crawl events:",
+        )
         .replace("use spider::tokio;", "\nuse spider::tokio;")
-        .replace("use spider::website::Website;", "\nuse spider::website::Website;")
+        .replace(
+            "use spider::website::Website;",
+            "\nuse spider::website::Website;",
+        )
         .replace("Website::new", "\nWebsite::new");
 
     let mut candidates = collect_docs_highlights(content);
@@ -393,6 +410,18 @@ pub async fn extract_from_url(
             "web read returned empty content for extraction".to_string(),
         ));
     }
+    let focus_l = focus.as_ref().map(|f| f.to_ascii_lowercase());
+    if article.content_quality == crate::web::WebContentQuality::Low {
+        let has_clean_segment = candidate_segments(&article.text)
+            .into_iter()
+            .any(|segment| score_segment(&segment, focus_l.as_deref()) >= 4);
+        if !has_clean_segment {
+            return Err(Error::Provider(format!(
+                "web read content quality too low for reliable extraction: {}",
+                article.quality_notes.join(", ")
+            )));
+        }
+    }
 
     let req = ExtractRequest {
         content: article.text,
@@ -401,7 +430,10 @@ pub async fn extract_from_url(
         focus,
     };
 
-    extract_facts(req)
+    let mut extracted = extract_facts(req)?;
+    extracted.source_quality = Some(article.content_quality);
+    extracted.quality_notes = article.quality_notes;
+    Ok(extracted)
 }
 
 /// Extract from file

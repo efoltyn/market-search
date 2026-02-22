@@ -175,6 +175,14 @@ async fn cmd_finance_schedule(args: FinanceScheduleArgs) -> Result<()> {
         "all" => eli_core::finance::ScheduleKind::All,
         other => anyhow::bail!("unsupported --kind '{other}' (supported: earnings, macro, all)"),
     };
+    let macro_profile = match args.macro_profile.trim().to_ascii_lowercase().as_str() {
+        "broad" => eli_core::finance::ScheduleMacroProfile::Broad,
+        "market" => eli_core::finance::ScheduleMacroProfile::Market,
+        "major" => eli_core::finance::ScheduleMacroProfile::Major,
+        other => anyhow::bail!(
+            "unsupported --macro-profile '{other}' (supported: broad, market, major)"
+        ),
+    };
 
     let (start_date, end_date) = if let Some(date) = args.date {
         if args.from.is_some() || args.to.is_some() {
@@ -195,6 +203,7 @@ async fn cmd_finance_schedule(args: FinanceScheduleArgs) -> Result<()> {
         end_date,
         tickers: args.ticker,
         major_only: args.major,
+        macro_profile,
     };
 
     let resp = eli_core::finance::fetch_schedule(req)
