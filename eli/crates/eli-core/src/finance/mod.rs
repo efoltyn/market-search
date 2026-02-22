@@ -53,6 +53,9 @@ pub use news::fetch_news;
 mod macro_data;
 pub use macro_data::fetch_macro;
 
+mod forex;
+pub use forex::fetch_forex;
+
 mod schedule;
 pub use schedule::fetch_schedule;
 

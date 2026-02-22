@@ -1,7 +1,8 @@
 pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "eli=warn,eli_cli=warn".to_string()),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "error,eli=warn,eli_cli=warn".to_string()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -238,6 +239,7 @@ async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
         }
         FinanceCommand::News(args) => cmd_finance_news(args).await,
         FinanceCommand::Macro(args) => cmd_finance_macro(args).await,
+        FinanceCommand::Forex(args) => cmd_finance_forex(args).await,
         FinanceCommand::Schedule(args) => cmd_finance_schedule(args).await,
         FinanceCommand::RatePath(args) => cmd_finance_rate_path(args).await,
         FinanceCommand::YieldCurve(args) => cmd_finance_yield_curve(args).await,

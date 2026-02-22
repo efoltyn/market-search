@@ -148,6 +148,68 @@ mod tests {
     }
 
     #[test]
+    fn forex_command_digest_includes_usd_summary_fields() {
+        let payload = serde_json::json!({
+            "basket": "usd_filtered",
+            "pair_count": 2,
+            "summary": {
+                "usd_strength_score_pct": -1.23,
+                "strongest_usd_pair": "USD/JPY",
+                "weakest_usd_pair": "EUR/USD"
+            },
+            "event_window": {
+                "event_at": "2026-02-20T20:00:00Z",
+                "shift_usd_strength_pct": 0.42,
+                "session_attribution": [
+                    {"session":"us","move_count":14}
+                ]
+            },
+            "comparison_deltas": [
+                {
+                    "as_of": "2026-01-31T23:59:59Z",
+                    "delta_usd_strength_pct": 0.31,
+                    "delta_usd_pairs_up": 1,
+                    "delta_usd_pairs_down": -1
+                }
+            ],
+            "delta_context": {
+                "previous_as_of": "2026-02-20T13:00:00Z",
+                "current_as_of": "2026-02-20T21:00:00Z",
+                "compared_pairs": 2,
+                "changed_pairs": 1,
+                "top_pair_deltas": [
+                    {
+                        "pair": "USD/JPY",
+                        "previous_usd_change_pct": 0.7,
+                        "current_usd_change_pct": 1.9,
+                        "delta_usd_change_pct": 1.2
+                    }
+                ]
+            },
+            "usd_benchmark": {
+                "source": "fred",
+                "symbol": "DTWEXBGS",
+                "as_of": "2026-02-20T00:00:00Z",
+                "change_pct": 2.1
+            },
+            "biggest_daily_usd_moves": [
+                {"pair": "EUR/USD", "date": "2025-04-10", "usd_impact_pct": -2.8}
+            ]
+        });
+
+        let digest = digest_from_json_for_command("eli finance forex", &payload, 512);
+        assert!(digest.contains("basket=usd_filtered"));
+        assert!(digest.contains("pairs=2"));
+        assert!(digest.contains("usd_strength=-1.23%"));
+        assert!(digest.contains("strongest_usd=USD/JPY"));
+        assert!(digest.contains("weakest_usd=EUR/USD"));
+        assert!(digest.contains("comparisons=1"));
+        assert!(digest.contains("pair_delta=1/2"));
+        assert!(digest.contains("top_pair_delta=USD/JPY:1.20%"));
+        assert!(digest.contains("DTWEXBGS=2.10%"));
+    }
+
+    #[test]
     fn shared_manifest_context_is_prepended() {
         let task = "Compute recession probability.";
         let enriched =
@@ -264,5 +326,52 @@ mod tests {
         assert!(chunks.len() >= 2);
         assert_eq!(chunks[0], "abcdefghij");
         assert!(chunks[1].starts_with("ij"));
+    }
+
+    #[test]
+    fn web_search_summary_digest_uses_new_schema() {
+        let payload = serde_json::json!({
+            "query": "fed decision",
+            "mode": "news",
+            "items": [
+                {
+                    "rank": 1,
+                    "title": "Fed Officials Signal Patience",
+                    "url": "https://www.reuters.com/world/us/fed-officials-2026-02-21/",
+                    "domain": "reuters.com"
+                }
+            ],
+            "stats": {
+                "probed_items": 1
+            },
+            "run_delta": {
+                "new_urls": ["https://www.reuters.com/world/us/fed-officials-2026-02-21/"],
+                "dropped_urls": []
+            }
+        });
+        let digest = digest_from_json_for_command("eli web search --query fed", &payload, 256);
+        assert!(digest.contains("items=1"));
+        assert!(digest.contains("mode=news"));
+        assert!(digest.contains("top_domain=reuters.com"));
+        assert!(digest.contains("delta=+1/-0"));
+    }
+
+    #[test]
+    fn web_read_summary_digest_handles_batch_schema() {
+        let payload = serde_json::json!({
+            "mode": "batch",
+            "requested": 3,
+            "deduped": 2,
+            "completed": 2,
+            "success_count": 1,
+            "partial_count": 0,
+            "blocked_count": 1,
+            "error_count": 0,
+            "results": []
+        });
+        let digest = digest_from_json_for_command("eli web read --url a,b", &payload, 256);
+        assert!(digest.contains("completed=2"));
+        assert!(digest.contains("success=1"));
+        assert!(digest.contains("blocked=1"));
     }
 }

@@ -49,6 +49,121 @@ async fn cmd_finance_macro(args: FinanceMacroArgs) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_finance_forex(args: FinanceForexArgs) -> Result<()> {
+    if args.format.trim().to_ascii_lowercase() != "json" {
+        anyhow::bail!("unsupported --format (only 'json' is implemented)");
+    }
+
+    let range = eli_core::finance::Span::parse(&args.range)
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("parse --range")?;
+    let granularity = eli_core::finance::Span::parse(&args.granularity)
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("parse --granularity")?;
+    let as_of = if let Some(raw) = args.as_of.as_deref() {
+        Some(
+            eli_core::finance::parse_as_of(raw)
+                .map_err(|e| anyhow::anyhow!(e))
+                .context("parse --as-of")?,
+        )
+    } else {
+        None
+    };
+    let event_at = if let Some(raw) = args.event_at.as_deref() {
+        Some(
+            eli_core::finance::parse_event_at(raw)
+                .map_err(|e| anyhow::anyhow!(e))
+                .context("parse --event-at")?,
+        )
+    } else {
+        None
+    };
+    let event_window = if let Some(raw) = args.event_window.as_deref() {
+        Some(
+            eli_core::finance::Span::parse(raw)
+                .map_err(|e| anyhow::anyhow!(e))
+                .context("parse --event-window")?,
+        )
+    } else {
+        None
+    };
+    let mut compare_as_of = Vec::new();
+    for raw in &args.compare_as_of {
+        let dt = eli_core::finance::parse_as_of(raw)
+            .map_err(|e| anyhow::anyhow!(e))
+            .with_context(|| format!("parse --compare-as-of value '{raw}'"))?;
+        compare_as_of.push(dt);
+    }
+    let mut horizons = Vec::new();
+    for raw in &args.horizons {
+        let span = eli_core::finance::Span::parse(raw)
+            .map_err(|e| anyhow::anyhow!(e))
+            .with_context(|| format!("parse --horizons value '{raw}'"))?;
+        horizons.push(span);
+    }
+
+    let cache_dir = if let Some(path) = args.cache_dir {
+        path
+    } else {
+        let paths = Paths::discover().context("discover paths")?;
+        paths.ensure_dirs().context("ensure dirs")?;
+        paths.cache_dir
+    };
+
+    let req = eli_core::finance::ForexRequest {
+        pairs: args.pairs.clone(),
+        currencies: args.currencies.clone(),
+        countries: args.countries.clone(),
+        groups: args.groups.clone(),
+        include_em: args.include_em,
+        range,
+        granularity,
+        as_of,
+        event_at,
+        event_window,
+        compare_as_of,
+        horizons,
+        max_pairs: args.max_pairs,
+        recent_points: Some(args.recent_points),
+        top: Some(args.top),
+    };
+    let resp = eli_core::finance::fetch_forex(req, &cache_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("fetch forex")?;
+
+    if let Some(out_path) = args.out {
+        let wr = write_json_out_with_meta(
+            out_path,
+            &resp,
+            "finance.forex",
+            &[
+                format!("range={}", args.range),
+                format!("granularity={}", args.granularity),
+                format!("pairs={}", args.pairs.len()),
+                format!("currencies={}", args.currencies.len()),
+                format!("countries={}", args.countries.len()),
+                format!("groups={}", args.groups.len()),
+                format!("event_at={}", args.event_at.is_some()),
+                format!("event_window={}", args.event_window.as_deref().unwrap_or("")),
+                format!("compare_as_of={}", args.compare_as_of.len()),
+            ],
+        )?;
+        println!(
+            "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
+            serde_json::to_string(&wr.out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+            serde_json::to_string(&wr.meta_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
+    }
+
+    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+    println!("{json}");
+    Ok(())
+}
+
 async fn cmd_finance_schedule(args: FinanceScheduleArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
@@ -260,4 +375,3 @@ async fn cmd_finance_prices(args: FinancePricesArgs) -> Result<()> {
     println!("{json}");
     Ok(())
 }
-

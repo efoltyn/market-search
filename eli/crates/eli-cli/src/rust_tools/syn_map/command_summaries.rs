@@ -116,7 +116,13 @@ fn digest_from_json_for_command(command: &str, value: &serde_json::Value, bytes:
         _ => {}
     }
 
-    let command_parts = command_summary_parts(command, value, 5);
+    let path = extract_eli_tool_path(command).unwrap_or_default();
+    let summary_cap = if path.len() >= 2 && path[0] == "finance" && path[1] == "forex" {
+        12
+    } else {
+        5
+    };
+    let command_parts = command_summary_parts(command, value, summary_cap);
     parts.extend(command_parts);
     parts.join(" ")
 }
@@ -141,6 +147,8 @@ fn command_summary_parts(
         out.extend(news_summary_parts(value));
     } else if path.len() >= 2 && path[0] == "finance" && path[1] == "macro" {
         out.extend(macro_summary_parts(value));
+    } else if path.len() >= 2 && path[0] == "finance" && path[1] == "forex" {
+        out.extend(forex_summary_parts(value));
     } else if path.len() >= 2 && path[0] == "finance" && path[1] == "schedule" {
         out.extend(schedule_summary_parts(value));
     } else if path.len() >= 2 && path[0] == "finance" && path[1] == "prices" {
@@ -429,6 +437,161 @@ fn macro_summary_parts(value: &serde_json::Value) -> Vec<String> {
     out
 }
 
+fn forex_summary_parts(value: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(map) = value.as_object() else {
+        return out;
+    };
+
+    if let Some(basket) = map.get("basket").and_then(|v| v.as_str()) {
+        out.push(format!("basket={basket}"));
+    }
+
+    if let Some(n) = map.get("pair_count").and_then(|v| v.as_u64()) {
+        out.push(format!("pairs={n}"));
+    } else if let Some(arr) = map.get("pairs").and_then(|v| v.as_array()) {
+        out.push(format!("pairs={}", arr.len()));
+    }
+
+    if let Some(score) = map
+        .get("summary")
+        .and_then(|v| v.get("usd_strength_score_pct"))
+        .and_then(|v| v.as_f64())
+    {
+        out.push(format!("usd_strength={score:.2}%"));
+    }
+
+    if let Some(pair) = map
+        .get("summary")
+        .and_then(|v| v.get("strongest_usd_pair"))
+        .and_then(|v| v.as_str())
+    {
+        out.push(format!("strongest_usd={pair}"));
+    }
+
+    if let Some(pair) = map
+        .get("summary")
+        .and_then(|v| v.get("weakest_usd_pair"))
+        .and_then(|v| v.as_str())
+    {
+        out.push(format!("weakest_usd={pair}"));
+    }
+
+    if let Some(arr) = map.get("comparison_deltas").and_then(|v| v.as_array()) {
+        out.push(format!("comparisons={}", arr.len()));
+        if let Some(first) = arr.first() {
+            let ts = first.get("as_of").and_then(|v| v.as_str()).unwrap_or("?");
+            if let Some(delta) = first
+                .get("delta_usd_strength_pct")
+                .and_then(|v| v.as_f64())
+            {
+                out.push(format!("vs_{ts}={delta:.2}%"));
+            }
+        }
+    }
+
+    if let Some(delta) = map.get("delta_context").and_then(|v| v.as_object()) {
+        let prev = delta
+            .get("previous_synced_at")
+            .and_then(|v| v.as_str())
+            .or_else(|| delta.get("previous_as_of").and_then(|v| v.as_str()))
+            .unwrap_or("?");
+        let cur = delta
+            .get("current_synced_at")
+            .and_then(|v| v.as_str())
+            .or_else(|| delta.get("current_as_of").and_then(|v| v.as_str()))
+            .unwrap_or("?");
+        let prev_as_of = delta
+            .get("previous_as_of")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let cur_as_of = delta
+            .get("current_as_of")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let compared = delta
+            .get("compared_pairs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let changed = delta
+            .get("changed_pairs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        out.push(format!("delta_window={prev}->{cur}"));
+        out.push(format!("as_of_window={prev_as_of}->{cur_as_of}"));
+        out.push(format!("pair_delta={changed}/{compared}"));
+        if let Some(top) = delta
+            .get("top_pair_deltas")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+        {
+            let pair = top.get("pair").and_then(|v| v.as_str()).unwrap_or("?");
+            let move_pct = top
+                .get("delta_usd_change_pct")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            out.push(format!("top_pair_delta={pair}:{move_pct:.2}%"));
+        }
+    }
+
+    if let Some(bench) = map.get("usd_benchmark").and_then(|v| v.as_object()) {
+        let symbol = bench
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("DXY");
+        if let Some(change) = bench.get("change_pct").and_then(|v| v.as_f64()) {
+            out.push(format!("{symbol}={change:.2}%"));
+        }
+    }
+
+    if let Some(arr) = map.get("biggest_daily_usd_moves").and_then(|v| v.as_array()) {
+        out.push(format!("top_hits={}", arr.len()));
+        if let Some(first) = arr.first() {
+            let pair = first.get("pair").and_then(|v| v.as_str()).unwrap_or("?");
+            let date = first.get("date").and_then(|v| v.as_str()).unwrap_or("?");
+            let impact = first
+                .get("usd_impact_pct")
+                .and_then(|v| v.as_f64())
+                .or_else(|| first.get("daily_change_pct").and_then(|v| v.as_f64()))
+                .unwrap_or(0.0);
+            out.push(format!("largest_hit={pair}@{date}:{impact:.2}%"));
+        }
+    }
+
+    if let Some(arr) = map
+        .get("summary")
+        .and_then(|s| s.get("hot_dates"))
+        .and_then(|v| v.as_array())
+    {
+        if let Some(first) = arr.first() {
+            let date = first.get("date").and_then(|v| v.as_str()).unwrap_or("?");
+            let n = first.get("move_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            out.push(format!("hottest_date={date}:{n}"));
+        }
+    }
+
+    if let Some(event) = map.get("event_window").and_then(|v| v.as_object()) {
+        if let Some(ts) = event.get("event_at").and_then(|v| v.as_str()) {
+            out.push(format!("event_at={ts}"));
+        }
+        if let Some(shift) = event
+            .get("shift_usd_strength_pct")
+            .and_then(|v| v.as_f64())
+        {
+            out.push(format!("event_shift={shift:.2}%"));
+        }
+        if let Some(arr) = event.get("session_attribution").and_then(|v| v.as_array()) {
+            if let Some(first) = arr.first() {
+                let session = first.get("session").and_then(|v| v.as_str()).unwrap_or("?");
+                let n = first.get("move_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                out.push(format!("dominant_session={session}:{n}"));
+            }
+        }
+    }
+
+    out
+}
+
 fn schedule_summary_parts(value: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
     let Some(map) = value.as_object() else {
@@ -675,19 +838,48 @@ fn web_search_summary_parts(value: &serde_json::Value) -> Vec<String> {
     let Some(map) = value.as_object() else {
         return out;
     };
-    let hits = map
-        .get("hits")
+    let mut top_hit: Option<String> = None;
+    let items = map
+        .get("items")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    out.push(format!("hits={}", hits.len()));
-    if let Some(first) = hits.first() {
+    out.push(format!("items={}", items.len()));
+    if let Some(mode) = map.get("mode").and_then(|v| v.as_str()) {
+        out.push(format!("mode={mode}"));
+    }
+    if let Some(first) = items.first() {
         if let Some(title) = first.get("title").and_then(|v| v.as_str()) {
-            out.push(format!("top_hit={}", truncate_line(title, 45)));
+            top_hit = Some(format!("top_hit={}", truncate_line(title, 45)));
         }
-        if let Some(url) = first.get("url").and_then(|v| v.as_str()) {
+        if let Some(domain) = first.get("domain").and_then(|v| v.as_str()) {
+            out.push(format!("top_domain={domain}"));
+        } else if let Some(url) = first.get("url").and_then(|v| v.as_str()) {
             out.push(format!("top_domain={}", domain_of(url)));
         }
+    }
+    if let Some(stats) = map.get("stats").and_then(|v| v.as_object()) {
+        if let Some(n) = stats.get("probed_items").and_then(|v| v.as_i64()) {
+            out.push(format!("probed={n}"));
+        }
+    }
+    if let Some(delta) = map.get("run_delta").and_then(|v| v.as_object()) {
+        let new_count = delta
+            .get("new_urls")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.len())
+            .unwrap_or(0);
+        let dropped_count = delta
+            .get("dropped_urls")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.len())
+            .unwrap_or(0);
+        if new_count > 0 || dropped_count > 0 {
+            out.push(format!("delta=+{new_count}/-{dropped_count}"));
+        }
+    }
+    if let Some(hit) = top_hit {
+        out.push(hit);
     }
     out
 }
@@ -697,12 +889,49 @@ fn web_read_summary_parts(value: &serde_json::Value) -> Vec<String> {
     let Some(map) = value.as_object() else {
         return out;
     };
+    if map
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .is_some_and(|m| m.eq_ignore_ascii_case("batch"))
+    {
+        if let Some(n) = map.get("completed").and_then(|v| v.as_i64()) {
+            out.push(format!("completed={n}"));
+        }
+        if let Some(n) = map.get("success_count").and_then(|v| v.as_i64()) {
+            out.push(format!("success={n}"));
+        }
+        if let Some(n) = map.get("partial_count").and_then(|v| v.as_i64()) {
+            out.push(format!("partial={n}"));
+        }
+        if let Some(n) = map.get("blocked_count").and_then(|v| v.as_i64()) {
+            out.push(format!("blocked={n}"));
+        }
+        if let Some(n) = map.get("error_count").and_then(|v| v.as_i64()) {
+            out.push(format!("error={n}"));
+        }
+        return out;
+    }
+
+    if let Some(status) = map.get("fetch_status").and_then(|v| v.as_str()) {
+        out.push(format!("status={status}"));
+    }
+    if let Some(reason) = map.get("blocked_reason").and_then(|v| v.as_str()) {
+        out.push(format!("blocked_reason={reason}"));
+    }
     if let Some(title) = map.get("title").and_then(|v| v.as_str()) {
-        out.push(format!("title={}", truncate_line(title, 45)));
+        if !title.trim().is_empty() {
+            out.push(format!("title={}", truncate_line(title, 45)));
+        }
     }
     if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
-        out.push(format!("chars={}", text.chars().count()));
-        out.push(format!("words={}", text.split_whitespace().count()));
+        let chars = text.chars().count();
+        if chars > 0 {
+            out.push(format!("chars={chars}"));
+            out.push(format!("words={}", text.split_whitespace().count()));
+        }
+    }
+    if let Some(attempts) = map.get("attempts").and_then(|v| v.as_array()) {
+        out.push(format!("attempts={}", attempts.len()));
     }
     out
 }

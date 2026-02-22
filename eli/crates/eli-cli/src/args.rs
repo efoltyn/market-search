@@ -101,6 +101,8 @@ enum FinanceCommand {
     News(FinanceNewsArgs),
     /// Fetch key macro economic indicators (CPI, Unemployment, GDP, etc).
     Macro(FinanceMacroArgs),
+    /// Fetch broad FX basket performance with USD-relative deltas and biggest move dates.
+    Forex(FinanceForexArgs),
     /// Fetch earnings and macro release schedules (no-auth public endpoints).
     Schedule(FinanceScheduleArgs),
     /// Aggregate implied Fed policy trajectory from local prediction-market cache.
@@ -123,9 +125,9 @@ enum FinanceCommand {
 enum WebCommand {
     /// Crawl a website and extract content from all discovered pages.
     Crawl(WebCrawlArgs),
-    /// Search the web using DuckDuckGo.
+    /// Ingestion-focused web search for URL candidates + diagnostics.
     Search(WebSearchArgs),
-    /// Read and extract content from a single URL.
+    /// Read and extract content from one or many URLs.
     Read(WebReadArgs),
     /// Extract key facts from content (URL, file, or text).
     Extract(WebExtractArgs),
@@ -193,6 +195,24 @@ enum CrawlViewMode {
 enum CrawlSaveMode {
     Auto,
     Off,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum WebSearchModeArg {
+    Auto,
+    News,
+    Finance,
+    Research,
+    Tech,
+    Encyclopedia,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum WebSearchRecencyArg {
+    Day,
+    Week,
+    Month,
+    Year,
 }
 
 #[derive(clap::Args, Debug)]
@@ -451,6 +471,50 @@ struct WebSearchArgs {
     #[arg(long)]
     query: String,
 
+    /// Search mode tuned for different ingestion workflows.
+    #[arg(long, value_enum, default_value_t = WebSearchModeArg::Auto)]
+    mode: WebSearchModeArg,
+
+    /// Include only these domains (comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    domains: Vec<String>,
+
+    /// Exclude these domains (comma-separated).
+    #[arg(long = "exclude-domains", value_delimiter = ',')]
+    exclude_domains: Vec<String>,
+
+    /// Recency hint (day, week, month, year).
+    #[arg(long, value_enum)]
+    recency: Option<WebSearchRecencyArg>,
+
+    /// Earliest publication date (YYYY-MM-DD).
+    #[arg(long)]
+    since: Option<String>,
+
+    /// Latest publication date (YYYY-MM-DD).
+    #[arg(long)]
+    until: Option<String>,
+
+    /// Maximum items to return.
+    #[arg(long, default_value_t = 15)]
+    top: usize,
+
+    /// Number of top results to probe with web read diagnostics.
+    #[arg(long = "probe-top", default_value_t = 4)]
+    probe_top: usize,
+
+    /// Maximum parallel network operations.
+    #[arg(long = "max-parallel", default_value_t = 6)]
+    max_parallel: usize,
+
+    /// Optional run-tracking key for delta comparisons.
+    #[arg(long = "track-key")]
+    track_key: Option<String>,
+
+    /// Emit full verbose payload (snippets + detailed score components).
+    #[arg(long, default_value_t = false)]
+    full: bool,
+
     /// Output file path (JSON).
     #[arg(long)]
     out: Option<PathBuf>,
@@ -458,9 +522,25 @@ struct WebSearchArgs {
 
 #[derive(clap::Args, Debug)]
 struct WebReadArgs {
-    /// URL to read content from.
-    #[arg(long)]
-    url: String,
+    /// URL(s) to read content from (repeatable or comma-separated).
+    #[arg(long = "url", value_delimiter = ',')]
+    url: Vec<String>,
+
+    /// Optional file containing URLs (one per line, '#' comments allowed).
+    #[arg(long = "urls-file")]
+    urls_file: Option<PathBuf>,
+
+    /// Maximum parallel URL fetches.
+    #[arg(long = "max-parallel", default_value_t = 6)]
+    max_parallel: usize,
+
+    /// Max chars to keep per article text in default compact mode.
+    #[arg(long = "max-chars", default_value_t = 2400)]
+    max_chars: usize,
+
+    /// Emit full verbose payload (full text + attempt details).
+    #[arg(long, default_value_t = false)]
+    full: bool,
 
     /// Output file path (JSON).
     #[arg(long)]
@@ -502,6 +582,64 @@ pub struct FinanceMacroArgs {
     /// Optional historical comparison date (YYYY-MM-DD).
     #[arg(long = "compare-to")]
     pub compare_to: Option<String>,
+    /// Output format (json only).
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    /// Output file path.
+    #[arg(short, long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceForexArgs {
+    /// Time range for FX performance (e.g. 1y, 6mo).
+    #[arg(long, default_value = "1y")]
+    pub range: String,
+    /// Candle granularity (e.g. 1d, 4h).
+    #[arg(long, default_value = "1d")]
+    pub granularity: String,
+    /// Optional explicit Yahoo FX tickers (repeatable or comma-separated), e.g. EURUSD=X.
+    #[arg(long = "pairs", value_delimiter = ',')]
+    pub pairs: Vec<String>,
+    /// Optional currency filter (comma-separated), e.g. CAD,JPY,EUR.
+    #[arg(long = "currencies", value_delimiter = ',')]
+    pub currencies: Vec<String>,
+    /// Optional country filter (comma-separated), e.g. US,CA,JP,GB,EU.
+    #[arg(long = "countries", value_delimiter = ',')]
+    pub countries: Vec<String>,
+    /// Optional preset groups (comma-separated): majors,g10,em,europe,americas,asia,commodity.
+    #[arg(long = "groups", value_delimiter = ',')]
+    pub groups: Vec<String>,
+    /// Include selected EM FX pairs in the default basket.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub include_em: bool,
+    /// Optional as-of date/time (YYYY-MM-DD or RFC3339).
+    #[arg(long = "as-of")]
+    pub as_of: Option<String>,
+    /// Optional event timestamp for pre/post analysis (YYYY-MM-DD or RFC3339).
+    #[arg(long = "event-at")]
+    pub event_at: Option<String>,
+    /// Optional pre/post window around --event-at (e.g. 6h,12h,1d,3d).
+    #[arg(long = "event-window")]
+    pub event_window: Option<String>,
+    /// Optional historical comparison anchors (comma-separated YYYY-MM-DD or RFC3339).
+    #[arg(long = "compare-as-of", value_delimiter = ',')]
+    pub compare_as_of: Vec<String>,
+    /// Optional horizon windows for USD deltas (comma-separated), e.g. 1d,1w,1mo,3mo,1y.
+    #[arg(long = "horizons", value_delimiter = ',')]
+    pub horizons: Vec<String>,
+    /// Optional max number of resolved pairs after filtering.
+    #[arg(long = "max-pairs")]
+    pub max_pairs: Option<usize>,
+    /// Include the latest N close points per pair (compact timeseries context).
+    #[arg(long = "recent-points", default_value_t = 0)]
+    pub recent_points: usize,
+    /// Number of largest daily USD-impact moves to include.
+    #[arg(long, default_value_t = 12)]
+    pub top: usize,
+    /// Optional cache directory for timeseries fetches.
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
     /// Output format (json only).
     #[arg(long, default_value = "json")]
     pub format: String,

@@ -138,18 +138,57 @@ fn print_crawl_summary(resp: &eli_core::web::CrawlResponse, wr: Option<&MetaWrit
 }
 
 async fn cmd_web_search(args: WebSearchArgs) -> Result<()> {
-    let hits = eli_core::web::providers::general::search_general(&args.query)
+    let since = match args.since.as_deref() {
+        Some(raw) => Some(
+            chrono::NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
+                .map_err(|_| anyhow::anyhow!("invalid --since '{raw}' (expected YYYY-MM-DD)"))?,
+        ),
+        None => None,
+    };
+    let until = match args.until.as_deref() {
+        Some(raw) => Some(
+            chrono::NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
+                .map_err(|_| anyhow::anyhow!("invalid --until '{raw}' (expected YYYY-MM-DD)"))?,
+        ),
+        None => None,
+    };
+    if let (Some(since_date), Some(until_date)) = (since.as_ref(), until.as_ref()) {
+        if since_date > until_date {
+            anyhow::bail!("--since cannot be after --until");
+        }
+    }
+
+    let req = eli_core::web::WebSearchRequest {
+        query: args.query.clone(),
+        mode: map_web_search_mode(args.mode),
+        domains: args.domains.clone(),
+        exclude_domains: args.exclude_domains.clone(),
+        recency: map_web_search_recency(args.recency),
+        since,
+        until,
+        top: args.top,
+        probe_top: args.probe_top,
+        max_parallel: args.max_parallel,
+        track_key: args.track_key.clone(),
+    };
+    let resp = eli_core::web::providers::general::search_smart(req)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))
         .context("web search")?;
-
-    let resp = eli_core::web::WebSearchResponse { results: hits.clone(), hits };
     if let Some(out_path) = args.out {
         let wr = write_json_out_with_meta(
             out_path,
             &resp,
             "web.search",
-            &[format!("query={}", args.query)],
+            &[
+                format!("query={}", args.query),
+                format!(
+                    "mode={}",
+                    format!("{:?}", args.mode).to_ascii_lowercase()
+                ),
+                format!("top={}", args.top),
+                format!("probe_top={}", args.probe_top),
+            ],
         )?;
         println!(
             "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
@@ -161,24 +200,61 @@ async fn cmd_web_search(args: WebSearchArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+    let payload = if args.full {
+        serde_json::to_value(&resp).context("serialize web search response")?
+    } else {
+        compact_web_search_json(&resp)
+    };
+    let json = serde_json::to_string_pretty(&payload).context("serialize response")?;
     println!("{json}");
     Ok(())
 }
 
 async fn cmd_web_read(args: WebReadArgs) -> Result<()> {
-    let article = eli_core::web::providers::read::read_url(&args.url)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))
-        .context("read url")?;
+    let urls = collect_web_read_urls(&args)?;
+    if urls.is_empty() {
+        anyhow::bail!("must provide at least one URL via --url or --urls-file");
+    }
+
+    let meta_args = vec![
+        format!("urls={}", urls.len()),
+        format!("max_parallel={}", args.max_parallel),
+    ];
+
+    if urls.len() == 1 {
+        let article = eli_core::web::providers::read::read_url_with_diagnostics(&urls[0]).await;
+        let payload = if args.full {
+            serde_json::to_value(&article).context("serialize web read response")?
+        } else {
+            compact_web_read_json(&article, args.max_chars)
+        };
+
+        if let Some(out_path) = args.out {
+            let wr = write_json_out_with_meta(out_path, &payload, "web.read", &meta_args)?;
+            println!(
+                "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
+                serde_json::to_string(&wr.out_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+                serde_json::to_string(&wr.meta_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+            );
+            return Ok(());
+        }
+        let json = serde_json::to_string_pretty(&payload).context("serialize response")?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    let batch =
+        eli_core::web::providers::read::read_urls_with_diagnostics(&urls, args.max_parallel).await;
+    let payload = if args.full {
+        serde_json::to_value(&batch).context("serialize web read batch response")?
+    } else {
+        compact_web_read_batch_json(&batch, args.max_chars)
+    };
 
     if let Some(out_path) = args.out {
-        let wr = write_json_out_with_meta(
-            out_path,
-            &article,
-            "web.read",
-            &[format!("url={}", args.url)],
-        )?;
+        let wr = write_json_out_with_meta(out_path, &payload, "web.read", &meta_args)?;
         println!(
             "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
             serde_json::to_string(&wr.out_path.display().to_string())
@@ -188,10 +264,171 @@ async fn cmd_web_read(args: WebReadArgs) -> Result<()> {
         );
         return Ok(());
     }
-
-    let json = serde_json::to_string_pretty(&article).context("serialize response")?;
+    let json = serde_json::to_string_pretty(&payload).context("serialize response")?;
     println!("{json}");
     Ok(())
+}
+
+fn compact_web_search_json(resp: &eli_core::web::WebSearchResponse) -> serde_json::Value {
+    let items = resp
+        .items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "rank": item.rank,
+                "title": item.title,
+                "url": item.url,
+                "domain": item.domain,
+                "published_at": item.published_at,
+                "source": item.source,
+                "score_final": item.scores.final_score,
+                "read_probe": item.read_probe.as_ref().map(|probe| serde_json::json!({
+                    "fetch_status": probe.fetch_status,
+                    "blocked_reason": probe.blocked_reason,
+                    "attempts_count": probe.attempts_count,
+                    "text_chars": probe.text_chars,
+                })),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "query": resp.query,
+        "mode": resp.mode,
+        "generated_at": resp.generated_at,
+        "providers": resp.providers,
+        "stats": resp.stats,
+        "run_delta": resp.run_delta,
+        "items": items,
+        "view": "compact",
+    })
+}
+
+fn compact_web_read_json(
+    resp: &eli_core::web::WebReadResponse,
+    max_chars: usize,
+) -> serde_json::Value {
+    let (text, truncated, text_chars_total) = truncate_for_token_budget(&resp.text, max_chars);
+    let failed_attempts = resp
+        .attempts
+        .iter()
+        .filter(|attempt| !attempt.ok)
+        .map(|attempt| {
+            serde_json::json!({
+                "attempt": attempt.attempt,
+                "method": attempt.method,
+                "http_status": attempt.http_status,
+                "blocked_reason": attempt.blocked_reason,
+                "error": attempt.error,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "url": resp.url,
+        "final_url": resp.final_url,
+        "title": resp.title,
+        "text": text,
+        "text_chars_total": text_chars_total,
+        "text_truncated": truncated,
+        "fetch_status": resp.fetch_status,
+        "blocked_reason": resp.blocked_reason,
+        "attempts_count": resp.attempts.len(),
+        "failed_attempts": failed_attempts,
+        "fetched_at": resp.fetched_at,
+        "view": "compact",
+    })
+}
+
+fn compact_web_read_batch_json(
+    batch: &eli_core::web::WebReadBatchResponse,
+    max_chars: usize,
+) -> serde_json::Value {
+    let results = batch
+        .results
+        .iter()
+        .map(|resp| compact_web_read_json(resp, max_chars))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "mode": batch.mode,
+        "requested": batch.requested,
+        "deduped": batch.deduped,
+        "completed": batch.completed,
+        "success_count": batch.success_count,
+        "partial_count": batch.partial_count,
+        "blocked_count": batch.blocked_count,
+        "error_count": batch.error_count,
+        "results": results,
+        "view": "compact",
+    })
+}
+
+fn truncate_for_token_budget(text: &str, max_chars: usize) -> (String, bool, usize) {
+    let total_chars = text.chars().count();
+    if max_chars == 0 || total_chars <= max_chars {
+        return (text.to_string(), false, total_chars);
+    }
+
+    let mut out = String::with_capacity(max_chars + 32);
+    for ch in text.chars().take(max_chars) {
+        out.push(ch);
+    }
+    let trimmed = out.trim_end().to_string();
+    let mut final_text = trimmed;
+    final_text.push_str("\n...[truncated]");
+    (final_text, true, total_chars)
+}
+
+fn map_web_search_mode(mode: WebSearchModeArg) -> eli_core::web::WebSearchMode {
+    match mode {
+        WebSearchModeArg::Auto => eli_core::web::WebSearchMode::Auto,
+        WebSearchModeArg::News => eli_core::web::WebSearchMode::News,
+        WebSearchModeArg::Finance => eli_core::web::WebSearchMode::Finance,
+        WebSearchModeArg::Research => eli_core::web::WebSearchMode::Research,
+        WebSearchModeArg::Tech => eli_core::web::WebSearchMode::Tech,
+        WebSearchModeArg::Encyclopedia => eli_core::web::WebSearchMode::Encyclopedia,
+    }
+}
+
+fn map_web_search_recency(
+    recency: Option<WebSearchRecencyArg>,
+) -> Option<eli_core::web::WebSearchRecency> {
+    recency.map(|r| match r {
+        WebSearchRecencyArg::Day => eli_core::web::WebSearchRecency::Day,
+        WebSearchRecencyArg::Week => eli_core::web::WebSearchRecency::Week,
+        WebSearchRecencyArg::Month => eli_core::web::WebSearchRecency::Month,
+        WebSearchRecencyArg::Year => eli_core::web::WebSearchRecency::Year,
+    })
+}
+
+fn collect_web_read_urls(args: &WebReadArgs) -> Result<Vec<String>> {
+    let mut out = Vec::<String>::new();
+    for raw in &args.url {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_string());
+        }
+    }
+    if let Some(path) = &args.urls_file {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("read --urls-file {}", path.display()))?;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            out.push(trimmed.to_string());
+        }
+    }
+
+    let mut deduped = Vec::<String>::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+    for url in out {
+        if seen.insert(url.clone()) {
+            deduped.push(url);
+        }
+    }
+    Ok(deduped)
 }
 
 async fn cmd_web_extract(args: WebExtractArgs) -> Result<()> {
@@ -815,4 +1052,3 @@ fn schema_pattern_summary_parts(value: &serde_json::Value) -> Vec<String> {
     let nullable = format!("nullable_fields={}", meta.vitals.nullable_paths);
     vec![root, path_count, nullable]
 }
-

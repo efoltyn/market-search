@@ -101,6 +101,25 @@ Each indicator includes `current_value` and `change_1y` (percent change year-ove
 
 **Why this matters:** AI models hallucinate macro data. Training data is stale — models commonly cite US debt-to-GDP as ~98-101% when the real number is 121%. Always use `eli finance macro` for macro data instead of relying on model knowledge.
 
+#### `eli finance forex`
+Broad FX dashboard for USD-relative performance across a curated basket of major + selected EM currencies (Yahoo FX). Includes per-pair 1y deltas and biggest single-day move dates.
+```bash
+eli finance forex                               # default: 1y, daily, broad USD basket (majors + EM)
+eli finance forex --include-em false            # majors only
+eli finance forex --range 6mo --top 20          # shorter horizon + larger top move list
+eli finance forex --pairs EURUSD=X,USDJPY=X     # custom FX basket
+eli finance forex --groups majors,em            # group presets: majors,g10,em,europe,americas,asia,commodity
+eli finance forex --countries US,CA,JP,MX,BR    # country tags mapped to currencies
+eli finance forex --currencies CAD,JPY,MXN      # direct currency filter
+eli finance forex --horizons 1d,1w,1mo,3mo,1y   # multi-horizon USD deltas
+eli finance forex --range 30d --granularity 1h --recent-points 8  # intraday + compact tail series
+eli finance forex --as-of 2026-02-20            # historical cut-off date
+eli finance forex --event-at 2026-02-20T15:00:00Z --event-window 12h --granularity 1h  # pre/post event impact
+eli finance forex --event-at 2026-02-20 --event-window 1d --groups majors --horizons 6h,12h,1d,3d
+eli finance forex --compare-as-of 2026-02-14,2026-01-31  # compare current basket vs prior anchors
+eli finance forex --range 30d --granularity 1h            # repeat same command to get delta_context vs last run
+```
+
 ---
 
 ### Prediction Markets
@@ -241,16 +260,26 @@ eli web crawl --url https://example.com --view raw                   # raw outpu
 ```
 
 #### `eli web search`
-Search the web via DuckDuckGo.
+Smart evidence-ingestion search with deterministic filters, read probes, and run deltas.
 ```bash
-eli web search "Fed rate decision February 2026"
+eli web search --query "Fed rate decision February 2026" --mode news
+eli web search --query "yen intervention" --domains reuters.com,bloomberg.com --recency week
+eli web search --query "fomc preview" --since 2026-01-01 --until 2026-01-31 --probe-top 3
+eli web search --query "usd weakness" --track-key usd-daily
+eli web search --query "spider docs rust crate" --mode tech --full   # verbose mode
 ```
+Default output is compact for token efficiency. Use `--full` when you need verbose snippets/score components.
 
 #### `eli web read`
-Read and extract content from a single URL.
+Read and extract content from one or many URLs with structured fetch diagnostics.
 ```bash
-eli web read https://example.com/article
+eli web read --url https://example.com/article
+eli web read --url https://a.com/x,https://b.com/y --max-parallel 8
+eli web read --urls-file urls.txt --max-parallel 6
+eli web read --url https://docs.rs/spider/latest/spider/ --max-chars 1600
+eli web read --url https://docs.rs/spider/latest/spider/ --full
 ```
+Default output is compact (`--max-chars` budget + failure diagnostics). Use `--full` for complete text payloads.
 
 #### `eli web extract`
 Extract key facts from content (URL, file, or text).
@@ -325,6 +354,7 @@ eli agent debate --prompt "US fiscal dominance" --vars vars.json
 - **The CSV is an index, not the data.** Stale CSV is fine for discovering event IDs/slugs/titles. Use `--live` or `--event` for fresh prices.
 - **No sync? No problem.** `--search` auto-falls back to live API when no CSV exists.
 - **`eli finance timeseries` auto-detects Yahoo vs FRED** — just pass any ticker or FRED series ID.
+- **For broad USD FX context, use `eli finance forex`** instead of hand-picking pairs one-by-one.
 - **Combine tools for a full picture:** `macro` for economy, `snapshot` for prices, `options` for flow, `odds --search` for market expectations, `news` for headlines.
 
 ### Common mistakes
@@ -332,6 +362,8 @@ eli agent debate --prompt "US fiscal dominance" --vars vars.json
 - Don't call `eli finance fundamentals` on ETFs (SPY, QQQ, TLT) — use `snapshot` instead.
 - Don't `sync` when you just need one event — use `eli finance odds --event <ticker>` for direct API lookup.
 - Don't use `--provider fred` or `--provider yahoo` — the default `auto` handles both.
+- Don't pass non-Yahoo FX symbols to `eli finance forex --pairs` — use Yahoo-format tickers like `EURUSD=X`.
+- For country-tag mode in `eli finance forex`, use ISO2-like tags (e.g. `US,CA,JP,GB,EU`).
 - News for short tickers (AI, SPY) can return unrelated results — check relevance.
 - `eli finance macro` may return empty on weekends/holidays — FRED API limitation.
 - Don't assume Polymarket event IDs are slugs — they're numeric (e.g., `48802`). Use `--provider polymarket` when querying Polymarket events directly.
@@ -359,7 +391,7 @@ bin/eli finance options --ticker SPY --summary
 bin/eli finance sync
 bin/eli finance odds --search "recession" --live
 bin/eli finance news --ticker AAPL --date 2026-02-05
-bin/eli web search "tariff impact on semiconductors"
+bin/eli web search --query "tariff impact on semiconductors" --mode news
 ```
 
 ---
