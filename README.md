@@ -11,11 +11,27 @@ Native data tools for AI agents. Stock prices, macro indicators, prediction mark
 **Requires Rust:** https://rustup.rs
 
 ```bash
-# From repo root
-cargo install --path crates/eli-cli
+cargo install eli
 ```
 
 Installs `eli` to `~/.cargo/bin/eli`.
+
+For local development from source:
+
+```bash
+# From /Users/elifoltyn/Desktop/eli-code/eli
+cargo install --path .
+```
+
+## Workspace Crates
+
+`eli` is the install target. The workspace also contains internal crates that are published only to satisfy dependency resolution for `eli`:
+
+- [`eli-cli`](./crates/eli-cli/README.md) (internal command/runtime library)
+- [`eli-core`](./crates/eli-core/README.md) (internal tools/finance/web core)
+- [`eli-adapters`](./crates/eli-adapters/README.md) (internal provider adapters)
+- [`eli-finance-types`](./crates/eli-finance-types/README.md) (internal finance contracts)
+- [`eli-screen`](./crates/eli-screen/README.md) (internal screen automation)
 
 ---
 
@@ -75,7 +91,7 @@ eli finance odds --search "recession" --live
 eli finance yield-curve --compare 3mo,1y
 
 # Web
-eli web search "tariff impact semiconductors"
+eli web search --query "tariff impact semiconductors" --mode news
 eli web crawl --url https://example.com
 
 # Codebase analysis
@@ -108,7 +124,7 @@ Or set in `~/.config/eli/config.toml`.
 cd eli
 CARGO_HOME=$(pwd)/.cargo_local_local \
 CARGO_TARGET_DIR=$(pwd)/target_local \
-cargo build -p eli-cli --bin eli
+cargo build -p eli --bin eli
 
 ln -sf $(pwd)/target_local/debug/eli ../bin/eli
 ```

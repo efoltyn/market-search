@@ -3,12 +3,10 @@ name = "eli-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI binary for eli coding agent"
-publish = false
-
-[[bin]]
-name = "eli"
-path = "src/main.rs"
+repository.workspace = true
+description = "Internal CLI library for the `eli` crate. Use `cargo install eli`."
+readme = "README.md"
+autobins = false
 
 [dependencies]
 clap.workspace = true

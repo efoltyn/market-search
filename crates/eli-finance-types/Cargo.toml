@@ -3,8 +3,9 @@ name = "eli-finance-types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared finance request/response contracts for Eli"
-publish = false
+repository.workspace = true
+description = "Internal finance contracts for the `eli` crate. Use `cargo install eli`."
+readme = "README.md"
 
 [dependencies]
 chrono.workspace = true

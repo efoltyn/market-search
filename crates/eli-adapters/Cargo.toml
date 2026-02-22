@@ -3,8 +3,9 @@ name = "eli-adapters"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Provider adapters for eli coding agent"
-publish = false
+repository.workspace = true
+description = "Internal provider adapters for the `eli` crate. Use `cargo install eli`."
+readme = "README.md"
 
 [dependencies]
 async-trait.workspace = true
