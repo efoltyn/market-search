@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Shared finance request/response contracts for Eli"
+publish = false
 
 [dependencies]
 chrono.workspace = true
