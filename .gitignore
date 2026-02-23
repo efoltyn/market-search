@@ -71,3 +71,12 @@ claims/
 scenario_a/
 scenario_b/
 tmp/
+
+# Public repo scope (keep local, untracked)
+AGENTS.md
+claude.md
+docs/
+scripts/
+eli_research/
+eli website/
+eli-swift/
