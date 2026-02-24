@@ -1,17 +1,98 @@
+use serde::de::DeserializeOwned;
 
-/// Sync events from Kalshi with rate limiting.
-/// Strategy:
-///   1. Fetch all open events → build category map
-///   2. Probe series for category metadata
-///   3. Fetch markets PER non-sports series (skips the 50k+ sports markets entirely)
-///   4. Assign categories, drop any remaining sports
-///
-/// Sports markets are filtered out — they dominate Kalshi (50k+ open) and are pure noise
-/// for financial analysis.
+const KALSHI_EVENTS_PAGE_LIMIT: usize = 200;
+const KALSHI_MARKETS_PAGE_LIMIT: usize = 1000;
+const KALSHI_MAX_RETRIES: usize = 6;
+
+#[derive(Default, Clone, Copy)]
+struct RetryMetrics {
+    attempts: usize,
+    retry_429: usize,
+    retry_5xx: usize,
+}
+
+impl RetryMetrics {
+    fn merge(&mut self, other: RetryMetrics) {
+        self.attempts = self.attempts.saturating_add(other.attempts);
+        self.retry_429 = self.retry_429.saturating_add(other.retry_429);
+        self.retry_5xx = self.retry_5xx.saturating_add(other.retry_5xx);
+    }
+}
+
+#[derive(Deserialize)]
+struct EventsResp {
+    #[serde(default)]
+    events: Vec<EventRow>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+struct EventRow {
+    event_ticker: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    series_ticker: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MarketsResp {
+    #[serde(default)]
+    markets: Vec<MarketRow>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+struct MarketRow {
+    ticker: String,
+    #[serde(default)]
+    title: Option<String>,
+    event_ticker: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    volume: Option<i64>,
+    #[serde(default)]
+    volume_24h: Option<i64>,
+    #[serde(default)]
+    yes_bid_dollars: Option<String>,
+    #[serde(default)]
+    yes_ask_dollars: Option<String>,
+    #[serde(default)]
+    last_price_dollars: Option<String>,
+    #[serde(default)]
+    yes_bid: Option<i64>,
+    #[serde(default)]
+    yes_ask: Option<i64>,
+    #[serde(default, rename = "last_price", alias = "yes_price")]
+    last_price: Option<i64>,
+}
+
+struct EventsFetchResult {
+    rows: Vec<EventRow>,
+    pages_fetched: usize,
+    exhausted: bool,
+    metrics: RetryMetrics,
+}
+
+struct GlobalMarketsFetchResult {
+    pages_fetched: usize,
+    exhausted: bool,
+    metrics: RetryMetrics,
+}
+
+/// Sync events/markets from Kalshi with explicit dual-path ingestion:
+///   - include_sports=true: global `/markets` cursor pagination (full breadth).
+///   - include_sports=false: global `/markets` with `mve_filter=exclude`, then
+///     event-category filtering to keep non-sports coverage with lower token/noise load.
 pub(crate) async fn sync_kalshi_events(
     limiter: &RateLimiter,
-    max_pages: usize,
-    backfill_profile: OddsSyncBackfillProfile,
+    max_pages: Option<usize>,
+    include_sports: bool,
 ) -> std::result::Result<
     (
         Vec<OddsListedEvent>,
@@ -21,444 +102,112 @@ pub(crate) async fn sync_kalshi_events(
     String,
 > {
     eprintln!(
-        "[kalshi] starting sync (max_pages={}, backfill_profile={:?})",
-        max_pages, backfill_profile
+        "[kalshi] starting sync (max_pages={}, include_sports={})",
+        max_pages
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unbounded".to_string()),
+        include_sports
     );
-    let mut events_pages_fetched = 0usize;
-    let mut events_exhausted = false;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(StdDuration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Kalshi client init failed: {e}"))?;
+
+    let page_cap = max_pages.unwrap_or(usize::MAX);
+
+    let events_pages_fetched;
+    let events_exhausted;
+    let events_requests;
     let mut markets_pages_fetched = 0usize;
-    let markets_exhausted; // set at the end based on coverage
-    let series_backfill_calls;
-    let series_backfill_cap: Option<usize>;
-    let series_backfill_truncated: Option<bool>;
-    let mut category_map: HashMap<String, String> = HashMap::new();
-    let mut series_category_map: HashMap<String, String> = HashMap::new();
-    let mut series_catalog: Vec<(String, Option<String>)> = Vec::new();
-    let mut all_events = Vec::new();
+    let markets_exhausted;
+    let mut markets_requests = 0usize;
+    let mut retry_count_429 = 0usize;
+    let mut retry_count_5xx = 0usize;
 
-    // Phase 1: Fetch all open events (for category metadata).
-    // Kalshi API limit max = 100 per docs.
-    {
-        let mut cursor: Option<String> = None;
-        let event_pages = max_pages.max(100);
-        for page in 0..event_pages {
-            let mut attempts = 0usize;
-            loop {
-                limiter.wait().await;
-                let req = OddsRequest {
-                    provider: Some("kalshi".to_string()),
-                    list_events: true,
-                    limit: Some(100),
-                    cursor: cursor.clone(),
-                    max_pages: Some(1),
-                    status: Some("open".to_string()),
-                    ..Default::default()
-                };
-                match fetch_odds_kalshi(req).await {
-                    Ok(resp) => {
-                        events_pages_fetched = events_pages_fetched.saturating_add(1);
-                        limiter.on_success();
-                        let events = resp.available_events.unwrap_or_default();
-                        let count = events.len();
-                        if page % 10 == 0 || count == 0 {
-                            eprintln!(
-                                "[kalshi] events page {}: {} events (total: {})",
-                                page + 1,
-                                count,
-                                all_events.len() + count
-                            );
-                        }
-                        if count == 0 {
-                            break;
-                        }
-                        for e in &events {
-                            if let Some(ref cat) = e.category {
-                                category_map.insert(e.ticker.clone(), cat.clone());
-                                if let Some(ref st) = e.series_ticker {
-                                    series_category_map.insert(st.clone(), cat.clone());
-                                }
-                            }
-                        }
-                        all_events.extend(events);
-                        cursor = resp.cursor.filter(|c| !c.trim().is_empty());
-                        break;
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        let is_rate_limit = msg.contains("http 429")
-                            || msg.contains("429 Too Many Requests")
-                            || msg.contains("http 401")
-                            || msg.contains("token_authentication_failure");
-                        if is_rate_limit && attempts < 5 {
-                            attempts += 1;
-                            limiter.on_rate_limited();
-                            let cooldown_secs =
-                                5u64.saturating_mul(1u64 << ((attempts - 1) as u32));
-                            eprintln!(
-                                "[kalshi] rate limited on events page {}, retry {}/5 (backoff {}s)",
-                                page + 1,
-                                attempts,
-                                cooldown_secs.min(60)
-                            );
-                            sleep(TokioDuration::from_secs(cooldown_secs.min(60))).await;
-                            continue;
-                        }
-                        eprintln!("[kalshi] events page {} failed: {}", page + 1, e);
-                        break;
-                    }
-                }
-            }
-            if cursor.is_none() {
-                events_exhausted = true;
-                break;
-            }
+    let events_fetch = fetch_open_events(&client, limiter, page_cap).await?;
+    events_pages_fetched = events_fetch.pages_fetched;
+    events_exhausted = events_fetch.exhausted;
+    events_requests = events_fetch.metrics.attempts;
+    retry_count_429 = retry_count_429.saturating_add(events_fetch.metrics.retry_429);
+    retry_count_5xx = retry_count_5xx.saturating_add(events_fetch.metrics.retry_5xx);
+
+    let mut category_map: HashMap<String, Option<String>> = HashMap::new();
+    let mut all_events: Vec<OddsListedEvent> = Vec::new();
+    for row in events_fetch.rows {
+        let category = normalize_event_category(row.category.as_deref())
+            .or_else(|| infer_category_from_event_ticker(&row.event_ticker));
+        let is_sports = category.as_deref().map_or(false, is_sports_category);
+        category_map.insert(row.event_ticker.clone(), category.clone());
+
+        if !include_sports && is_sports {
+            continue;
         }
+
+        all_events.push(build_event_record(row, category));
     }
 
-    // Filter out sports events
-    let sports_events_before = all_events.len();
-    all_events.retain(|e| !e.category.as_deref().map_or(false, is_sports_category));
-    let sports_events_dropped = sports_events_before - all_events.len();
-
-    eprintln!(
-        "[kalshi] events done: {} non-sports events (dropped {} sports)",
-        all_events.len(),
-        sports_events_dropped,
-    );
-
-    // Phase 2: Series probes for category metadata.
-    // We probe non-sports categories to build our series catalog.
-    {
-        let probes: Vec<Option<&str>> = vec![
-            None,
-            Some("Economics"),
-            Some("Financials"),
-            Some("Politics"),
-            Some("Companies"),
-            Some("World"),
-            Some("Crypto"),
-            Some("Science and Technology"),
-        ];
-        for category in probes {
-            let mut attempts = 0usize;
-            loop {
-                limiter.wait().await;
-                let req = OddsRequest {
-                    provider: Some("kalshi".to_string()),
-                    list_series: true,
-                    category: category.map(|s| s.to_string()),
-                    limit: Some(100),
-                    max_pages: Some(1),
-                    ..Default::default()
-                };
-                match fetch_odds_kalshi(req).await {
-                    Ok(resp) => {
-                        limiter.on_success();
-                        if let Some(series_list) = resp.available_series {
-                            for s in &series_list {
-                                series_catalog.push((s.ticker.clone(), s.category.clone()));
-                                if let Some(ref cat) = s.category {
-                                    series_category_map
-                                        .entry(s.ticker.clone())
-                                        .or_insert_with(|| cat.clone());
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        let is_rate_limit = msg.contains("http 429")
-                            || msg.contains("429 Too Many Requests")
-                            || msg.contains("http 401")
-                            || msg.contains("token_authentication_failure");
-                        if is_rate_limit && attempts < 4 {
-                            attempts += 1;
-                            limiter.on_rate_limited();
-                            let cooldown_secs =
-                                4u64.saturating_mul(1u64 << ((attempts - 1) as u32));
-                            sleep(TokioDuration::from_secs(cooldown_secs.min(45))).await;
-                            continue;
-                        }
-                        warn!(
-                            "Kalshi series list probe failed for category {:?} (non-fatal): {}",
-                            category, e
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-        let search_terms = [
-            "recession",
-            "gdp",
-            "inflation",
-            "cpi",
-            "fed",
-            "tariff",
-            "greenland",
-            "bitcoin",
-            "ethereum",
-            "trump",
-            "congress",
-        ];
-        for term in search_terms {
-            let mut attempts = 0usize;
-            loop {
-                limiter.wait().await;
-                let req = OddsRequest {
-                    provider: Some("kalshi".to_string()),
-                    list_series: true,
-                    search: Some(term.to_string()),
-                    limit: Some(100),
-                    max_pages: Some(1),
-                    ..Default::default()
-                };
-                match fetch_odds_kalshi(req).await {
-                    Ok(resp) => {
-                        limiter.on_success();
-                        if let Some(series_list) = resp.available_series {
-                            for s in &series_list {
-                                series_catalog.push((s.ticker.clone(), s.category.clone()));
-                                if let Some(ref cat) = s.category {
-                                    series_category_map
-                                        .entry(s.ticker.clone())
-                                        .or_insert_with(|| cat.clone());
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        let is_rate_limit = msg.contains("http 429")
-                            || msg.contains("429 Too Many Requests")
-                            || msg.contains("http 401")
-                            || msg.contains("token_authentication_failure");
-                        if is_rate_limit && attempts < 4 {
-                            attempts += 1;
-                            limiter.on_rate_limited();
-                            let cooldown_secs =
-                                4u64.saturating_mul(1u64 << ((attempts - 1) as u32));
-                            sleep(TokioDuration::from_secs(cooldown_secs.min(45))).await;
-                            continue;
-                        }
-                        warn!(
-                            "Kalshi series list search probe failed for '{}' (non-fatal): {}",
-                            term, e
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-        let mut seen_series = HashSet::new();
-        series_catalog.retain(|(ticker, _)| seen_series.insert(ticker.clone()));
-        eprintln!(
-            "[kalshi] series probes: {} unique series",
-            series_catalog.len()
-        );
-    }
-
-    // Phase 3: Fetch markets per NON-SPORTS series.
-    // Instead of paginating all 50k+ open markets (dominated by sports),
-    // we fetch markets per series_ticker for non-sports series only.
-    // This is much more efficient and gives complete non-sports coverage.
-    let mut all_markets = Vec::new();
+    let mut all_markets: Vec<OddsListedMarket> = Vec::new();
     let mut seen_market_tickers: HashSet<String> = HashSet::new();
-    {
-        // Also collect non-sports series from events (series_ticker on events)
-        let mut fetch_series: Vec<String> = Vec::new();
 
-        // Priority: economics/financials/companies/crypto first
-        let mut hi: Vec<String> = Vec::new();
-        let mut mid: Vec<String> = Vec::new();
-        let mut low: Vec<String> = Vec::new();
-        for (ticker, cat) in &series_catalog {
-            let c = cat.as_deref().unwrap_or("").to_lowercase();
-            if is_sports_category(&c) {
-                continue;
-            }
-            if c.contains("econom")
-                || c.contains("financial")
-                || c.contains("compan")
-                || c.contains("crypto")
-            {
-                hi.push(ticker.clone());
-            } else if c.contains("politic") || c.contains("world") || c.contains("elect") {
-                mid.push(ticker.clone());
-            } else {
-                low.push(ticker.clone());
-            }
-        }
-        fetch_series.extend(hi);
-        fetch_series.extend(mid);
-        fetch_series.extend(low);
-
-        // Also add series_tickers discovered from events that aren't in the catalog yet
-        let catalog_set: HashSet<String> = series_catalog.iter().map(|(t, _)| t.clone()).collect();
-        for e in &all_events {
-            if let Some(ref st) = e.series_ticker {
-                if !catalog_set.contains(st) {
-                    // Check if the series category (from events) is non-sports
-                    let cat = series_category_map
-                        .get(st)
-                        .map(|c| c.as_str())
-                        .unwrap_or("");
-                    if !is_sports_category(cat) {
-                        fetch_series.push(st.clone());
-                    }
-                }
-            }
-        }
-
-        let mut seen = HashSet::new();
-        fetch_series.retain(|s| seen.insert(s.clone()));
-
-        let considered_series = fetch_series.len();
-        let requested_cap = max_pages.saturating_mul(75);
-        let (profile_name, baseline_cap, hard_cap) = match backfill_profile {
-            OddsSyncBackfillProfile::Fast => ("fast", 350usize, 1_500usize),
-            OddsSyncBackfillProfile::Balanced => ("balanced", 1_200usize, 6_000usize),
-            OddsSyncBackfillProfile::Full => ("full", 3_500usize, 20_000usize),
-        };
-        let discovered_cap = considered_series.saturating_add(50);
-        let series_cap = requested_cap
-            .max(baseline_cap)
-            .max(discovered_cap)
-            .min(hard_cap);
-        series_backfill_cap = Some(series_cap);
-        eprintln!(
-            "[kalshi] fetching markets for {} non-sports series (cap: {}, profile={}, requested_budget={}, baseline={}, discovered+headroom={}, hard_cap={})",
-            considered_series.min(series_cap),
-            series_cap,
-            profile_name,
-            requested_cap,
-            baseline_cap,
-            discovered_cap,
-            hard_cap,
-        );
-
-        let mut calls = 0usize;
-        for series_ticker in fetch_series.into_iter().take(series_cap) {
-            let mut attempts = 0usize;
-            loop {
-                limiter.wait().await;
-                let req = OddsRequest {
-                    provider: Some("kalshi".to_string()),
-                    list_markets: true,
-                    series_ticker: Some(series_ticker.clone()),
-                    limit: Some(100),
-                    max_pages: Some(1),
-                    status: Some("open".to_string()),
-                    ..Default::default()
-                };
-                match fetch_odds_kalshi(req).await {
-                    Ok(resp) => {
-                        limiter.on_success();
-                        calls += 1;
-                        markets_pages_fetched = markets_pages_fetched.saturating_add(1);
-                        for market in resp.available_markets.unwrap_or_default() {
-                            if seen_market_tickers.insert(market.ticker.clone()) {
-                                all_markets.push(market);
-                            }
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        let is_rate_limit = msg.contains("http 429")
-                            || msg.contains("429 Too Many Requests")
-                            || msg.contains("http 401")
-                            || msg.contains("token_authentication_failure");
-                        if is_rate_limit && attempts < 4 {
-                            attempts += 1;
-                            limiter.on_rate_limited();
-                            let cooldown_secs =
-                                4u64.saturating_mul(1u64 << ((attempts - 1) as u32));
-                            sleep(TokioDuration::from_secs(cooldown_secs.min(45))).await;
-                            continue;
-                        }
-                        warn!(
-                            "Kalshi series market fetch failed for {}: {}",
-                            series_ticker, e
-                        );
-                        break;
-                    }
-                }
-            }
-            if calls % 100 == 0 && calls > 0 {
-                eprintln!(
-                    "[kalshi] series progress: {} calls, {} markets so far",
-                    calls,
-                    all_markets.len()
-                );
-            }
-        }
-
-        series_backfill_calls = calls;
-        series_backfill_truncated = Some(considered_series > series_cap);
-        markets_exhausted = considered_series <= series_cap;
-
-        eprintln!(
-            "[kalshi] series fetch done: {} calls, {} unique markets",
-            calls,
-            all_markets.len()
-        );
+    if include_sports {
+        eprintln!("[kalshi] mode=global-markets (sports included)");
+        let global = run_global_markets_sync(
+            &client,
+            limiter,
+            page_cap,
+            include_sports,
+            &category_map,
+            &mut seen_market_tickers,
+            &mut all_markets,
+        )
+        .await?;
+        markets_pages_fetched = markets_pages_fetched.saturating_add(global.pages_fetched);
+        markets_exhausted = global.exhausted;
+        markets_requests = markets_requests.saturating_add(global.metrics.attempts);
+        retry_count_429 = retry_count_429.saturating_add(global.metrics.retry_429);
+        retry_count_5xx = retry_count_5xx.saturating_add(global.metrics.retry_5xx);
+    } else {
+        eprintln!("[kalshi] mode=global-markets (non-sports filtered)");
+        let global = run_global_markets_sync(
+            &client,
+            limiter,
+            page_cap,
+            false,
+            &category_map,
+            &mut seen_market_tickers,
+            &mut all_markets,
+        )
+        .await?;
+        markets_pages_fetched = markets_pages_fetched.saturating_add(global.pages_fetched);
+        markets_exhausted = global.exhausted;
+        markets_requests = markets_requests.saturating_add(global.metrics.attempts);
+        retry_count_429 = retry_count_429.saturating_add(global.metrics.retry_429);
+        retry_count_5xx = retry_count_5xx.saturating_add(global.metrics.retry_5xx);
     }
 
-    // Phase 4: Assign categories via event→category map and series prefix matching.
-    let mut direct_hits = 0usize;
-    let mut series_hits = 0usize;
-    for m in &mut all_markets {
-        if m.category.is_none() {
-            if let Some(cat) = category_map.get(&m.event_ticker) {
-                m.category = Some(cat.clone());
-                direct_hits += 1;
-            } else {
-                let mut best: Option<(&str, &str)> = None;
-                for (series, cat) in &series_category_map {
-                    if m.event_ticker.starts_with(series.as_str()) {
-                        if best.map_or(true, |(bs, _)| series.len() > bs.len()) {
-                            best = Some((series.as_str(), cat.as_str()));
-                        }
-                    }
-                }
-                if let Some((_, cat)) = best {
-                    m.category = Some(cat.to_string());
-                    series_hits += 1;
-                }
-            }
-        }
-    }
-    eprintln!(
-        "[kalshi] category assignment hits: direct={} series_prefix={}",
-        direct_hits, series_hits
-    );
-
-    // Phase 5: Final sports filter (belt and suspenders).
-    let pre_filter = all_markets.len();
-    all_markets.retain(|m| !m.category.as_deref().map_or(false, is_sports_category));
-    let sports_dropped = pre_filter - all_markets.len();
-
-    eprintln!(
-        "[kalshi] sync complete: {} markets, {} events (dropped {} sports markets)",
-        all_markets.len(),
-        all_events.len(),
-        sports_dropped,
-    );
+    all_events.sort_by(|a, b| a.ticker.cmp(&b.ticker));
+    all_markets.sort_by(|a, b| a.ticker.cmp(&b.ticker));
 
     let mut strict_fail_reasons = Vec::new();
     if !events_exhausted {
-        strict_fail_reasons.push("events pagination not exhausted".to_string());
+        if let Some(cap) = max_pages {
+            strict_fail_reasons.push(format!(
+                "events pagination not exhausted within max_pages={cap}"
+            ));
+        } else {
+            strict_fail_reasons.push("events pagination not exhausted".to_string());
+        }
     }
     if !markets_exhausted {
-        strict_fail_reasons
-            .push("series-based market fetch hit cap before all series covered".to_string());
-    }
-    if series_backfill_truncated.unwrap_or(false) {
-        strict_fail_reasons
-            .push("series backfill hit cap before covering all discovered series".to_string());
+        if let Some(cap) = max_pages {
+            strict_fail_reasons.push(format!(
+                "markets pagination not exhausted within max_pages={cap}"
+            ));
+        } else {
+            strict_fail_reasons.push("markets pagination not exhausted".to_string());
+        }
     }
 
     let coverage = OddsSyncCoverage {
@@ -467,12 +216,405 @@ pub(crate) async fn sync_kalshi_events(
         events_exhausted,
         markets_pages_fetched,
         markets_exhausted,
-        series_backfill_calls: Some(series_backfill_calls),
-        series_backfill_cap,
-        series_backfill_truncated,
+        events_requests,
+        markets_requests,
+        retry_count_429,
+        retry_count_5xx,
+        series_backfill_calls: None,
+        series_backfill_cap: None,
+        series_backfill_truncated: None,
         strict_pass: strict_fail_reasons.is_empty(),
         strict_fail_reasons,
     };
 
+    eprintln!(
+        "[kalshi] sync complete: {} markets, {} events",
+        all_markets.len(),
+        all_events.len()
+    );
+
     Ok((all_events, all_markets, coverage))
+}
+
+fn build_event_record(row: EventRow, category: Option<String>) -> OddsListedEvent {
+    let title = row
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&row.event_ticker)
+        .to_string();
+
+    OddsListedEvent {
+        ticker: row.event_ticker,
+        title,
+        category,
+        series_ticker: row.series_ticker,
+        source: Some("kalshi".to_string()),
+        event_id: None,
+        slug: None,
+        tags: None,
+    }
+}
+
+async fn fetch_open_events(
+    client: &reqwest::Client,
+    limiter: &RateLimiter,
+    page_cap: usize,
+) -> std::result::Result<EventsFetchResult, String> {
+    let mut rows = Vec::new();
+    let mut pages_fetched = 0usize;
+    let mut exhausted = false;
+    let mut metrics = RetryMetrics::default();
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors: HashSet<String> = HashSet::new();
+    let mut page = 0usize;
+
+    while page < page_cap {
+        let mut url = reqwest::Url::parse(&format!("{}/events", KALSHI_BASE_URL))
+            .map_err(|e| format!("Kalshi events url parse failed: {e}"))?;
+        url.query_pairs_mut()
+            .append_pair("status", "open")
+            .append_pair("limit", &KALSHI_EVENTS_PAGE_LIMIT.to_string());
+        if let Some(ref c) = cursor {
+            if !c.trim().is_empty() {
+                url.query_pairs_mut().append_pair("cursor", c.trim());
+            }
+        }
+
+        let (body, req_metrics) =
+            fetch_json_with_retry::<EventsResp>(client, limiter, url, "Kalshi events").await?;
+        metrics.merge(req_metrics);
+
+        let count = body.events.len();
+        pages_fetched = pages_fetched.saturating_add(1);
+        if page == 0 || (page + 1) % 10 == 0 || count == 0 {
+            eprintln!(
+                "[kalshi] events page {}: {} rows (total: {})",
+                page + 1,
+                count,
+                rows.len() + count
+            );
+        }
+
+        if count == 0 {
+            exhausted = true;
+            break;
+        }
+
+        rows.extend(body.events.into_iter());
+
+        let next_cursor = body.cursor.filter(|c| !c.trim().is_empty());
+        if let Some(ref c) = next_cursor {
+            if !seen_cursors.insert(c.clone()) {
+                eprintln!("[kalshi] events stop: cursor cycle detected");
+                exhausted = true;
+                break;
+            }
+        }
+        cursor = next_cursor;
+        if cursor.is_none() || count < KALSHI_EVENTS_PAGE_LIMIT {
+            exhausted = true;
+            break;
+        }
+
+        page = page.saturating_add(1);
+    }
+
+    Ok(EventsFetchResult {
+        rows,
+        pages_fetched,
+        exhausted,
+        metrics,
+    })
+}
+
+async fn run_global_markets_sync(
+    client: &reqwest::Client,
+    limiter: &RateLimiter,
+    page_cap: usize,
+    include_sports: bool,
+    category_map: &HashMap<String, Option<String>>,
+    seen_market_tickers: &mut HashSet<String>,
+    all_markets: &mut Vec<OddsListedMarket>,
+) -> std::result::Result<GlobalMarketsFetchResult, String> {
+    let mut market_cursor: Option<String> = None;
+    let mut seen_market_cursors: HashSet<String> = HashSet::new();
+    let mut page = 0usize;
+    let mut pages_fetched = 0usize;
+    let mut fetched_market_rows = 0usize;
+    let mut metrics = RetryMetrics::default();
+    let mut exhausted = false;
+
+    while page < page_cap {
+        let mut url = reqwest::Url::parse(&format!("{}/markets", KALSHI_BASE_URL))
+            .map_err(|e| format!("Kalshi markets url parse failed: {e}"))?;
+        url.query_pairs_mut()
+            .append_pair("status", "open")
+            .append_pair("limit", &KALSHI_MARKETS_PAGE_LIMIT.to_string());
+        if !include_sports {
+            // Default non-sports mode excludes multivariate combo markets, which are
+            // overwhelmingly sports-heavy and dominate sync runtime/noise.
+            url.query_pairs_mut().append_pair("mve_filter", "exclude");
+        }
+        if let Some(ref c) = market_cursor {
+            if !c.trim().is_empty() {
+                url.query_pairs_mut().append_pair("cursor", c.trim());
+            }
+        }
+
+        let (body, req_metrics) =
+            fetch_json_with_retry::<MarketsResp>(client, limiter, url, "Kalshi markets").await?;
+        metrics.merge(req_metrics);
+        pages_fetched = pages_fetched.saturating_add(1);
+
+        let count = body.markets.len();
+        fetched_market_rows = fetched_market_rows.saturating_add(count);
+        let kept_this_page = append_market_rows(
+            body.markets,
+            category_map,
+            include_sports,
+            seen_market_tickers,
+            all_markets,
+        );
+        let dropped_this_page = count.saturating_sub(kept_this_page);
+        eprintln!(
+            "[kalshi] markets page {}: fetched={} fetched_total={} kept_total={} kept_this_page={} dropped_this_page={}",
+            page + 1,
+            count,
+            fetched_market_rows,
+            all_markets.len(),
+            kept_this_page,
+            dropped_this_page
+        );
+
+        if count == 0 {
+            exhausted = true;
+            break;
+        }
+
+        let next_cursor = body.cursor.filter(|c| !c.trim().is_empty());
+        if let Some(ref c) = next_cursor {
+            if !seen_market_cursors.insert(c.clone()) {
+                eprintln!("[kalshi] markets stop: cursor cycle detected");
+                exhausted = true;
+                break;
+            }
+        }
+        market_cursor = next_cursor;
+        if market_cursor.is_none() || count < KALSHI_MARKETS_PAGE_LIMIT {
+            exhausted = true;
+            break;
+        }
+
+        page = page.saturating_add(1);
+    }
+
+    Ok(GlobalMarketsFetchResult {
+        pages_fetched,
+        exhausted,
+        metrics,
+    })
+}
+
+fn append_market_rows(
+    rows: Vec<MarketRow>,
+    category_map: &HashMap<String, Option<String>>,
+    include_sports: bool,
+    seen_market_tickers: &mut HashSet<String>,
+    all_markets: &mut Vec<OddsListedMarket>,
+) -> usize {
+    let mut kept = 0usize;
+    for row in rows {
+        if !seen_market_tickers.insert(row.ticker.clone()) {
+            continue;
+        }
+
+        let category = category_map
+            .get(&row.event_ticker)
+            .cloned()
+            .flatten()
+            .or_else(|| infer_category_from_event_ticker(&row.event_ticker));
+        if !include_sports && category.as_deref().map_or(false, is_sports_category) {
+            continue;
+        }
+
+        let probability_yes = probability_from_kalshi_fields(
+            row.last_price_dollars.as_deref(),
+            row.last_price,
+            row.yes_bid_dollars.as_deref(),
+            row.yes_ask_dollars.as_deref(),
+            row.yes_bid,
+            row.yes_ask,
+        );
+        let yes_price = probability_yes.map(probability_to_cents);
+        let title = row
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&row.ticker)
+            .to_string();
+
+        all_markets.push(OddsListedMarket {
+            ticker: row.ticker,
+            title,
+            event_ticker: row.event_ticker,
+            yes_price,
+            volume: row.volume.or(row.volume_24h),
+            status: normalize_kalshi_status(row.status.as_deref()),
+            source: Some("kalshi".to_string()),
+            market_id: None,
+            event_id: None,
+            slug: None,
+            outcomes: None,
+            outcome_prices: None,
+            clob_token_ids: None,
+            probability_yes,
+            category,
+        });
+        kept = kept.saturating_add(1);
+    }
+    kept
+}
+
+fn normalize_event_category(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+async fn fetch_json_with_retry<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    limiter: &RateLimiter,
+    url: reqwest::Url,
+    label: &str,
+) -> std::result::Result<(T, RetryMetrics), String> {
+    let mut attempt = 0usize;
+    let mut metrics = RetryMetrics::default();
+
+    loop {
+        limiter.wait().await;
+        attempt = attempt.saturating_add(1);
+        metrics.attempts = metrics.attempts.saturating_add(1);
+
+        let resp = client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|e| format!("{label} fetch failed: {e}"))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < KALSHI_MAX_RETRIES {
+            metrics.retry_429 = metrics.retry_429.saturating_add(1);
+            limiter.on_rate_limited();
+            sleep(backoff_for_attempt(attempt)).await;
+            continue;
+        }
+        if status.is_server_error() && attempt < KALSHI_MAX_RETRIES {
+            metrics.retry_5xx = metrics.retry_5xx.saturating_add(1);
+            limiter.on_rate_limited();
+            sleep(backoff_for_attempt(attempt)).await;
+            continue;
+        }
+        if !status.is_success() {
+            return Err(format!("{label} fetch failed: http {status}"));
+        }
+
+        let body = resp
+            .json::<T>()
+            .await
+            .map_err(|e| format!("{label} parse failed: {e}"))?;
+        limiter.on_success();
+        return Ok((body, metrics));
+    }
+}
+
+fn parse_prob_from_dollars(raw: Option<&str>) -> Option<f64> {
+    raw.and_then(|s| s.trim().parse::<f64>().ok())
+        .map(|v| v.clamp(0.0, 1.0))
+}
+
+fn parse_prob_from_cents(raw: Option<i64>) -> Option<f64> {
+    raw.map(|v| (v as f64 / 100.0).clamp(0.0, 1.0))
+}
+
+fn midpoint(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(((x + y) / 2.0).clamp(0.0, 1.0)),
+        (Some(x), None) | (None, Some(x)) => Some(x.clamp(0.0, 1.0)),
+        _ => None,
+    }
+}
+
+fn probability_from_kalshi_fields(
+    last_price_dollars: Option<&str>,
+    last_price: Option<i64>,
+    yes_bid_dollars: Option<&str>,
+    yes_ask_dollars: Option<&str>,
+    yes_bid: Option<i64>,
+    yes_ask: Option<i64>,
+) -> Option<f64> {
+    parse_prob_from_dollars(last_price_dollars)
+        .or_else(|| parse_prob_from_cents(last_price))
+        .or_else(|| {
+            midpoint(
+                parse_prob_from_dollars(yes_bid_dollars),
+                parse_prob_from_dollars(yes_ask_dollars),
+            )
+        })
+        .or_else(|| midpoint(parse_prob_from_cents(yes_bid), parse_prob_from_cents(yes_ask)))
+}
+
+fn probability_to_cents(probability_yes: f64) -> i64 {
+    (probability_yes * 100.0).round() as i64
+}
+
+fn normalize_kalshi_status(status: Option<&str>) -> Option<String> {
+    let normalized = status
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())?;
+
+    if normalized.contains("open") || normalized.contains("active") {
+        return Some("open".to_string());
+    }
+    if normalized.contains("close") || normalized.contains("settled") || normalized.contains("final") {
+        return Some("closed".to_string());
+    }
+    Some(normalized)
+}
+
+fn infer_category_from_event_ticker(event_ticker: &str) -> Option<String> {
+    let upper = event_ticker.to_ascii_uppercase();
+    let looks_sports = upper.contains("SPORT")
+        || upper.starts_with("KXNBA")
+        || upper.starts_with("KXNFL")
+        || upper.starts_with("KXMLB")
+        || upper.starts_with("KXNHL")
+        || upper.starts_with("KXNCAA")
+        || upper.starts_with("KXSOCCER")
+        || upper.starts_with("KXEPL")
+        || upper.starts_with("KXMLS")
+        || upper.starts_with("KXATP")
+        || upper.starts_with("KXWTA")
+        || upper.starts_with("KXGOLF")
+        || upper.starts_with("KXF1")
+        || upper.starts_with("KXNASCAR")
+        || upper.starts_with("KXMMA")
+        || upper.starts_with("KXUFC")
+        || upper.starts_with("KXCRICKET")
+        || upper.starts_with("KXNCAAB")
+        || upper.starts_with("KXNCAAF")
+        || upper.starts_with("KXESPORT");
+    if looks_sports {
+        Some("Sports".to_string())
+    } else {
+        None
+    }
+}
+
+fn backoff_for_attempt(attempt: usize) -> TokioDuration {
+    let seconds = 2u64.saturating_mul(1u64 << ((attempt.saturating_sub(1)) as u32));
+    TokioDuration::from_secs(seconds.min(30))
 }
