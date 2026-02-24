@@ -12,6 +12,7 @@ include!("cmd/web.rs");
 include!("cmd/finance/macro_schedule.rs");
 include!("cmd/finance/odds.rs");
 include!("cmd/finance/options.rs");
+include!("cmd/finance/paper.rs");
 include!("cmd/finance/snapshot.rs");
 include!("cmd/finance/misc.rs");
 include!("cmd/finance/timeseries.rs");

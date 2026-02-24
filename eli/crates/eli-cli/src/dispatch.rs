@@ -248,5 +248,6 @@ async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
         FinanceCommand::Odds(args) => cmd_finance_odds(args).await,
         FinanceCommand::Options(args) => cmd_finance_options(args).await,
         FinanceCommand::Sync(args) => cmd_finance_sync(args).await,
+        FinanceCommand::Paper(args) => cmd_finance_paper(args).await,
     }
 }

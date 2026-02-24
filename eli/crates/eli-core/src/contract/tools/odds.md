@@ -80,6 +80,7 @@ eli finance odds --search "unemployment" --country US --min-volume 10000 --top 5
 ### CSV parsing safety
 
 - `eli finance sync` writes RFC4180 CSV with quoted fields.
+- `eli finance sync` excludes sports by default; use `--include-sports` when needed.
 - `title` often contains commas.
 - Do **not** parse with `awk -F,`, `cut -d,`, or `split(',')`.
 - Use a CSV-aware parser (`python csv`, pandas, etc.) when reading `all_markets.csv`.

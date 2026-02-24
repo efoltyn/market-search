@@ -302,7 +302,7 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
         },
         {
             "name": "finance_sync",
-            "description": "Bulk-sync all Kalshi + Polymarket prediction markets (~22,500) to local CSV cache. Takes ~10 seconds. Run once to enable fast finance_odds searches.",
+            "description": "Bulk-sync Kalshi + Polymarket prediction markets to local CSV cache. Sports are excluded by default for macro-focused ingestion; set include_sports=true for total breadth.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -312,15 +312,64 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
                     },
                     "max_pages": {
                         "type": "integer",
-                        "description": "Optional page budget per source (default: 10)"
-                    },
-                    "kalshi_backfill_profile": {
-                        "type": "string",
-                        "description": "Kalshi backfill profile: fast|balanced|full (default: balanced)"
+                        "description": "Optional page cap per source; omit for full exhaustion"
                     },
                     "strict": {
                         "type": "boolean",
                         "description": "Fail when coverage checks are incomplete"
+                    },
+                    "include_sports": {
+                        "type": "boolean",
+                        "description": "Include sports markets/events in sync output (default false)"
+                    }
+                }
+            }
+        },
+        {
+            "name": "finance_paper",
+            "description": "Local paper-trading sandbox using live Kalshi/Polymarket prices. Supports trade, mark, positions, trades, and reset workflows without real-money execution.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "trade|positions|trades|mark|reset (default: trade)"
+                    },
+                    "account": {
+                        "type": "string",
+                        "description": "Paper account name (default: default)"
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "kalshi|polymarket (required for command=trade)"
+                    },
+                    "market": {
+                        "type": "string",
+                        "description": "Market ticker/id (required for command=trade)"
+                    },
+                    "side": {
+                        "type": "string",
+                        "description": "yes|no (required for command=trade)"
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "buy|sell (required for command=trade)"
+                    },
+                    "qty": {
+                        "type": "number",
+                        "description": "Trade quantity/contracts (required for command=trade)"
+                    },
+                    "price": {
+                        "type": "number",
+                        "description": "Optional manual fill probability [0,1]. If omitted, uses live midpoint."
+                    },
+                    "starting_cash": {
+                        "type": "number",
+                        "description": "Optional starting cash for account init/reset"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Trades history limit for command=trades"
                     }
                 }
             }
@@ -859,11 +908,49 @@ fn mcp_build_cli_args(
             if let Some(max_pages) = args.get("max_pages").and_then(|n| n.as_u64()) {
                 v.extend([s("--max-pages"), max_pages.to_string()]);
             }
-            if let Some(profile) = args.get("kalshi_backfill_profile").and_then(|s| s.as_str()) {
-                v.extend([s("--kalshi-backfill-profile"), s(profile)]);
-            }
             if args.get("strict").and_then(|b| b.as_bool()).unwrap_or(false) {
                 v.push(s("--strict"));
+            }
+            if args
+                .get("include_sports")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                v.push(s("--include-sports"));
+            }
+            Ok(v)
+        }
+        "finance_paper" => {
+            let mut v = vec![s("finance"), s("paper")];
+            if let Some(command) = args.get("command").and_then(|c| c.as_str()) {
+                v.extend([s("--command"), s(command)]);
+            }
+            if let Some(account) = args.get("account").and_then(|a| a.as_str()) {
+                v.extend([s("--account"), s(account)]);
+            }
+            if let Some(provider) = args.get("provider").and_then(|p| p.as_str()) {
+                v.extend([s("--provider"), s(provider)]);
+            }
+            if let Some(market) = args.get("market").and_then(|m| m.as_str()) {
+                v.extend([s("--market"), s(market)]);
+            }
+            if let Some(side) = args.get("side").and_then(|s| s.as_str()) {
+                v.extend([s("--side"), s(side)]);
+            }
+            if let Some(action) = args.get("action").and_then(|a| a.as_str()) {
+                v.extend([s("--action"), s(action)]);
+            }
+            if let Some(qty) = args.get("qty").and_then(|q| q.as_f64()) {
+                v.extend([s("--qty"), qty.to_string()]);
+            }
+            if let Some(price) = args.get("price").and_then(|p| p.as_f64()) {
+                v.extend([s("--price"), price.to_string()]);
+            }
+            if let Some(starting_cash) = args.get("starting_cash").and_then(|c| c.as_f64()) {
+                v.extend([s("--starting-cash"), starting_cash.to_string()]);
+            }
+            if let Some(limit) = args.get("limit").and_then(|n| n.as_u64()) {
+                v.extend([s("--limit"), limit.to_string()]);
             }
             Ok(v)
         }
@@ -1123,6 +1210,26 @@ mod mcp_tool_tests {
         assert!(built.contains(&"6mo".to_string()));
         assert!(built.contains(&"--granularity".to_string()));
         assert!(built.contains(&"1h".to_string()));
+    }
+
+    #[test]
+    fn mcp_build_cli_args_maps_finance_paper() {
+        let args = serde_json::json!({
+            "command": "trade",
+            "account": "sandbox",
+            "provider": "kalshi",
+            "market": "KXBTC-26FEB28-B70000",
+            "side": "yes",
+            "action": "buy",
+            "qty": 3.0,
+            "price": 0.42
+        });
+        let built = mcp_build_cli_args("finance_paper", &args).expect("build args");
+        assert_eq!(built[0], "finance");
+        assert_eq!(built[1], "paper");
+        assert!(built.contains(&"--provider".to_string()));
+        assert!(built.contains(&"kalshi".to_string()));
+        assert!(built.contains(&"--qty".to_string()));
     }
 
     #[test]

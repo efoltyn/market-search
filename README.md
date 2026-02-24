@@ -118,8 +118,20 @@ eli finance forex --range 1y --horizons 1w,1mo,3mo,1y
 # Prediction markets (search + fresh prices)
 eli finance odds --search "federal reserve" --live --top 10
 
-# Bulk sync Kalshi + Polymarket for local fast discovery
-eli finance sync --sources kalshi,polymarket --max-pages 10
+# Bulk sync Kalshi + Polymarket for local fast discovery (non-sports by default)
+eli finance sync --sources kalshi,polymarket
+
+# Bound runtime explicitly when you want a fixed budget
+eli finance sync --sources kalshi,polymarket --max-pages 25
+
+# Include sports too when needed
+eli finance sync --sources kalshi,polymarket --include-sports
+
+# Paper trading sandbox (local simulated fills, live pricing)
+eli finance paper --command reset --account sandbox --starting-cash 10000
+eli finance paper --command trade --account sandbox --provider kalshi --market KXBTCD-26FEB2400-T59999.99 --side yes --action buy --qty 5
+eli finance paper --command positions --account sandbox
+# Note: --mode kalshi-demo is reserved for upcoming signed demo-order routing; current v1 is local simulated paper execution.
 
 # Web ingestion search (deterministic filters, probes)
 eli web search --query "fed meeting march 2026" --mode news --recency week --top 15

@@ -80,6 +80,9 @@ pub use snapshot::fetch_snapshot;
 mod sync;
 pub use sync::sync_odds;
 
+mod paper;
+pub use paper::run_paper;
+
 pub fn normalize_tickers(tickers: &[String]) -> Vec<String> {
     let mut out: Vec<String> = tickers
         .iter()
