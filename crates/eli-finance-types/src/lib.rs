@@ -1581,7 +1581,7 @@ pub struct OddsSyncRequest {
     #[serde(default)]
     pub max_pages: Option<usize>,
     #[serde(default)]
-    pub kalshi_backfill_profile: OddsSyncBackfillProfile,
+    pub include_sports: bool,
     #[serde(default)]
     pub strict: bool,
 }
@@ -1623,11 +1623,20 @@ impl Default for OddsSyncStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OddsSyncCoverage {
-    pub requested_max_pages: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_max_pages: Option<usize>,
     pub events_pages_fetched: usize,
     pub events_exhausted: bool,
     pub markets_pages_fetched: usize,
     pub markets_exhausted: bool,
+    #[serde(default)]
+    pub events_requests: usize,
+    #[serde(default)]
+    pub markets_requests: usize,
+    #[serde(default)]
+    pub retry_count_429: usize,
+    #[serde(default)]
+    pub retry_count_5xx: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_backfill_calls: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1875,4 +1884,137 @@ impl Default for OddsRequest {
             search: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperMode {
+    Simulated,
+    KalshiDemo,
+}
+
+impl Default for PaperMode {
+    fn default() -> Self {
+        Self::Simulated
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperCommand {
+    Trade,
+    Positions,
+    Trades,
+    Mark,
+    Reset,
+}
+
+impl Default for PaperCommand {
+    fn default() -> Self {
+        Self::Trade
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperProvider {
+    Kalshi,
+    Polymarket,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperSide {
+    Yes,
+    No,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperOrderAction {
+    Buy,
+    Sell,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaperRequest {
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub command: PaperCommand,
+    #[serde(default)]
+    pub mode: PaperMode,
+    #[serde(default)]
+    pub provider: Option<PaperProvider>,
+    #[serde(default)]
+    pub market_ticker: Option<String>,
+    #[serde(default)]
+    pub side: Option<PaperSide>,
+    #[serde(default)]
+    pub action: Option<PaperOrderAction>,
+    #[serde(default)]
+    pub quantity: Option<f64>,
+    #[serde(default)]
+    pub limit_price: Option<f64>,
+    #[serde(default)]
+    pub starting_cash: Option<f64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub cache_dir: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaperTradeFill {
+    pub id: String,
+    pub ts: DateTime<Utc>,
+    pub provider: PaperProvider,
+    pub market_ticker: String,
+    pub side: PaperSide,
+    pub action: PaperOrderAction,
+    pub quantity: f64,
+    pub price: f64,
+    pub notional: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaperPosition {
+    pub provider: PaperProvider,
+    pub market_ticker: String,
+    pub side: PaperSide,
+    pub quantity: f64,
+    pub avg_price: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mark_price: Option<f64>,
+    pub cost_basis: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unrealized_pnl: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaperAccountSummary {
+    pub cash: f64,
+    pub realized_pnl: f64,
+    pub unrealized_pnl: f64,
+    pub equity: f64,
+    pub positions_open: usize,
+    pub trades_total: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaperResponse {
+    pub generated_at: DateTime<Utc>,
+    pub account: String,
+    pub command: PaperCommand,
+    pub mode: PaperMode,
+    pub summary: PaperAccountSummary,
+    pub positions: Vec<PaperPosition>,
+    pub trades: Vec<PaperTradeFill>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_trade: Option<PaperTradeFill>,
+    pub state_path: String,
 }

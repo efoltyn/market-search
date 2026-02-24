@@ -28,17 +28,18 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
     let previous_sync_at = sync_state.last_sync_at;
     let current_sync_at = Utc::now();
 
-    let max_pages = req.max_pages.unwrap_or(10).max(1);
+    let max_pages = req.max_pages.filter(|p| *p > 0);
 
     let sources = req
         .sources
         .unwrap_or_else(|| vec!["kalshi".to_string(), "polymarket".to_string()]);
     let do_kalshi = sources.iter().any(|s| s.eq_ignore_ascii_case("kalshi"));
     let do_polymarket = sources.iter().any(|s| s.eq_ignore_ascii_case("polymarket"));
-    let kalshi_backfill_profile = req.kalshi_backfill_profile.clone();
+    let include_sports = req.include_sports;
 
-    let kalshi_limiter = RateLimiter::new(250, 4000);
-    let poly_limiter = RateLimiter::new(200, 4000);
+    // Default cadence is intentionally light, then adaptive backoff increases on 429/5xx.
+    let kalshi_limiter = RateLimiter::new(12, 4000);
+    let poly_limiter = RateLimiter::new(15, 4000);
 
     let mut source_results = Vec::new();
     let mut csv_paths = Vec::new();
@@ -56,8 +57,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         async {
             if do_kalshi {
                 let start = std::time::Instant::now();
-                match sync_kalshi_events(&kalshi_limiter, max_pages, kalshi_backfill_profile).await
-                {
+                match sync_kalshi_events(&kalshi_limiter, max_pages, include_sports).await {
                     Ok((events, markets, coverage)) => {
                         let duration_ms = start.elapsed().as_millis() as u64;
                         let csv_path = write_markets_csv(&markets, "kalshi", &cache_dir).ok();
@@ -107,7 +107,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         async {
             if do_polymarket {
                 let start = std::time::Instant::now();
-                match sync_polymarket_events(&poly_limiter, max_pages).await {
+                match sync_polymarket_events(&poly_limiter, max_pages, include_sports).await {
                     Ok((events, markets, coverage)) => {
                         let duration_ms = start.elapsed().as_millis() as u64;
                         let csv_path = write_markets_csv(&markets, "polymarket", &cache_dir).ok();

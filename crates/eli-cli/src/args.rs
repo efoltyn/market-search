@@ -119,6 +119,8 @@ enum FinanceCommand {
     Options(FinanceOptionsArgs),
     /// Sync prediction markets (Kalshi + Polymarket) with rate limiting to local CSV cache.
     Sync(FinanceSyncArgs),
+    /// Local paper trading sandbox using live Kalshi/Polymarket prices.
+    Paper(FinancePaperArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -213,6 +215,33 @@ enum WebSearchRecencyArg {
     Week,
     Month,
     Year,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum FinancePaperCommandArg {
+    Trade,
+    Positions,
+    Trades,
+    Mark,
+    Reset,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum FinancePaperModeArg {
+    Simulated,
+    KalshiDemo,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum FinancePaperSideArg {
+    Yes,
+    No,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum FinancePaperOrderActionArg {
+    Buy,
+    Sell,
 }
 
 #[derive(clap::Args, Debug)]
@@ -997,23 +1026,82 @@ struct FinanceSyncArgs {
     #[arg(long, value_delimiter = ',')]
     sources: Vec<String>,
 
-    /// Coverage budget hint per source (default: 10). Eli keeps a high baseline for tagging/filtering.
-    #[arg(long, default_value = "10")]
-    max_pages: usize,
-
-    /// Kalshi series backfill profile: fast | balanced | full.
-    #[arg(long = "kalshi-backfill-profile", default_value = "balanced")]
-    kalshi_backfill_profile: String,
+    /// Optional page cap per source. Omit for full exhaustion.
+    #[arg(long)]
+    max_pages: Option<usize>,
 
     /// Fail if pagination/coverage checks indicate incomplete source exhaustion.
     #[arg(long)]
     strict: bool,
+
+    /// Include sports markets/events in sync output (default: false).
+    #[arg(long)]
+    include_sports: bool,
 
     /// Cache directory for CSV files.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
 
     /// Output format (currently: json).
+    #[arg(long, default_value = "json")]
+    format: String,
+
+    /// Write full JSON output to a file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct FinancePaperArgs {
+    /// Command: trade | positions | trades | mark | reset
+    #[arg(long, value_enum, default_value = "trade")]
+    command: FinancePaperCommandArg,
+
+    /// Execution mode (v1: simulated local fills)
+    #[arg(long, value_enum, default_value = "simulated")]
+    mode: FinancePaperModeArg,
+
+    /// Paper account name.
+    #[arg(long, default_value = "default")]
+    account: String,
+
+    /// Provider for trade/mark pricing (kalshi|polymarket).
+    #[arg(long)]
+    provider: Option<String>,
+
+    /// Market ticker or market id (required for --command trade).
+    #[arg(long)]
+    market: Option<String>,
+
+    /// Side (yes|no) for --command trade.
+    #[arg(long, value_enum)]
+    side: Option<FinancePaperSideArg>,
+
+    /// Order action (buy|sell) for --command trade.
+    #[arg(long, value_enum)]
+    action: Option<FinancePaperOrderActionArg>,
+
+    /// Quantity/contracts for --command trade.
+    #[arg(long)]
+    qty: Option<f64>,
+
+    /// Optional manual fill price in probability units [0,1]. If omitted, uses live midpoint.
+    #[arg(long)]
+    price: Option<f64>,
+
+    /// Starting paper cash for account init/reset (default: 10000).
+    #[arg(long)]
+    starting_cash: Option<f64>,
+
+    /// Trade history limit for --command trades (default: 50).
+    #[arg(long)]
+    limit: Option<usize>,
+
+    /// Optional custom cache dir or full state file path.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+
+    /// Output format (json only).
     #[arg(long, default_value = "json")]
     format: String,
 

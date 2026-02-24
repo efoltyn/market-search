@@ -67,26 +67,13 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
     } else {
         Some(args.sources)
     };
-    let kalshi_backfill_profile = match args
-        .kalshi_backfill_profile
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "fast" => eli_core::finance::OddsSyncBackfillProfile::Fast,
-        "balanced" => eli_core::finance::OddsSyncBackfillProfile::Balanced,
-        "full" => eli_core::finance::OddsSyncBackfillProfile::Full,
-        other => anyhow::bail!(
-            "invalid --kalshi-backfill-profile '{other}' (expected: fast|balanced|full)"
-        ),
-    };
 
     let req = eli_core::finance::OddsSyncRequest {
         sources,
         cache_dir: args.cache_dir.map(|p| p.to_string_lossy().to_string()),
-        max_pages: Some(args.max_pages),
-        kalshi_backfill_profile,
+        max_pages: args.max_pages,
         strict: args.strict,
+        include_sports: args.include_sports,
     };
 
     let resp = eli_core::finance::sync_odds(req)
@@ -95,11 +82,17 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
         .context("sync prediction markets")?;
 
     if let Some(out_path) = args.out {
+        let mut meta_bits: Vec<String> = Vec::new();
+        if let Some(max_pages) = args.max_pages {
+            meta_bits.push(format!("max_pages={max_pages}"));
+        } else {
+            meta_bits.push("max_pages=unbounded".to_string());
+        }
         let wr = write_json_out_with_meta(
             out_path,
             &resp,
             "finance.sync",
-            &[format!("max_pages={}", args.max_pages)],
+            &meta_bits,
         )?;
         println!(
             "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
