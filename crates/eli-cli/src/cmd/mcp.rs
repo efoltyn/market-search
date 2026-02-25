@@ -9,7 +9,6 @@ async fn cmd_mcp() -> Result<()> {
     let mut out = stdout.lock();
 
     while let Some(request) = mcp_read_request(&mut reader).await? {
-
         // Notifications have no id and require no response.
         let method = match request.get("method").and_then(|m| m.as_str()) {
             Some(m) => m.to_string(),
@@ -19,7 +18,10 @@ async fn cmd_mcp() -> Result<()> {
             continue;
         }
 
-        let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         let response = match method.as_str() {
             "initialize" => mcp_initialize(id),
@@ -79,10 +81,7 @@ where
     Ok(Some(request))
 }
 
-fn mcp_write_response<W: std::io::Write>(
-    out: &mut W,
-    response: &serde_json::Value,
-) -> Result<()> {
+fn mcp_write_response<W: std::io::Write>(out: &mut W, response: &serde_json::Value) -> Result<()> {
     let body = serde_json::to_vec(response).context("serialize response")?;
     write!(out, "Content-Length: {}\r\n\r\n", body.len())?;
     out.write_all(&body)?;
@@ -321,6 +320,26 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
                     "include_sports": {
                         "type": "boolean",
                         "description": "Include sports markets/events in sync output (default false)"
+                    },
+                    "include_historical": {
+                        "type": "boolean",
+                        "description": "Include Kalshi historical markets (archived/settled tier)"
+                    },
+                    "stream_refresh": {
+                        "type": "boolean",
+                        "description": "Fast websocket refresh using cached baseline (Kalshi + Polymarket), with REST anchor fallback"
+                    },
+                    "refresh_heartbeat_hours": {
+                        "type": "integer",
+                        "description": "Stream refresh heartbeat window in hours (default 6). Older baseline forces REST anchor sync."
+                    },
+                    "stream_refresh_timeout_secs": {
+                        "type": "integer",
+                        "description": "WebSocket listen timeout in seconds for stream refresh (default 300)."
+                    },
+                    "full": {
+                        "type": "boolean",
+                        "description": "Emit full verbose sync payload (default false for compact output)"
                     }
                 }
             }
@@ -334,6 +353,10 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
                     "command": {
                         "type": "string",
                         "description": "trade|positions|trades|mark|reset (default: trade)"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "simulated|live_like|kalshi_demo|polymarket_demo (default: simulated)"
                     },
                     "account": {
                         "type": "string",
@@ -762,10 +785,7 @@ async fn mcp_tools_call(id: serde_json::Value, request: &serde_json::Value) -> s
     }
 }
 
-fn mcp_build_cli_args(
-    tool: &str,
-    args: &serde_json::Value,
-) -> anyhow::Result<Vec<String>> {
+fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Vec<String>> {
     let s = |v: &str| v.to_string();
     match tool {
         "finance_macro" => {
@@ -808,7 +828,12 @@ fn mcp_build_cli_args(
                 .get("tickers")
                 .and_then(|t| t.as_str())
                 .ok_or_else(|| anyhow::anyhow!("tickers required"))?;
-            Ok(vec![s("finance"), s("snapshot"), s("--tickers"), s(tickers)])
+            Ok(vec![
+                s("finance"),
+                s("snapshot"),
+                s("--tickers"),
+                s(tickers),
+            ])
         }
         "finance_timeseries" => {
             let tickers = args
@@ -847,7 +872,10 @@ fn mcp_build_cli_args(
                 .and_then(|t| t.as_str())
                 .ok_or_else(|| anyhow::anyhow!("ticker required"))?;
             let mut v = vec![s("finance"), s("options"), s("--ticker"), s(ticker)];
-            let summary = args.get("summary").and_then(|b| b.as_bool()).unwrap_or(true);
+            let summary = args
+                .get("summary")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(true);
             if summary {
                 v.push(s("--summary"));
             }
@@ -908,7 +936,11 @@ fn mcp_build_cli_args(
             if let Some(max_pages) = args.get("max_pages").and_then(|n| n.as_u64()) {
                 v.extend([s("--max-pages"), max_pages.to_string()]);
             }
-            if args.get("strict").and_then(|b| b.as_bool()).unwrap_or(false) {
+            if args
+                .get("strict")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
                 v.push(s("--strict"));
             }
             if args
@@ -918,12 +950,41 @@ fn mcp_build_cli_args(
             {
                 v.push(s("--include-sports"));
             }
+            if args
+                .get("include_historical")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                v.push(s("--include-historical"));
+            }
+            if args
+                .get("stream_refresh")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                v.push(s("--stream-refresh"));
+            }
+            if let Some(hours) = args.get("refresh_heartbeat_hours").and_then(|n| n.as_u64()) {
+                v.extend([s("--refresh-heartbeat-hours"), hours.to_string()]);
+            }
+            if let Some(secs) = args
+                .get("stream_refresh_timeout_secs")
+                .and_then(|n| n.as_u64())
+            {
+                v.extend([s("--stream-refresh-timeout-secs"), secs.to_string()]);
+            }
+            if args.get("full").and_then(|b| b.as_bool()).unwrap_or(false) {
+                v.push(s("--full"));
+            }
             Ok(v)
         }
         "finance_paper" => {
             let mut v = vec![s("finance"), s("paper")];
             if let Some(command) = args.get("command").and_then(|c| c.as_str()) {
                 v.extend([s("--command"), s(command)]);
+            }
+            if let Some(mode) = args.get("mode").and_then(|m| m.as_str()) {
+                v.extend([s("--mode"), s(mode)]);
             }
             if let Some(account) = args.get("account").and_then(|a| a.as_str()) {
                 v.extend([s("--account"), s(account)]);
@@ -1033,7 +1094,11 @@ fn mcp_build_cli_args(
             if args.get("smart").and_then(|b| b.as_bool()).unwrap_or(false) {
                 v.push(s("--smart"));
             }
-            if args.get("sitemap").and_then(|b| b.as_bool()).unwrap_or(false) {
+            if args
+                .get("sitemap")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
                 v.push(s("--sitemap"));
             }
             Ok(v)
@@ -1074,7 +1139,11 @@ fn mcp_build_cli_args(
             if let Some(limit) = args.get("limit").and_then(|n| n.as_u64()) {
                 v.extend([s("--limit"), limit.to_string()]);
             }
-            if args.get("include_text").and_then(|b| b.as_bool()).unwrap_or(false) {
+            if args
+                .get("include_text")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
                 v.push(s("--include-text"));
                 if let Some(mc) = args.get("max_chars").and_then(|n| n.as_u64()) {
                     v.extend([s("--max-chars"), mc.to_string()]);
@@ -1085,10 +1154,7 @@ fn mcp_build_cli_args(
         "finance_schedule" => {
             let mut v = vec![s("finance"), s("schedule")];
             // Default kind=macro to avoid returning 1000+ earnings rows
-            let kind = args
-                .get("kind")
-                .and_then(|k| k.as_str())
-                .unwrap_or("macro");
+            let kind = args.get("kind").and_then(|k| k.as_str()).unwrap_or("macro");
             v.extend([s("--kind"), s(kind)]);
             let profile_arg = args.get("macro_profile").and_then(|p| p.as_str());
             let mut macro_profile = profile_arg.unwrap_or("market").to_string();
@@ -1112,9 +1178,10 @@ fn mcp_build_cli_args(
                 v.extend([s("--from"), from, s("--to"), to]);
             }
             // Default major=true when kind is macro to keep output focused
-            let major = args.get("major").and_then(|b| b.as_bool()).unwrap_or(
-                kind == "macro" || kind == "all",
-            );
+            let major = args
+                .get("major")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(kind == "macro" || kind == "all");
             if major {
                 v.push(s("--major"));
                 if profile_arg.is_none() {
@@ -1137,13 +1204,21 @@ fn mcp_build_cli_args(
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| anyhow::anyhow!("path required"))?;
             let mut v = vec![s("code"), s(path)];
-            if args.get("pub_api").and_then(|b| b.as_bool()).unwrap_or(false) {
+            if args
+                .get("pub_api")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
                 v.push(s("--pub-api"));
             }
             if let Some(find) = args.get("find").and_then(|f| f.as_str()) {
                 v.extend([s("--find"), s(find)]);
             }
-            if args.get("include_files").and_then(|b| b.as_bool()).unwrap_or(false) {
+            if args
+                .get("include_files")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
                 v.push(s("--include-files"));
             }
             if let Some(top) = args.get("top").and_then(|n| n.as_u64()) {
@@ -1181,11 +1256,7 @@ async fn mcp_run_subprocess(args: Vec<String>) -> anyhow::Result<String> {
 
     if !output.status.success() && stdout.trim().is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "exit {}: {}",
-            output.status,
-            stderr.trim()
-        ));
+        return Err(anyhow::anyhow!("exit {}: {}", output.status, stderr.trim()));
     }
 
     Ok(stdout)
@@ -1216,6 +1287,7 @@ mod mcp_tool_tests {
     fn mcp_build_cli_args_maps_finance_paper() {
         let args = serde_json::json!({
             "command": "trade",
+            "mode": "live_like",
             "account": "sandbox",
             "provider": "kalshi",
             "market": "KXBTC-26FEB28-B70000",
@@ -1227,9 +1299,39 @@ mod mcp_tool_tests {
         let built = mcp_build_cli_args("finance_paper", &args).expect("build args");
         assert_eq!(built[0], "finance");
         assert_eq!(built[1], "paper");
+        assert!(built.contains(&"--mode".to_string()));
+        assert!(built.contains(&"live_like".to_string()));
         assert!(built.contains(&"--provider".to_string()));
         assert!(built.contains(&"kalshi".to_string()));
         assert!(built.contains(&"--qty".to_string()));
+    }
+
+    #[test]
+    fn mcp_build_cli_args_maps_finance_sync_extended_flags() {
+        let args = serde_json::json!({
+            "sources": "kalshi",
+            "strict": true,
+            "include_sports": true,
+            "include_historical": true,
+            "stream_refresh": true,
+            "refresh_heartbeat_hours": 12,
+            "stream_refresh_timeout_secs": 300,
+            "full": true
+        });
+        let built = mcp_build_cli_args("finance_sync", &args).expect("build args");
+        assert_eq!(built[0], "finance");
+        assert_eq!(built[1], "sync");
+        assert!(built.contains(&"--sources".to_string()));
+        assert!(built.contains(&"kalshi".to_string()));
+        assert!(built.contains(&"--strict".to_string()));
+        assert!(built.contains(&"--include-sports".to_string()));
+        assert!(built.contains(&"--include-historical".to_string()));
+        assert!(built.contains(&"--stream-refresh".to_string()));
+        assert!(built.contains(&"--refresh-heartbeat-hours".to_string()));
+        assert!(built.contains(&"12".to_string()));
+        assert!(built.contains(&"--stream-refresh-timeout-secs".to_string()));
+        assert!(built.contains(&"300".to_string()));
+        assert!(built.contains(&"--full".to_string()));
     }
 
     #[test]

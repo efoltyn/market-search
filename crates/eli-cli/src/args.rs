@@ -229,7 +229,12 @@ enum FinancePaperCommandArg {
 #[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
 enum FinancePaperModeArg {
     Simulated,
+    #[value(alias = "live_like")]
+    LiveLike,
+    #[value(alias = "kalshi_demo")]
     KalshiDemo,
+    #[value(alias = "polymarket_demo")]
+    PolymarketDemo,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
@@ -1038,6 +1043,22 @@ struct FinanceSyncArgs {
     #[arg(long)]
     include_sports: bool,
 
+    /// Include Kalshi historical markets (archived/settled tier). Default: false.
+    #[arg(long)]
+    include_historical: bool,
+
+    /// Fast refresh from Kalshi websocket ticker stream using cached baseline (no full re-pagination).
+    #[arg(long)]
+    stream_refresh: bool,
+
+    /// Breadth heartbeat in hours for stream refresh mode. If cached baseline is older, force strict REST anchor sync (default: 6).
+    #[arg(long)]
+    refresh_heartbeat_hours: Option<u64>,
+
+    /// WebSocket listen window in seconds for stream refresh mode (default: 300).
+    #[arg(long)]
+    stream_refresh_timeout_secs: Option<u64>,
+
     /// Cache directory for CSV files.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
@@ -1045,6 +1066,10 @@ struct FinanceSyncArgs {
     /// Output format (currently: json).
     #[arg(long, default_value = "json")]
     format: String,
+
+    /// Emit full verbose payload on stdout (default is compact/token-efficient).
+    #[arg(long)]
+    full: bool,
 
     /// Write full JSON output to a file instead of stdout.
     #[arg(long)]
@@ -1178,6 +1203,18 @@ struct FinanceTimeseriesArgs {
     /// Data provider (auto | mock | yahoo | fred). "auto" tries Yahoo first, then FRED for failures.
     #[arg(long, default_value = "auto")]
     provider: String,
+
+    /// Optional prediction market provider to pair with timeseries (kalshi | polymarket).
+    #[arg(long)]
+    odds_provider: Option<String>,
+
+    /// Optional prediction market identifier. Kalshi: market ticker. Polymarket: market ID or slug.
+    #[arg(long)]
+    odds_market: Option<String>,
+
+    /// Prediction market side to pair (yes | no). Defaults to yes.
+    #[arg(long, default_value = "yes")]
+    odds_side: String,
 
     /// Safety cap for points per ticker.
     #[arg(long)]

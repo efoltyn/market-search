@@ -79,12 +79,7 @@ impl Span {
 
         let unit_raw = s[split_at..].trim();
         let unit = match unit_raw {
-            "m" => {
-                return Err(FinanceTypesError::InvalidInput(format!(
-                    "ambiguous span unit '{unit_raw}' (use min for minutes or mo for months)"
-                )));
-            }
-            "min" | "mins" | "minute" | "minutes" => SpanUnit::Minute,
+            "m" | "min" | "mins" | "minute" | "minutes" => SpanUnit::Minute,
             "h" | "hr" | "hrs" | "hour" | "hours" => SpanUnit::Hour,
             "d" | "day" | "days" => SpanUnit::Day,
             "w" | "wk" | "wks" | "week" | "weeks" => SpanUnit::Week,
@@ -92,7 +87,7 @@ impl Span {
             "y" | "yr" | "yrs" | "year" | "years" => SpanUnit::Year,
             _ => {
                 return Err(FinanceTypesError::InvalidInput(format!(
-                    "invalid span unit '{unit_raw}' (expected min,h,d,w,mo,y)"
+                    "invalid span unit '{unit_raw}' (expected m|min,h,d,w,mo,y)"
                 )));
             }
         };
@@ -122,6 +117,25 @@ impl Span {
             SpanUnit::Year => "y",
         };
         format!("{}{}", self.n, suffix)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Span, SpanUnit};
+
+    #[test]
+    fn parse_m_alias_maps_to_minutes() {
+        let span = Span::parse("15m").expect("15m should parse as minutes");
+        assert_eq!(span.n, 15);
+        assert_eq!(span.unit, SpanUnit::Minute);
+    }
+
+    #[test]
+    fn parse_mo_alias_maps_to_months() {
+        let span = Span::parse("1mo").expect("1mo should parse as months");
+        assert_eq!(span.n, 1);
+        assert_eq!(span.unit, SpanUnit::Month);
     }
 }
 
@@ -1583,6 +1597,14 @@ pub struct OddsSyncRequest {
     #[serde(default)]
     pub include_sports: bool,
     #[serde(default)]
+    pub include_historical: bool,
+    #[serde(default)]
+    pub stream_refresh: bool,
+    #[serde(default)]
+    pub refresh_heartbeat_hours: Option<u64>,
+    #[serde(default)]
+    pub stream_refresh_timeout_secs: Option<u64>,
+    #[serde(default)]
     pub strict: bool,
 }
 
@@ -1753,6 +1775,10 @@ pub struct OddsSyncSourceDelta {
     pub previous_markets: usize,
     pub current_markets: usize,
     pub compared_markets: usize,
+    /// Existing markets whose values changed (excludes brand-new and removed markets).
+    pub updated_markets: usize,
+    /// Churn count (new + removed), useful to separate lifecycle turnover from true updates.
+    pub churn_markets: usize,
     pub new_markets: usize,
     pub removed_markets: usize,
     pub changed_markets: usize,
@@ -1779,6 +1805,10 @@ pub struct OddsSyncDeltaSummary {
     pub previous_markets: usize,
     pub current_markets: usize,
     pub compared_markets: usize,
+    /// Existing markets whose values changed (excludes brand-new and removed markets).
+    pub updated_markets: usize,
+    /// Churn count (new + removed), useful to separate lifecycle turnover from true updates.
+    pub churn_markets: usize,
     pub new_markets: usize,
     pub removed_markets: usize,
     pub changed_markets: usize,
@@ -1890,7 +1920,9 @@ impl Default for OddsRequest {
 #[serde(rename_all = "snake_case")]
 pub enum PaperMode {
     Simulated,
+    LiveLike,
     KalshiDemo,
+    PolymarketDemo,
 }
 
 impl Default for PaperMode {
