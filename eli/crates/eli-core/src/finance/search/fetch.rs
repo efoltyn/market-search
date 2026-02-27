@@ -1,10 +1,18 @@
 use super::super::*;
 
 pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
+    let started = std::time::Instant::now();
+    let generated_at = chrono::Utc::now();
     let query = req.query.trim().to_string();
     if query.is_empty() {
         return Err(Error::InvalidInput("search query is required".to_string()));
     }
+    let policy_mode = req.policy_mode.unwrap_or_default();
+    let policy_file = req
+        .policy_file
+        .as_deref()
+        .map(std::path::Path::new);
+    let resolved_policy = crate::finance::policy::load_policy(policy_file, policy_mode)?;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -42,16 +50,8 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
             if symbol.is_empty() {
                 continue;
             }
-            let mut score = q["score"].as_f64().unwrap_or(0.0);
+            let score = q["score"].as_f64().unwrap_or(0.0);
             let exchange = q["exchange"].as_str().unwrap_or_default();
-
-            // Boost major US exchanges to surface primary assets (AAPL, GC=F, etc) over obscure ETFs
-            if matches!(
-                exchange,
-                "NYQ" | "NMS" | "CMX" | "NYM" | "CBT" | "PNK" | "BATS"
-            ) {
-                score *= 10.0;
-            }
 
             results.push(SearchItem {
                 symbol: symbol.to_string(),
@@ -73,72 +73,20 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Curated Macro Suggestions (FRED IDs)
-    let macro_items = vec![
-        SearchItem {
-            symbol: "CPIAUCSL".into(),
-            name: Some("CPI (Headline Inflation)".into()),
+    // Policy-driven macro suggestions from catalog.
+    let macro_items: Vec<SearchItem> = resolved_policy
+        .policy
+        .macro_catalog
+        .indicators
+        .iter()
+        .map(|ind| SearchItem {
+            symbol: ind.id.clone(),
+            name: Some(ind.name.clone()),
             exchange: Some("FRED".into()),
             asset_type: Some("MACRO".into()),
             score: None,
-        },
-        SearchItem {
-            symbol: "UNRATE".into(),
-            name: Some("Unemployment Rate".into()),
-            exchange: Some("FRED".into()),
-            asset_type: Some("MACRO".into()),
-            score: None,
-        },
-        SearchItem {
-            symbol: "PAYEMS".into(),
-            name: Some("Non-farm Payrolls".into()),
-            exchange: Some("FRED".into()),
-            asset_type: Some("MACRO".into()),
-            score: None,
-        },
-        SearchItem {
-            symbol: "FEDFUNDS".into(),
-            name: Some("Fed Funds Rate".into()),
-            exchange: Some("FRED".into()),
-            asset_type: Some("MACRO".into()),
-            score: None,
-        },
-        SearchItem {
-            symbol: "GDPC1".into(),
-            name: Some("Real GDP".into()),
-            exchange: Some("FRED".into()),
-            asset_type: Some("MACRO".into()),
-            score: None,
-        },
-        SearchItem {
-            symbol: "T10Y2Y".into(),
-            name: Some("10Y-2Y Yield Spread".into()),
-            exchange: Some("FRED".into()),
-            asset_type: Some("MACRO".into()),
-            score: None,
-        },
-        SearchItem {
-            symbol: "M2SL".into(),
-            name: Some("M2 Money Supply".into()),
-            exchange: Some("FRED".into()),
-            asset_type: Some("MACRO".into()),
-            score: None,
-        },
-        SearchItem {
-            symbol: "INDPRO".into(),
-            name: Some("Industrial Production".into()),
-            exchange: Some("FRED".into()),
-            asset_type: Some("MACRO".into()),
-            score: None,
-        },
-        SearchItem {
-            symbol: "DCOILWTICO".into(),
-            name: Some("WTI Oil Price".into()),
-            exchange: Some("FRED".into()),
-            asset_type: Some("MACRO".into()),
-            score: None,
-        },
-    ];
+        })
+        .collect();
 
     let query_lower = query.to_lowercase();
     let suggestions = if query_lower.len() > 2 {
@@ -157,8 +105,35 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
         Vec::new()
     };
 
+    let data_as_of = Some(generated_at);
     Ok(SearchResponse {
         query,
+        generated_at,
+        schema_version: "finance.search.v2".to_string(),
+        freshness_summary: FreshnessSummary {
+            data_as_of,
+            max_age_seconds: Some(0),
+            stale_count: 0,
+        },
+        applied_policy: AppliedPolicy {
+            mode: resolved_policy.mode,
+            sources: resolved_policy.sources,
+        },
+        decision_trace: vec![
+            "policy_driven_macro_suggestions=true".to_string(),
+            format!("results={}", results.len()),
+            format!("macro_suggestions={}", suggestions.len()),
+        ],
+        run_meta: RunMeta {
+            latency_ms: started.elapsed().as_millis() as u64,
+            stdout_chars: 0,
+            stored_bytes: 0,
+            coverage_counts: std::collections::BTreeMap::from([
+                ("results".to_string(), results.len()),
+                ("macro_suggestions".to_string(), suggestions.len()),
+            ]),
+            token_efficiency: None,
+        },
         results,
         macro_suggestions: suggestions,
     })

@@ -68,6 +68,16 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
         Some(args.sources)
     };
 
+    let policy_mode = eli_core::finance::policy::parse_policy_mode(Some(&args.policy_mode))
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("parse --policy-mode")?;
+    let resolved_policy = eli_core::finance::policy::load_policy(
+        args.policy_file.as_deref(),
+        policy_mode,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
+    .context("load policy")?;
+
     let req = eli_core::finance::OddsSyncRequest {
         sources,
         cache_dir: args.cache_dir.map(|p| p.to_string_lossy().to_string()),
@@ -84,6 +94,13 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("sync prediction markets")?;
+    resp.schema_version = "finance.sync.v2".to_string();
+    resp.applied_policy = eli_core::finance::AppliedPolicy {
+        mode: resolved_policy.mode,
+        sources: resolved_policy.sources.clone(),
+    };
+    resp.decision_trace
+        .push("policy_driven_compaction=true".to_string());
 
     if let Some(out_path) = args.out {
         let mut meta_bits: Vec<String> = Vec::new();
@@ -104,7 +121,7 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
     }
 
     if !args.full {
-        compact_sync_stdout_payload(&mut resp);
+        compact_sync_stdout_payload(&mut resp, &resolved_policy.policy.stdout_compaction);
     }
 
     let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
@@ -112,27 +129,41 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
     Ok(())
 }
 
-fn compact_sync_stdout_payload(resp: &mut eli_core::finance::OddsSyncResponse) {
+fn compact_sync_stdout_payload(
+    resp: &mut eli_core::finance::OddsSyncResponse,
+    policy: &eli_core::finance::policy::StdoutCompactionPolicy,
+) {
     for source in &mut resp.sources {
         if let Some(analytics) = source.analytics.as_mut() {
-            analytics.top_categories.truncate(5);
+            analytics.top_categories.truncate(policy.top_categories);
         }
         if let Some(delta) = source.delta.as_mut() {
             compact_delta_lists(
                 &mut delta.top_probability_moves,
                 &mut delta.top_yes_price_moves,
                 &mut delta.top_volume_moves,
+                policy,
             );
         }
     }
 
     if let Some(analysis) = resp.analysis.as_mut() {
-        analysis.top_categories.truncate(8);
-        analysis.top_markets_by_volume.truncate(3);
-        analysis.top_markets_by_informative_volume.truncate(3);
-        analysis.anomalous_zero_yes_markets.truncate(2);
-        analysis.near_even_high_volume_markets.truncate(2);
-        analysis.high_confidence_high_volume_markets.truncate(2);
+        analysis.top_categories.truncate(policy.top_categories);
+        analysis
+            .top_markets_by_volume
+            .truncate(policy.top_markets_by_volume);
+        analysis
+            .top_markets_by_informative_volume
+            .truncate(policy.top_markets_by_informative_volume);
+        analysis
+            .anomalous_zero_yes_markets
+            .truncate(policy.top_anomalous_zero_yes_markets);
+        analysis
+            .near_even_high_volume_markets
+            .truncate(policy.top_near_even_high_volume_markets);
+        analysis
+            .high_confidence_high_volume_markets
+            .truncate(policy.top_high_confidence_high_volume_markets);
     }
 
     if let Some(delta) = resp.delta.as_mut() {
@@ -140,6 +171,7 @@ fn compact_sync_stdout_payload(resp: &mut eli_core::finance::OddsSyncResponse) {
             &mut delta.top_probability_moves,
             &mut delta.top_yes_price_moves,
             &mut delta.top_volume_moves,
+            policy,
         );
     }
 }
@@ -148,23 +180,27 @@ fn compact_delta_lists(
     probability_moves: &mut Vec<eli_core::finance::OddsSyncMarketDelta>,
     yes_price_moves: &mut Vec<eli_core::finance::OddsSyncMarketDelta>,
     volume_moves: &mut Vec<eli_core::finance::OddsSyncMarketDelta>,
+    policy: &eli_core::finance::policy::StdoutCompactionPolicy,
 ) {
-    probability_moves.truncate(3);
-    yes_price_moves.truncate(3);
-    volume_moves.truncate(3);
+    probability_moves.truncate(policy.top_probability_moves);
+    yes_price_moves.truncate(policy.top_yes_price_moves);
+    volume_moves.truncate(policy.top_volume_moves);
     for delta in probability_moves
         .iter_mut()
         .chain(yes_price_moves.iter_mut())
         .chain(volume_moves.iter_mut())
     {
-        compact_market_delta(delta);
+        compact_market_delta(delta, policy);
     }
 }
 
-fn compact_market_delta(delta: &mut eli_core::finance::OddsSyncMarketDelta) {
-    truncate_in_place(&mut delta.title, 96);
+fn compact_market_delta(
+    delta: &mut eli_core::finance::OddsSyncMarketDelta,
+    policy: &eli_core::finance::policy::StdoutCompactionPolicy,
+) {
+    truncate_in_place(&mut delta.title, policy.max_title_chars);
     if let Some(category) = delta.category.as_mut() {
-        truncate_in_place(category, 32);
+        truncate_in_place(category, policy.max_category_chars);
         if category.trim().is_empty() {
             delta.category = None;
         }
@@ -186,9 +222,17 @@ fn truncate_in_place(value: &mut String, max_chars: usize) {
 
 async fn cmd_finance_news(args: FinanceNewsArgs) -> Result<()> {
     let ticker_for_meta = args.ticker.clone();
+    let policy_mode = eli_core::finance::policy::parse_policy_mode(Some(&args.policy_mode))
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("parse --policy-mode")?;
     let req = eli_core::finance::NewsRequest {
         ticker: args.ticker,
         date: args.date,
+        policy_file: args
+            .policy_file
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        policy_mode: Some(policy_mode),
     };
 
     let resp = eli_core::finance::fetch_news(req)

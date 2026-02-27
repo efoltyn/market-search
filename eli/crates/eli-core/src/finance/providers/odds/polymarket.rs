@@ -176,9 +176,15 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
             has_more = true;
         }
 
+        let generated_at = Utc::now();
         return Ok(OddsResponse {
             base_url: POLYMARKET_GAMMA_URL.to_string(),
-            generated_at: Utc::now(),
+            generated_at,
+            schema_version: "finance.odds.v2".to_string(),
+            freshness_summary: odds_response_freshness_summary(generated_at, &[], None),
+            applied_policy: AppliedPolicy::default(),
+            decision_trace: vec![],
+            run_meta: odds_run_meta(0, 0, 0, 0),
             series: None,
             events: vec![],
             markets: vec![],
@@ -334,6 +340,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
                                 ticker: market_id.clone(),
                                 title: title.clone(),
                                 event_ticker: event_id.clone(),
+                                freshness: odds_freshness(None),
                                 yes_price: None,
                                 volume: None,
                                 status: status.clone(),
@@ -366,9 +373,24 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
             .list_markets
             .then(|| build_odds_analytics_from_listed(&listed_markets))
             .flatten();
+        let generated_at = Utc::now();
         return Ok(OddsResponse {
             base_url: POLYMARKET_GAMMA_URL.to_string(),
-            generated_at: Utc::now(),
+            generated_at,
+            schema_version: "finance.odds.v2".to_string(),
+            freshness_summary: odds_response_freshness_summary(
+                generated_at,
+                &[],
+                req.list_markets.then_some(listed_markets.as_slice()),
+            ),
+            applied_policy: AppliedPolicy::default(),
+            decision_trace: vec![],
+            run_meta: odds_run_meta(
+                if req.list_events { listed_events.len() } else { 0 },
+                0,
+                if req.list_events { listed_events.len() } else { 0 },
+                if req.list_markets { listed_markets.len() } else { 0 },
+            ),
             series: None,
             events: vec![],
             markets: vec![],
@@ -491,6 +513,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
                                     ticker: market_id.clone(),
                                     title: question,
                                     event_ticker: event_id.clone(),
+                                    freshness: odds_freshness(None),
                                     status: match (
                                         m.get("active").and_then(|v| v.as_bool()),
                                         m.get("closed").and_then(|v| v.as_bool()),
@@ -549,9 +572,19 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
                     )
                 };
 
+                let generated_at = Utc::now();
                 return Ok(OddsResponse {
                     base_url: POLYMARKET_GAMMA_URL.to_string(),
-                    generated_at: Utc::now(),
+                    generated_at,
+                    schema_version: "finance.odds.v2".to_string(),
+                    freshness_summary: odds_response_freshness_summary(
+                        generated_at,
+                        &odds_markets,
+                        None,
+                    ),
+                    applied_policy: AppliedPolicy::default(),
+                    decision_trace: vec![],
+                    run_meta: odds_run_meta(odds_events.len(), odds_markets.len(), 0, 0),
                     series: None,
                     events: odds_events,
                     markets: odds_markets.clone(),
@@ -766,6 +799,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
                         ticker: market_id.clone(),
                         title: title.clone(),
                         event_ticker: event_id.clone(),
+                        freshness: odds_freshness(None),
                         yes_price: None,
                         volume: None,
                         status: status.clone(),
@@ -784,6 +818,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
                         ticker: market_id.clone(),
                         title: title.clone(),
                         event_ticker: event_id.clone(),
+                        freshness: odds_freshness(None),
                         status: status.clone(),
                         yes_price: None,
                         yes_bid: None,
@@ -881,9 +916,24 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
     }
 
     let analytics = build_odds_analytics(&odds_markets);
+    let generated_at = Utc::now();
     Ok(OddsResponse {
         base_url: POLYMARKET_GAMMA_URL.to_string(),
-        generated_at: Utc::now(),
+        generated_at,
+        schema_version: "finance.odds.v2".to_string(),
+        freshness_summary: odds_response_freshness_summary(
+            generated_at,
+            &odds_markets,
+            list_markets_only.then_some(listed_markets.as_slice()),
+        ),
+        applied_policy: AppliedPolicy::default(),
+        decision_trace: vec![],
+        run_meta: odds_run_meta(
+            odds_events.len(),
+            odds_markets.len(),
+            if list_events_only { listed_events.len() } else { 0 },
+            if list_markets_only { listed_markets.len() } else { 0 },
+        ),
         series: None,
         events: odds_events,
         markets: odds_markets,
@@ -906,4 +956,3 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
         field_semantics: default_odds_field_semantics(),
     })
 }
-

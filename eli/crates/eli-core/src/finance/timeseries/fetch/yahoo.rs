@@ -1,4 +1,8 @@
-pub(crate) async fn fetch_yahoo_snapshots(tickers: &[String]) -> Result<Vec<TickerSnapshot>> {
+pub(crate) async fn fetch_yahoo_snapshots(
+    tickers: &[String],
+    collected_at: DateTime<Utc>,
+    freshness_policy: &crate::finance::policy::FreshnessPolicy,
+) -> Result<Vec<TickerSnapshot>> {
     let mut connector = yahoo_finance_api::YahooConnector::new()
         .map_err(|e| Error::Provider(format!("yahoo init failed: {e}")))?;
 
@@ -35,6 +39,7 @@ pub(crate) async fn fetch_yahoo_snapshots(tickers: &[String]) -> Result<Vec<Tick
         let day_low = summary.and_then(|s| s.regular_market_day_low.or(s.day_low));
         let day_high = summary.and_then(|s| s.regular_market_day_high.or(s.day_high));
 
+        let mut price_source_kind = "current_price".to_string();
         if current_price.is_none() {
             current_price = previous_close
                 .or(open)
@@ -44,6 +49,15 @@ pub(crate) async fn fetch_yahoo_snapshots(tickers: &[String]) -> Result<Vec<Tick
                     }
                     _ => None,
                 });
+            price_source_kind = if previous_close.is_some() {
+                "previous_close_fallback".to_string()
+            } else if open.is_some() {
+                "open_fallback".to_string()
+            } else if day_low.is_some() && day_high.is_some() {
+                "midpoint_fallback".to_string()
+            } else {
+                "unknown".to_string()
+            };
         }
 
         let enterprise_value = stats.and_then(|s| s.enterprise_value);
@@ -64,6 +78,14 @@ pub(crate) async fn fetch_yahoo_snapshots(tickers: &[String]) -> Result<Vec<Tick
             .and_then(|s| s.last_split_date)
             .and_then(|ts| Utc.timestamp_opt(ts, 0).single());
 
+        let freshness = crate::finance::policy::freshness_from_observed(
+            collected_at,
+            collected_at,
+            freshness_policy,
+            FreshnessOrigin::TransportReceived,
+            FreshnessQuality::Estimated,
+        );
+
         out.push(TickerSnapshot {
             ticker: ticker.clone(),
             currency,
@@ -81,6 +103,9 @@ pub(crate) async fn fetch_yahoo_snapshots(tickers: &[String]) -> Result<Vec<Tick
             float_shares,
             last_split_factor,
             last_split_date,
+            freshness,
+            price_source_kind,
+            session_state: "unknown".to_string(),
         });
     }
 
@@ -381,4 +406,3 @@ fn yahoo_base_interval(granularity: Span) -> (&'static str, Span) {
 
     (best.0, best.1)
 }
-

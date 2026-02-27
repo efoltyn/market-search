@@ -1,5 +1,6 @@
 use crate::web::WebHit;
 use crate::{Error, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use spider::website::Website;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ pub struct CrawlRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CrawlResponse {
     pub base_url: String,
+    pub generated_at: DateTime<Utc>,
     pub crawl_mode: String,
     pub pages_crawled: usize,
     pub pages: Vec<CrawledPage>,
@@ -33,6 +35,7 @@ pub struct CrawledPage {
     pub title: Option<String>,
     pub text_preview: String,
     pub links_found: usize,
+    pub fetched_at: DateTime<Utc>,
 }
 
 impl Default for CrawlRequest {

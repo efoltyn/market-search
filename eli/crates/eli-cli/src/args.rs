@@ -619,6 +619,12 @@ pub struct FinanceMacroArgs {
     /// Output format (json only).
     #[arg(long, default_value = "json")]
     pub format: String,
+    /// Optional policy file override.
+    #[arg(long = "policy-file")]
+    pub policy_file: Option<PathBuf>,
+    /// Policy mode: observe | assist | enforce.
+    #[arg(long = "policy-mode", default_value = "observe")]
+    pub policy_mode: String,
     /// Output file path.
     #[arg(short, long)]
     pub out: Option<PathBuf>,
@@ -771,6 +777,14 @@ struct FinanceNewsArgs {
     #[arg(long)]
     date: String,
 
+    /// Optional policy file override.
+    #[arg(long = "policy-file")]
+    policy_file: Option<PathBuf>,
+
+    /// Policy mode: observe | assist | enforce.
+    #[arg(long = "policy-mode", default_value = "observe")]
+    policy_mode: String,
+
     /// Write full JSON output to a file instead of stdout.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -827,6 +841,14 @@ struct FinanceSearchArgs {
     /// Output format (currently: json).
     #[arg(long, default_value = "json")]
     format: String,
+
+    /// Optional policy file override.
+    #[arg(long = "policy-file")]
+    policy_file: Option<PathBuf>,
+
+    /// Policy mode: observe | assist | enforce.
+    #[arg(long = "policy-mode", default_value = "observe")]
+    policy_mode: String,
 
     /// Write full JSON output to a file instead of stdout.
     #[arg(long)]
@@ -939,6 +961,14 @@ struct FinanceOddsArgs {
     /// Query profile: auto | macro | broad.
     #[arg(long, default_value = "auto")]
     profile: String,
+
+    /// Optional policy file override.
+    #[arg(long = "policy-file")]
+    policy_file: Option<PathBuf>,
+
+    /// Policy mode: observe | assist | enforce.
+    #[arg(long = "policy-mode", default_value = "observe")]
+    policy_mode: String,
 
     /// Only include markets that changed since the last sync (requires sync delta index).
     #[arg(long, default_value_t = false)]
@@ -1070,6 +1100,14 @@ struct FinanceSyncArgs {
     /// Emit full verbose payload on stdout (default is compact/token-efficient).
     #[arg(long)]
     full: bool,
+
+    /// Optional policy file override.
+    #[arg(long = "policy-file")]
+    policy_file: Option<PathBuf>,
+
+    /// Policy mode: observe | assist | enforce.
+    #[arg(long = "policy-mode", default_value = "observe")]
+    policy_mode: String,
 
     /// Write full JSON output to a file instead of stdout.
     #[arg(long)]

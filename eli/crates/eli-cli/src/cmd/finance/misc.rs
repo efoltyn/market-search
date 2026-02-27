@@ -77,7 +77,17 @@ async fn cmd_finance_search(args: FinanceSearchArgs) -> Result<()> {
     }
 
     let query_for_meta = args.query.clone();
-    let req = eli_core::finance::SearchRequest { query: args.query };
+    let policy_mode = eli_core::finance::policy::parse_policy_mode(Some(&args.policy_mode))
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("parse --policy-mode")?;
+    let req = eli_core::finance::SearchRequest {
+        query: args.query,
+        policy_file: args
+            .policy_file
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        policy_mode: Some(policy_mode),
+    };
     let resp = eli_core::finance::fetch_search(req)
         .await
         .map_err(|e| anyhow::anyhow!(e))
@@ -163,4 +173,3 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
     println!("{json}");
     Ok(())
 }
-

@@ -4,6 +4,9 @@ use super::super::{
 };
 use std::collections::{HashMap, HashSet};
 
+const ANALYSIS_TOP_MARKETS_LIMIT: usize = 5;
+const ANALYSIS_TOP_CATEGORIES_LIMIT: usize = 10;
+
 pub(crate) struct SyncAnalysisInput {
     pub(crate) source: String,
     pub(crate) events: Vec<OddsListedEvent>,
@@ -180,17 +183,17 @@ pub(crate) fn build_sync_analysis(inputs: &[SyncAnalysisInput]) -> OddsSyncAnaly
     }
 
     top_markets_by_volume.sort_by(|a, b| b.volume.unwrap_or(0).cmp(&a.volume.unwrap_or(0)));
-    top_markets_by_volume.truncate(10);
+    top_markets_by_volume.truncate(ANALYSIS_TOP_MARKETS_LIMIT);
     top_markets_by_informative_volume
         .sort_by(|a, b| b.volume.unwrap_or(0).cmp(&a.volume.unwrap_or(0)));
-    top_markets_by_informative_volume.truncate(10);
+    top_markets_by_informative_volume.truncate(ANALYSIS_TOP_MARKETS_LIMIT);
     anomalous_zero_yes_markets.sort_by(|a, b| b.volume.unwrap_or(0).cmp(&a.volume.unwrap_or(0)));
-    anomalous_zero_yes_markets.truncate(10);
+    anomalous_zero_yes_markets.truncate(ANALYSIS_TOP_MARKETS_LIMIT);
     near_even_high_volume_markets.sort_by(|a, b| b.volume.unwrap_or(0).cmp(&a.volume.unwrap_or(0)));
-    near_even_high_volume_markets.truncate(10);
+    near_even_high_volume_markets.truncate(ANALYSIS_TOP_MARKETS_LIMIT);
     high_confidence_high_volume_markets
         .sort_by(|a, b| b.volume.unwrap_or(0).cmp(&a.volume.unwrap_or(0)));
-    high_confidence_high_volume_markets.truncate(10);
+    high_confidence_high_volume_markets.truncate(ANALYSIS_TOP_MARKETS_LIMIT);
 
     let mut top_categories: Vec<OddsSyncCategorySummary> = category_rollup
         .into_iter()
@@ -208,7 +211,7 @@ pub(crate) fn build_sync_analysis(inputs: &[SyncAnalysisInput]) -> OddsSyncAnaly
             .then_with(|| b.markets.cmp(&a.markets))
             .then_with(|| a.category.cmp(&b.category))
     });
-    top_categories.truncate(12);
+    top_categories.truncate(ANALYSIS_TOP_CATEGORIES_LIMIT);
 
     let probability_buckets = vec![
         ("0-20", 0usize),

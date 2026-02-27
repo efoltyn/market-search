@@ -12,9 +12,6 @@ fn postprocess_odds_response(mut resp: OddsResponse, req: &OddsRequest) -> OddsR
         return resp;
     }
 
-    use chrono::Datelike;
-    let current_year = Utc::now().year();
-
     if let Some(events) = resp.available_events.as_mut() {
         events.sort_by(|a, b| {
             score_listed_event(b, &terms)
@@ -24,14 +21,6 @@ fn postprocess_odds_response(mut resp: OddsResponse, req: &OddsRequest) -> OddsR
     }
 
     if let Some(markets) = resp.available_markets.as_mut() {
-        markets.retain(|m| {
-            !is_probably_stale_open_market(
-                &m.title,
-                m.status.as_deref(),
-                Some(search_raw),
-                current_year,
-            )
-        });
         markets.sort_by(|a, b| {
             score_listed_market(b, &terms)
                 .cmp(&score_listed_market(a, &terms))
@@ -40,14 +29,6 @@ fn postprocess_odds_response(mut resp: OddsResponse, req: &OddsRequest) -> OddsR
     }
 
     if !resp.markets.is_empty() {
-        resp.markets.retain(|m| {
-            !is_probably_stale_open_market(
-                &m.title,
-                m.status.as_deref(),
-                Some(search_raw),
-                current_year,
-            )
-        });
         resp.markets.sort_by(|a, b| {
             score_market(b, &terms)
                 .cmp(&score_market(a, &terms))
@@ -66,4 +47,3 @@ fn postprocess_odds_response(mut resp: OddsResponse, req: &OddsRequest) -> OddsR
 
     resp
 }
-

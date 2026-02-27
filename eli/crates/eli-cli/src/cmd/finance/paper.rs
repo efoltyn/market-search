@@ -57,7 +57,9 @@ fn map_paper_command(v: FinancePaperCommandArg) -> PaperCommand {
 fn map_paper_mode(v: FinancePaperModeArg) -> PaperMode {
     match v {
         FinancePaperModeArg::Simulated => PaperMode::Simulated,
+        FinancePaperModeArg::LiveLike => PaperMode::LiveLike,
         FinancePaperModeArg::KalshiDemo => PaperMode::KalshiDemo,
+        FinancePaperModeArg::PolymarketDemo => PaperMode::PolymarketDemo,
     }
 }
 

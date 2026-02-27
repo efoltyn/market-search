@@ -70,6 +70,7 @@ fn base_price_from_seed(seed: u64) -> f64 {
 }
 
 pub(crate) fn generate_mock_snapshots(tickers: &[String]) -> Vec<TickerSnapshot> {
+    let now = Utc::now();
     tickers
         .iter()
         .map(|ticker| {
@@ -96,8 +97,16 @@ pub(crate) fn generate_mock_snapshots(tickers: &[String]) -> Vec<TickerSnapshot>
                 float_shares: Some(shares.saturating_sub(shares / 10)),
                 last_split_factor: None,
                 last_split_date: None,
+                freshness: Freshness::new(
+                    now,
+                    now,
+                    FreshnessState::Unknown,
+                    FreshnessOrigin::Derived,
+                    FreshnessQuality::Estimated,
+                ),
+                price_source_kind: "mock".to_string(),
+                session_state: "unknown".to_string(),
             }
         })
         .collect()
 }
-

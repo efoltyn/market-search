@@ -1,8 +1,9 @@
 use super::super::providers::{sync_kalshi_events, sync_polymarket_events};
 use super::super::{
-    default_odds_field_semantics, OddsListedEvent, OddsListedMarket, OddsSyncBaselineQuality,
-    OddsSyncCoverage, OddsSyncRequest, OddsSyncResponse, OddsSyncSourceDelta, OddsSyncSourceResult,
-    OddsSyncStatus, RateLimiter,
+    default_odds_field_semantics, AppliedPolicy, Freshness, FreshnessOrigin, FreshnessQuality,
+    FreshnessState, FreshnessSummary, OddsListedEvent, OddsListedMarket,
+    OddsSyncBaselineQuality, OddsSyncCoverage, OddsSyncRequest, OddsSyncResponse,
+    OddsSyncSourceDelta, OddsSyncSourceResult, OddsSyncStatus, RateLimiter, RunMeta,
 };
 use super::analysis::{build_sync_analysis, build_sync_source_analytics, SyncAnalysisInput};
 use super::csv_cache_writer::{merge_markets_csv, write_markets_csv};
@@ -535,6 +536,25 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
 
     Ok(OddsSyncResponse {
         generated_at: current_sync_at,
+        schema_version: "finance.sync.v2".to_string(),
+        freshness_summary: FreshnessSummary {
+            data_as_of: Some(current_sync_at),
+            max_age_seconds: Some(0),
+            stale_count: 0,
+        },
+        applied_policy: AppliedPolicy::default(),
+        decision_trace: vec![],
+        run_meta: RunMeta {
+            latency_ms: 0,
+            stdout_chars: 0,
+            stored_bytes: 0,
+            coverage_counts: BTreeMap::from([
+                ("sources".to_string(), source_results.len()),
+                ("events".to_string(), total_events),
+                ("markets".to_string(), total_markets),
+            ]),
+            token_efficiency: None,
+        },
         sync_status,
         sources: source_results,
         total_events,
@@ -1332,6 +1352,13 @@ fn sync_state_market_to_listed_market(
         ticker: state.ticker.clone(),
         title: state.title.clone(),
         event_ticker: state.event_ticker.clone(),
+        freshness: Freshness::new(
+            Utc::now(),
+            Utc::now(),
+            FreshnessState::Unknown,
+            FreshnessOrigin::Derived,
+            FreshnessQuality::Estimated,
+        ),
         yes_price: state.yes_price,
         volume: state.volume,
         status: state.status.clone(),

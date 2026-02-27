@@ -24,6 +24,8 @@ async fn fetch_current_fed_funds() -> Result<f64> {
     if let Ok(macro_resp) = fetch_macro(MacroRequest {
         range: None,
         compare_to: None,
+        policy_file: None,
+        policy_mode: None,
     })
     .await
     {
@@ -41,4 +43,3 @@ async fn fetch_current_fed_funds() -> Result<f64> {
         "FEDFUNDS series has no observations".to_string(),
     ))
 }
-

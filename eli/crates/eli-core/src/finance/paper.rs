@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+const PAPER_STATE_LOCK_RETRY_MS: u64 = 25;
+const PAPER_STATE_LOCK_MAX_ATTEMPTS: usize = 200;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PaperPositionState {
     provider: PaperProvider,
@@ -42,9 +45,28 @@ impl Default for PaperState {
 
 pub async fn run_paper(req: PaperRequest) -> Result<PaperResponse> {
     if req.mode == PaperMode::KalshiDemo {
-        return Err(Error::InvalidInput(
-            "mode 'kalshi_demo' is not implemented yet; use mode='simulated'".to_string(),
-        ));
+        if req
+            .provider
+            .as_ref()
+            .map(|p| p != &PaperProvider::Kalshi)
+            .unwrap_or(false)
+        {
+            return Err(Error::InvalidInput(
+                "mode 'kalshi_demo' supports provider=kalshi only".to_string(),
+            ));
+        }
+    }
+    if req.mode == PaperMode::PolymarketDemo {
+        if req
+            .provider
+            .as_ref()
+            .map(|p| p != &PaperProvider::Polymarket)
+            .unwrap_or(false)
+        {
+            return Err(Error::InvalidInput(
+                "mode 'polymarket_demo' supports provider=polymarket only".to_string(),
+            ));
+        }
     }
 
     let account_name = req
@@ -60,6 +82,7 @@ pub async fn run_paper(req: PaperRequest) -> Result<PaperResponse> {
         std::fs::create_dir_all(parent)
             .map_err(|e| Error::Provider(format!("create paper cache dir failed: {e}")))?;
     }
+    let _state_lock = acquire_state_lock(&state_path).await?;
 
     let mut state = load_state(&state_path)?;
     let default_cash = req.starting_cash.unwrap_or(10_000.0).max(0.0);
@@ -85,9 +108,16 @@ pub async fn run_paper(req: PaperRequest) -> Result<PaperResponse> {
 
     let mut last_trade = None;
     if req.command == PaperCommand::Trade {
-        let provider = req.provider.clone().ok_or_else(|| {
-            Error::InvalidInput("provider is required for paper trade".to_string())
-        })?;
+        let provider = match req.mode {
+            PaperMode::KalshiDemo => PaperProvider::Kalshi,
+            PaperMode::PolymarketDemo => PaperProvider::Polymarket,
+            PaperMode::Simulated | PaperMode::LiveLike => {
+                req.provider.clone().ok_or_else(|| {
+                    Error::InvalidInput("provider is required for paper trade".to_string())
+                })?
+            }
+        };
+        ensure_mode_credentials(&req.mode, &provider)?;
         let market_ticker = req
             .market_ticker
             .as_deref()
@@ -207,9 +237,9 @@ pub async fn run_paper(req: PaperRequest) -> Result<PaperResponse> {
             price: fill_price,
             notional,
             note: if req.limit_price.is_some() {
-                Some("filled at user limit_price".to_string())
+                Some(mode_note(req.mode.clone(), true))
             } else {
-                Some("filled at live midpoint probability".to_string())
+                Some(mode_note(req.mode.clone(), false))
             },
         };
 
@@ -347,7 +377,68 @@ fn tail_trades(trades: &[PaperTradeFill], n: usize) -> Vec<PaperTradeFill> {
         .collect()
 }
 
+fn ensure_mode_credentials(mode: &PaperMode, provider: &PaperProvider) -> Result<()> {
+    match mode {
+        PaperMode::Simulated => Ok(()),
+        PaperMode::LiveLike => match provider {
+            PaperProvider::Kalshi => crate::finance::credentials::resolve_kalshi_ws_credentials()
+                .map(|_| ())
+                .map_err(Error::InvalidInput),
+            PaperProvider::Polymarket => {
+                crate::finance::credentials::resolve_polymarket_credentials()
+                    .map(|creds| {
+                        let _ = (
+                            creds.api_key.len(),
+                            creds.secret.len(),
+                            creds.passphrase.len(),
+                        );
+                    })
+                    .map_err(Error::InvalidInput)
+            }
+        },
+        PaperMode::KalshiDemo => crate::finance::credentials::resolve_kalshi_ws_credentials()
+            .map(|_| ())
+            .map_err(Error::InvalidInput),
+        PaperMode::PolymarketDemo => crate::finance::credentials::resolve_polymarket_credentials()
+            .map(|creds| {
+                let _ = (
+                    creds.api_key.len(),
+                    creds.secret.len(),
+                    creds.passphrase.len(),
+                );
+            })
+            .map_err(Error::InvalidInput),
+    }
+}
+
+fn mode_note(mode: PaperMode, is_limit: bool) -> String {
+    match (mode, is_limit) {
+        (PaperMode::Simulated, true) => "filled at user limit_price".to_string(),
+        (PaperMode::Simulated, false) => "filled at live midpoint probability".to_string(),
+        (PaperMode::LiveLike, true) => "live_like paper fill at user limit_price".to_string(),
+        (PaperMode::LiveLike, false) => {
+            "live_like paper fill at live midpoint probability".to_string()
+        }
+        (PaperMode::KalshiDemo, true) => "kalshi_demo paper fill at user limit_price".to_string(),
+        (PaperMode::KalshiDemo, false) => {
+            "kalshi_demo paper fill at live midpoint probability".to_string()
+        }
+        (PaperMode::PolymarketDemo, true) => {
+            "polymarket_demo paper fill at user limit_price".to_string()
+        }
+        (PaperMode::PolymarketDemo, false) => {
+            "polymarket_demo paper fill at live midpoint probability".to_string()
+        }
+    }
+}
+
 async fn resolve_yes_probability(provider: &PaperProvider, market_ticker: &str) -> Result<f64> {
+    if provider == &PaperProvider::Polymarket {
+        if let Some(prob) = resolve_polymarket_yes_probability_direct(market_ticker).await? {
+            return Ok(prob.clamp(0.0, 1.0));
+        }
+    }
+
     let provider_name = provider_tag(provider).to_string();
     let odds = fetch_odds(OddsRequest {
         provider: Some(provider_name),
@@ -373,6 +464,132 @@ async fn resolve_yes_probability(provider: &PaperProvider, market_ticker: &str) 
     ))
 }
 
+async fn resolve_polymarket_yes_probability_direct(market_ticker: &str) -> Result<Option<f64>> {
+    let ticker = market_ticker.trim();
+    if ticker.is_empty() {
+        return Ok(None);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| Error::Provider(format!("polymarket quote client init failed: {e}")))?;
+
+    let encoded = urlencoding::encode(ticker);
+    let direct_url = format!("{}/markets/{}", POLYMARKET_GAMMA_URL, encoded);
+    let direct = client
+        .get(&direct_url)
+        .send()
+        .await
+        .map_err(|e| Error::Provider(format!("polymarket market lookup failed: {e}")))?;
+
+    let mut market_obj = if direct.status().is_success() {
+        direct.json::<serde_json::Value>().await.ok()
+    } else {
+        None
+    };
+
+    if market_obj.is_none() {
+        let query = client
+            .get(format!("{}/markets", POLYMARKET_GAMMA_URL))
+            .query(&[("id", ticker)])
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("polymarket market query failed: {e}")))?;
+        if query.status().is_success() {
+            if let Ok(value) = query.json::<serde_json::Value>().await {
+                market_obj = value.as_array().and_then(|arr| arr.first().cloned());
+            }
+        }
+    }
+
+    let Some(market) = market_obj else {
+        return Ok(None);
+    };
+
+    let outcomes = market
+        .get("outcomes")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let outcome_prices = market
+        .get("outcomePrices")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let outcomes_vec = parse_json_value_strings_local(&outcomes);
+    let outcome_prices_vec = parse_json_value_strings_local(&outcome_prices);
+
+    if !outcomes_vec.is_empty() && !outcome_prices_vec.is_empty() {
+        if let Some(prob) = probability_yes_from_outcomes_local(&outcomes_vec, &outcome_prices_vec)
+        {
+            return Ok(Some(prob.clamp(0.0, 1.0)));
+        }
+    }
+
+    let best_bid = market
+        .get("bestBid")
+        .or_else(|| market.get("best_bid"))
+        .and_then(json_value_to_probability);
+    let best_ask = market
+        .get("bestAsk")
+        .or_else(|| market.get("best_ask"))
+        .and_then(json_value_to_probability);
+    match (best_bid, best_ask) {
+        (Some(bid), Some(ask)) => return Ok(Some(((bid + ask) / 2.0).clamp(0.0, 1.0))),
+        (Some(v), None) | (None, Some(v)) => return Ok(Some(v)),
+        _ => {}
+    }
+
+    if let Some(last) = market
+        .get("lastTradePrice")
+        .or_else(|| market.get("last_trade_price"))
+        .and_then(json_value_to_probability)
+    {
+        return Ok(Some(last));
+    }
+
+    Ok(None)
+}
+
+fn json_value_to_probability(value: &serde_json::Value) -> Option<f64> {
+    let raw = match value {
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        serde_json::Value::Number(n) => n.as_f64(),
+        _ => None,
+    }?;
+    if raw > 1.0 {
+        Some((raw / 100.0).clamp(0.0, 1.0))
+    } else {
+        Some(raw.clamp(0.0, 1.0))
+    }
+}
+
+fn parse_json_value_strings_local(raw: &serde_json::Value) -> Vec<String> {
+    match raw {
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .collect(),
+        serde_json::Value::String(s) => serde_json::from_str::<Vec<String>>(s).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn probability_yes_from_outcomes_local(outcomes: &[String], prices: &[String]) -> Option<f64> {
+    let idx = outcomes
+        .iter()
+        .position(|o| o.trim().eq_ignore_ascii_case("yes"))?;
+    let raw = prices.get(idx)?.trim().parse::<f64>().ok()?;
+    if raw > 1.0 {
+        Some((raw / 100.0).clamp(0.0, 1.0))
+    } else {
+        Some(raw.clamp(0.0, 1.0))
+    }
+}
+
 fn resolve_paper_state_path(cache_dir: Option<&str>) -> PathBuf {
     if let Some(dir) = cache_dir {
         let p = PathBuf::from(dir);
@@ -385,6 +602,62 @@ fn resolve_paper_state_path(cache_dir: Option<&str>) -> PathBuf {
     directories::ProjectDirs::from("", "", "eli")
         .map(|d| d.cache_dir().join("finance").join("paper_state.json"))
         .unwrap_or_else(|| std::env::temp_dir().join("eli-paper-state.json"))
+}
+
+struct PaperStateLockGuard {
+    path: PathBuf,
+}
+
+impl Drop for PaperStateLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+async fn acquire_state_lock(state_path: &Path) -> Result<PaperStateLockGuard> {
+    let lock_path = state_lock_path(state_path);
+    for attempt in 1..=PAPER_STATE_LOCK_MAX_ATTEMPTS {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(mut file) => {
+                let _ = std::io::Write::write_all(
+                    &mut file,
+                    format!("pid={}\n", std::process::id()).as_bytes(),
+                );
+                return Ok(PaperStateLockGuard { path: lock_path });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if attempt == PAPER_STATE_LOCK_MAX_ATTEMPTS {
+                    return Err(Error::Provider(format!(
+                        "paper state lock timeout at {}",
+                        lock_path.display()
+                    )));
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(PAPER_STATE_LOCK_RETRY_MS))
+                    .await;
+            }
+            Err(err) => {
+                return Err(Error::Provider(format!(
+                    "paper state lock failed for {}: {err}",
+                    lock_path.display()
+                )));
+            }
+        }
+    }
+
+    Err(Error::Provider(format!(
+        "paper state lock timeout at {}",
+        lock_path.display()
+    )))
+}
+
+fn state_lock_path(state_path: &Path) -> PathBuf {
+    let mut os = state_path.as_os_str().to_os_string();
+    os.push(".lock");
+    PathBuf::from(os)
 }
 
 fn load_state(path: &Path) -> Result<PaperState> {

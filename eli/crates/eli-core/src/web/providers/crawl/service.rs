@@ -1,5 +1,6 @@
 pub async fn crawl_website(req: CrawlRequest) -> Result<CrawlResponse> {
     let start = std::time::Instant::now();
+    let generated_at = chrono::Utc::now();
 
     let mut website = Website::new(&req.url);
 
@@ -93,6 +94,7 @@ pub async fn crawl_website(req: CrawlRequest) -> Result<CrawlResponse> {
                 title,
                 text_preview,
                 links_found: links_count,
+                fetched_at: chrono::Utc::now(),
             });
 
             if pages_guard.len() >= max_pages {
@@ -163,6 +165,7 @@ pub async fn crawl_website(req: CrawlRequest) -> Result<CrawlResponse> {
 
     Ok(CrawlResponse {
         base_url: req.url,
+        generated_at,
         crawl_mode: if req.include_sitemap {
             "sitemap".to_string()
         } else if req.smart_mode {

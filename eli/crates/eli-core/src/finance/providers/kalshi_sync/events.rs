@@ -2,6 +2,8 @@ use serde::de::DeserializeOwned;
 
 const KALSHI_EVENTS_PAGE_LIMIT: usize = 200;
 const KALSHI_MARKETS_PAGE_LIMIT: usize = 1000;
+const KALSHI_NON_SPORTS_CATEGORY_CONCURRENCY: usize = 8;
+const KALSHI_NON_SPORTS_UNCATEGORIZED_EVENT_CONCURRENCY: usize = 6;
 const KALSHI_MAX_RETRIES: usize = 6;
 
 #[derive(Default, Clone, Copy)]
@@ -46,6 +48,12 @@ struct MarketsResp {
     cursor: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct HistoricalCutoffResp {
+    #[serde(default)]
+    market_settled_ts: Option<String>,
+}
+
 #[derive(Clone, Deserialize)]
 struct MarketRow {
     ticker: String,
@@ -79,20 +87,35 @@ struct EventsFetchResult {
     metrics: RetryMetrics,
 }
 
-struct GlobalMarketsFetchResult {
+struct MarketsFetchResult {
     pages_fetched: usize,
     exhausted: bool,
     metrics: RetryMetrics,
 }
 
+struct StreamRowsFetchResult {
+    stream_key: String,
+    rows: Vec<MarketRow>,
+    pages_fetched: usize,
+    exhausted: bool,
+    metrics: RetryMetrics,
+}
+
+struct CategoryFilterProbeResult {
+    supported: bool,
+    metrics: RetryMetrics,
+}
+
 /// Sync events/markets from Kalshi with explicit dual-path ingestion:
 ///   - include_sports=true: global `/markets` cursor pagination (full breadth).
-///   - include_sports=false: global `/markets` with `mve_filter=exclude`, then
-///     event-category filtering to keep non-sports coverage with lower token/noise load.
+///   - include_sports=false:
+///       * unbounded mode: parallel category streams + uncategorized event fallback
+///       * capped mode (`max_pages` set): global `/markets` pagination for deterministic cap semantics.
 pub(crate) async fn sync_kalshi_events(
     limiter: &RateLimiter,
     max_pages: Option<usize>,
     include_sports: bool,
+    include_historical: bool,
 ) -> std::result::Result<
     (
         Vec<OddsListedEvent>,
@@ -102,11 +125,12 @@ pub(crate) async fn sync_kalshi_events(
     String,
 > {
     eprintln!(
-        "[kalshi] starting sync (max_pages={}, include_sports={})",
+        "[kalshi] starting sync (max_pages={}, include_sports={}, include_historical={})",
         max_pages
             .map(|v| v.to_string())
             .unwrap_or_else(|| "unbounded".to_string()),
-        include_sports
+        include_sports,
+        include_historical
     );
 
     let client = reqwest::Client::builder()
@@ -121,7 +145,7 @@ pub(crate) async fn sync_kalshi_events(
     let events_exhausted;
     let events_requests;
     let mut markets_pages_fetched = 0usize;
-    let markets_exhausted;
+    let mut markets_exhausted;
     let mut markets_requests = 0usize;
     let mut retry_count_429 = 0usize;
     let mut retry_count_5xx = 0usize;
@@ -134,15 +158,28 @@ pub(crate) async fn sync_kalshi_events(
     retry_count_5xx = retry_count_5xx.saturating_add(events_fetch.metrics.retry_5xx);
 
     let mut category_map: HashMap<String, Option<String>> = HashMap::new();
+    let mut non_sports_categories: BTreeSet<String> = BTreeSet::new();
+    let mut non_sports_category_counts: HashMap<String, usize> = HashMap::new();
+    let mut uncategorized_non_sports_events: Vec<String> = Vec::new();
     let mut all_events: Vec<OddsListedEvent> = Vec::new();
     for row in events_fetch.rows {
+        let event_ticker = row.event_ticker.clone();
         let category = normalize_event_category(row.category.as_deref())
-            .or_else(|| infer_category_from_event_ticker(&row.event_ticker));
+            .or_else(|| infer_category_from_event_ticker(&event_ticker));
         let is_sports = category.as_deref().map_or(false, is_sports_category);
-        category_map.insert(row.event_ticker.clone(), category.clone());
+        category_map.insert(event_ticker.clone(), category.clone());
 
-        if !include_sports && is_sports {
-            continue;
+        if !include_sports {
+            if is_sports {
+                continue;
+            }
+            if let Some(cat) = category.clone() {
+                non_sports_categories.insert(cat.clone());
+                let key = cat;
+                *non_sports_category_counts.entry(key).or_insert(0) += 1;
+            } else {
+                uncategorized_non_sports_events.push(event_ticker);
+            }
         }
 
         all_events.push(build_event_record(row, category));
@@ -168,8 +205,9 @@ pub(crate) async fn sync_kalshi_events(
         markets_requests = markets_requests.saturating_add(global.metrics.attempts);
         retry_count_429 = retry_count_429.saturating_add(global.metrics.retry_429);
         retry_count_5xx = retry_count_5xx.saturating_add(global.metrics.retry_5xx);
-    } else {
-        eprintln!("[kalshi] mode=global-markets (non-sports filtered)");
+    } else if max_pages.is_some() {
+        // Keep deterministic page-cap semantics when caller explicitly requests max_pages.
+        eprintln!("[kalshi] mode=global-markets (non-sports filtered, capped)");
         let global = run_global_markets_sync(
             &client,
             limiter,
@@ -185,6 +223,93 @@ pub(crate) async fn sync_kalshi_events(
         markets_requests = markets_requests.saturating_add(global.metrics.attempts);
         retry_count_429 = retry_count_429.saturating_add(global.metrics.retry_429);
         retry_count_5xx = retry_count_5xx.saturating_add(global.metrics.retry_5xx);
+    } else {
+        let probe = probe_category_filter_support(
+            &client,
+            limiter,
+            &non_sports_category_counts,
+            &category_map,
+        )
+        .await?;
+        markets_requests = markets_requests.saturating_add(probe.metrics.attempts);
+        retry_count_429 = retry_count_429.saturating_add(probe.metrics.retry_429);
+        retry_count_5xx = retry_count_5xx.saturating_add(probe.metrics.retry_5xx);
+
+        if probe.supported {
+            // Fast path for non-sports sync when category filtering is functioning.
+            eprintln!(
+                "[kalshi] mode=category-streams (non-sports) categories={} uncategorized_events={}",
+                non_sports_categories.len(),
+                uncategorized_non_sports_events.len()
+            );
+            let by_category = run_non_sports_category_sync(
+                &client,
+                limiter,
+                &non_sports_categories,
+                &category_map,
+                &mut seen_market_tickers,
+                &mut all_markets,
+            )
+            .await?;
+            markets_pages_fetched = markets_pages_fetched.saturating_add(by_category.pages_fetched);
+            markets_requests = markets_requests.saturating_add(by_category.metrics.attempts);
+            retry_count_429 = retry_count_429.saturating_add(by_category.metrics.retry_429);
+            retry_count_5xx = retry_count_5xx.saturating_add(by_category.metrics.retry_5xx);
+
+            let uncategorized = run_uncategorized_event_fallback_sync(
+                &client,
+                limiter,
+                &uncategorized_non_sports_events,
+                &category_map,
+                &mut seen_market_tickers,
+                &mut all_markets,
+            )
+            .await?;
+            markets_pages_fetched =
+                markets_pages_fetched.saturating_add(uncategorized.pages_fetched);
+            markets_requests = markets_requests.saturating_add(uncategorized.metrics.attempts);
+            retry_count_429 = retry_count_429.saturating_add(uncategorized.metrics.retry_429);
+            retry_count_5xx = retry_count_5xx.saturating_add(uncategorized.metrics.retry_5xx);
+            markets_exhausted = by_category.exhausted && uncategorized.exhausted;
+        } else {
+            eprintln!(
+                "[kalshi] category filter probe failed; falling back to global non-sports pagination"
+            );
+            let global = run_global_markets_sync(
+                &client,
+                limiter,
+                page_cap,
+                false,
+                &category_map,
+                &mut seen_market_tickers,
+                &mut all_markets,
+            )
+            .await?;
+            markets_pages_fetched = markets_pages_fetched.saturating_add(global.pages_fetched);
+            markets_exhausted = global.exhausted;
+            markets_requests = markets_requests.saturating_add(global.metrics.attempts);
+            retry_count_429 = retry_count_429.saturating_add(global.metrics.retry_429);
+            retry_count_5xx = retry_count_5xx.saturating_add(global.metrics.retry_5xx);
+        }
+    }
+
+    if include_historical {
+        eprintln!("[kalshi] mode=historical-markets");
+        let historical = run_historical_markets_sync(
+            &client,
+            limiter,
+            page_cap,
+            include_sports,
+            &mut category_map,
+            &mut seen_market_tickers,
+            &mut all_markets,
+        )
+        .await?;
+        markets_pages_fetched = markets_pages_fetched.saturating_add(historical.pages_fetched);
+        markets_requests = markets_requests.saturating_add(historical.metrics.attempts);
+        retry_count_429 = retry_count_429.saturating_add(historical.metrics.retry_429);
+        retry_count_5xx = retry_count_5xx.saturating_add(historical.metrics.retry_5xx);
+        markets_exhausted = markets_exhausted && historical.exhausted;
     }
 
     all_events.sort_by(|a, b| a.ticker.cmp(&b.ticker));
@@ -313,7 +438,7 @@ async fn fetch_open_events(
             }
         }
         cursor = next_cursor;
-        if cursor.is_none() || count < KALSHI_EVENTS_PAGE_LIMIT {
+        if cursor.is_none() {
             exhausted = true;
             break;
         }
@@ -337,7 +462,7 @@ async fn run_global_markets_sync(
     category_map: &HashMap<String, Option<String>>,
     seen_market_tickers: &mut HashSet<String>,
     all_markets: &mut Vec<OddsListedMarket>,
-) -> std::result::Result<GlobalMarketsFetchResult, String> {
+) -> std::result::Result<MarketsFetchResult, String> {
     let mut market_cursor: Option<String> = None;
     let mut seen_market_cursors: HashSet<String> = HashSet::new();
     let mut page = 0usize;
@@ -374,6 +499,7 @@ async fn run_global_markets_sync(
             body.markets,
             category_map,
             include_sports,
+            true,
             seen_market_tickers,
             all_markets,
         );
@@ -402,7 +528,7 @@ async fn run_global_markets_sync(
             }
         }
         market_cursor = next_cursor;
-        if market_cursor.is_none() || count < KALSHI_MARKETS_PAGE_LIMIT {
+        if market_cursor.is_none() {
             exhausted = true;
             break;
         }
@@ -410,7 +536,391 @@ async fn run_global_markets_sync(
         page = page.saturating_add(1);
     }
 
-    Ok(GlobalMarketsFetchResult {
+    Ok(MarketsFetchResult {
+        pages_fetched,
+        exhausted,
+        metrics,
+    })
+}
+
+async fn run_historical_markets_sync(
+    client: &reqwest::Client,
+    limiter: &RateLimiter,
+    page_cap: usize,
+    include_sports: bool,
+    category_map: &HashMap<String, Option<String>>,
+    seen_market_tickers: &mut HashSet<String>,
+    all_markets: &mut Vec<OddsListedMarket>,
+) -> std::result::Result<MarketsFetchResult, String> {
+    let mut metrics = RetryMetrics::default();
+    if let Ok((cutoff, cutoff_metrics)) = fetch_json_with_retry::<HistoricalCutoffResp>(
+        client,
+        limiter,
+        reqwest::Url::parse(&format!("{}/historical/cutoff", KALSHI_BASE_URL))
+            .map_err(|e| format!("Kalshi historical cutoff url parse failed: {e}"))?,
+        "Kalshi historical cutoff",
+    )
+    .await
+    {
+        metrics.merge(cutoff_metrics);
+        if let Some(ts) = cutoff.market_settled_ts {
+            eprintln!("[kalshi] historical cutoff market_settled_ts={ts}");
+        }
+    }
+
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors: HashSet<String> = HashSet::new();
+    let mut page = 0usize;
+    let mut pages_fetched = 0usize;
+    let mut fetched_market_rows = 0usize;
+    let mut exhausted = false;
+
+    while page < page_cap {
+        let mut url = reqwest::Url::parse(&format!("{}/historical/markets", KALSHI_BASE_URL))
+            .map_err(|e| format!("Kalshi historical markets url parse failed: {e}"))?;
+        url.query_pairs_mut()
+            .append_pair("status", "settled")
+            .append_pair("limit", &KALSHI_MARKETS_PAGE_LIMIT.to_string());
+        if !include_sports {
+            url.query_pairs_mut().append_pair("mve_filter", "exclude");
+        }
+        if let Some(ref c) = cursor {
+            if !c.trim().is_empty() {
+                url.query_pairs_mut().append_pair("cursor", c.trim());
+            }
+        }
+
+        let (body, req_metrics) = fetch_json_with_retry::<MarketsResp>(
+            client,
+            limiter,
+            url,
+            "Kalshi historical markets",
+        )
+        .await?;
+        metrics.merge(req_metrics);
+        pages_fetched = pages_fetched.saturating_add(1);
+
+        let count = body.markets.len();
+        fetched_market_rows = fetched_market_rows.saturating_add(count);
+        let kept_this_page = append_market_rows(
+            body.markets,
+            category_map,
+            include_sports,
+            true,
+            seen_market_tickers,
+            all_markets,
+        );
+        let dropped_this_page = count.saturating_sub(kept_this_page);
+        eprintln!(
+            "[kalshi] historical markets page {}: fetched={} fetched_total={} kept_total={} kept_this_page={} dropped_this_page={}",
+            page + 1,
+            count,
+            fetched_market_rows,
+            all_markets.len(),
+            kept_this_page,
+            dropped_this_page
+        );
+
+        if count == 0 {
+            exhausted = true;
+            break;
+        }
+
+        let next_cursor = body.cursor.filter(|c| !c.trim().is_empty());
+        if let Some(ref c) = next_cursor {
+            if !seen_cursors.insert(c.clone()) {
+                eprintln!("[kalshi] historical markets stop: cursor cycle detected");
+                exhausted = true;
+                break;
+            }
+        }
+        cursor = next_cursor;
+        if cursor.is_none() {
+            exhausted = true;
+            break;
+        }
+
+        page = page.saturating_add(1);
+    }
+
+    Ok(MarketsFetchResult {
+        pages_fetched,
+        exhausted,
+        metrics,
+    })
+}
+
+async fn probe_category_filter_support(
+    client: &reqwest::Client,
+    limiter: &RateLimiter,
+    category_counts: &HashMap<String, usize>,
+    category_map: &HashMap<String, Option<String>>,
+) -> std::result::Result<CategoryFilterProbeResult, String> {
+    let Some((sample_category, _)) = category_counts.iter().max_by_key(|(_, count)| *count) else {
+        return Ok(CategoryFilterProbeResult {
+            supported: false,
+            metrics: RetryMetrics::default(),
+        });
+    };
+
+    let mut url = reqwest::Url::parse(&format!("{}/markets", KALSHI_BASE_URL))
+        .map_err(|e| format!("Kalshi category probe url parse failed: {e}"))?;
+    url.query_pairs_mut()
+        .append_pair("status", "open")
+        .append_pair("limit", "60")
+        .append_pair("mve_filter", "exclude")
+        .append_pair("category", sample_category);
+
+    let (body, metrics) =
+        fetch_json_with_retry::<MarketsResp>(client, limiter, url, "Kalshi category probe")
+            .await?;
+    if body.markets.is_empty() {
+        return Ok(CategoryFilterProbeResult {
+            supported: false,
+            metrics,
+        });
+    }
+
+    let mut mapped = 0usize;
+    let mut matched = 0usize;
+    for row in body.markets.into_iter().take(60) {
+        let category = category_map
+            .get(&row.event_ticker)
+            .cloned()
+            .flatten()
+            .or_else(|| infer_category_from_event_ticker(&row.event_ticker));
+        let Some(cat) = category else {
+            continue;
+        };
+        mapped = mapped.saturating_add(1);
+        if cat.eq_ignore_ascii_case(sample_category) {
+            matched = matched.saturating_add(1);
+        }
+    }
+
+    // Require at least modestly reliable targeting before enabling category fanout.
+    let supported = mapped >= 8 && ((matched as f64 / mapped as f64) >= 0.8);
+    if !supported {
+        eprintln!(
+            "[kalshi] category probe sample={} mapped={} matched={} (unsupported)",
+            sample_category, mapped, matched
+        );
+    }
+
+    Ok(CategoryFilterProbeResult { supported, metrics })
+}
+
+async fn run_non_sports_category_sync(
+    client: &reqwest::Client,
+    limiter: &RateLimiter,
+    categories: &BTreeSet<String>,
+    category_map: &HashMap<String, Option<String>>,
+    seen_market_tickers: &mut HashSet<String>,
+    all_markets: &mut Vec<OddsListedMarket>,
+) -> std::result::Result<MarketsFetchResult, String> {
+    if categories.is_empty() {
+        return Ok(MarketsFetchResult {
+            pages_fetched: 0,
+            exhausted: true,
+            metrics: RetryMetrics::default(),
+        });
+    }
+
+    let mut stream_results = futures::stream::iter(categories.iter().cloned())
+        .map(|category| {
+            let client = client.clone();
+            async move {
+                fetch_markets_stream_with_filters(
+                    &client,
+                    limiter,
+                    usize::MAX,
+                    format!("category={category}"),
+                    vec![("category".to_string(), category)],
+                )
+                .await
+            }
+        })
+        .buffer_unordered(KALSHI_NON_SPORTS_CATEGORY_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut aggregate = MarketsFetchResult {
+        pages_fetched: 0,
+        exhausted: true,
+        metrics: RetryMetrics::default(),
+    };
+
+    for result in stream_results.drain(..) {
+        let stream = result?;
+        aggregate.pages_fetched = aggregate.pages_fetched.saturating_add(stream.pages_fetched);
+        aggregate.exhausted &= stream.exhausted;
+        aggregate.metrics.merge(stream.metrics);
+
+        let fetched = stream.rows.len();
+        let kept = append_market_rows(
+            stream.rows,
+            category_map,
+            false,
+            true,
+            seen_market_tickers,
+            all_markets,
+        );
+        eprintln!(
+            "[kalshi] markets stream {}: fetched={} kept={} kept_total={}",
+            stream.stream_key,
+            fetched,
+            kept,
+            all_markets.len()
+        );
+    }
+
+    Ok(aggregate)
+}
+
+async fn run_uncategorized_event_fallback_sync(
+    client: &reqwest::Client,
+    limiter: &RateLimiter,
+    event_tickers: &[String],
+    category_map: &HashMap<String, Option<String>>,
+    seen_market_tickers: &mut HashSet<String>,
+    all_markets: &mut Vec<OddsListedMarket>,
+) -> std::result::Result<MarketsFetchResult, String> {
+    let mut seen_events: HashSet<String> = HashSet::new();
+    let unique_events: Vec<String> = event_tickers
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen_events.insert(s.clone()))
+        .collect();
+
+    if unique_events.is_empty() {
+        return Ok(MarketsFetchResult {
+            pages_fetched: 0,
+            exhausted: true,
+            metrics: RetryMetrics::default(),
+        });
+    }
+
+    let mut stream_results = futures::stream::iter(unique_events.into_iter())
+        .map(|event_ticker| {
+            let client = client.clone();
+            async move {
+                fetch_markets_stream_with_filters(
+                    &client,
+                    limiter,
+                    usize::MAX,
+                    format!("event={event_ticker}"),
+                    vec![("event_ticker".to_string(), event_ticker)],
+                )
+                .await
+            }
+        })
+        .buffer_unordered(KALSHI_NON_SPORTS_UNCATEGORIZED_EVENT_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut aggregate = MarketsFetchResult {
+        pages_fetched: 0,
+        exhausted: true,
+        metrics: RetryMetrics::default(),
+    };
+
+    for result in stream_results.drain(..) {
+        let stream = result?;
+        aggregate.pages_fetched = aggregate.pages_fetched.saturating_add(stream.pages_fetched);
+        aggregate.exhausted &= stream.exhausted;
+        aggregate.metrics.merge(stream.metrics);
+
+        let fetched = stream.rows.len();
+        let kept = append_market_rows(
+            stream.rows,
+            category_map,
+            false,
+            true,
+            seen_market_tickers,
+            all_markets,
+        );
+        eprintln!(
+            "[kalshi] markets fallback {}: fetched={} kept={} kept_total={}",
+            stream.stream_key,
+            fetched,
+            kept,
+            all_markets.len()
+        );
+    }
+
+    Ok(aggregate)
+}
+
+async fn fetch_markets_stream_with_filters(
+    client: &reqwest::Client,
+    limiter: &RateLimiter,
+    page_cap: usize,
+    stream_key: String,
+    extra_filters: Vec<(String, String)>,
+) -> std::result::Result<StreamRowsFetchResult, String> {
+    let request_label = format!("Kalshi markets [{stream_key}]");
+    let mut rows: Vec<MarketRow> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors: HashSet<String> = HashSet::new();
+    let mut page = 0usize;
+    let mut pages_fetched = 0usize;
+    let mut metrics = RetryMetrics::default();
+    let mut exhausted = false;
+
+    while page < page_cap {
+        let mut url = reqwest::Url::parse(&format!("{}/markets", KALSHI_BASE_URL))
+            .map_err(|e| format!("{request_label} url parse failed: {e}"))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("status", "open")
+                .append_pair("limit", &KALSHI_MARKETS_PAGE_LIMIT.to_string())
+                .append_pair("mve_filter", "exclude");
+            for (k, v) in &extra_filters {
+                if !v.trim().is_empty() {
+                    query.append_pair(k, v.trim());
+                }
+            }
+            if let Some(ref c) = cursor {
+                if !c.trim().is_empty() {
+                    query.append_pair("cursor", c.trim());
+                }
+            }
+        }
+
+        let (body, req_metrics) =
+            fetch_json_with_retry::<MarketsResp>(client, limiter, url, &request_label).await?;
+        metrics.merge(req_metrics);
+        pages_fetched = pages_fetched.saturating_add(1);
+
+        let count = body.markets.len();
+        if count == 0 {
+            exhausted = true;
+            break;
+        }
+        rows.extend(body.markets.into_iter());
+
+        let next_cursor = body.cursor.filter(|c| !c.trim().is_empty());
+        if let Some(ref c) = next_cursor {
+            if !seen_cursors.insert(c.clone()) {
+                eprintln!("[kalshi] markets stream {stream_key} stop: cursor cycle detected");
+                exhausted = true;
+                break;
+            }
+        }
+        cursor = next_cursor;
+        if cursor.is_none() {
+            exhausted = true;
+            break;
+        }
+
+        page = page.saturating_add(1);
+    }
+
+    Ok(StreamRowsFetchResult {
+        stream_key,
+        rows,
         pages_fetched,
         exhausted,
         metrics,
@@ -421,6 +931,7 @@ fn append_market_rows(
     rows: Vec<MarketRow>,
     category_map: &HashMap<String, Option<String>>,
     include_sports: bool,
+    allow_unknown_non_sports: bool,
     seen_market_tickers: &mut HashSet<String>,
     all_markets: &mut Vec<OddsListedMarket>,
 ) -> usize {
@@ -435,6 +946,9 @@ fn append_market_rows(
             .cloned()
             .flatten()
             .or_else(|| infer_category_from_event_ticker(&row.event_ticker));
+        if !include_sports && !allow_unknown_non_sports && category.is_none() {
+            continue;
+        }
         if !include_sports && category.as_deref().map_or(false, is_sports_category) {
             continue;
         }
@@ -460,6 +974,13 @@ fn append_market_rows(
             ticker: row.ticker,
             title,
             event_ticker: row.event_ticker,
+            freshness: Freshness::new(
+                Utc::now(),
+                Utc::now(),
+                FreshnessState::Unknown,
+                FreshnessOrigin::TransportReceived,
+                FreshnessQuality::Estimated,
+            ),
             yes_price,
             volume: row.volume.or(row.volume_24h),
             status: normalize_kalshi_status(row.status.as_deref()),
@@ -498,36 +1019,69 @@ async fn fetch_json_with_retry<T: DeserializeOwned>(
         attempt = attempt.saturating_add(1);
         metrics.attempts = metrics.attempts.saturating_add(1);
 
-        let resp = client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|e| format!("{label} fetch failed: {e}"))?;
+        let resp = match client.get(url.clone()).send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                if attempt < KALSHI_MAX_RETRIES {
+                    // Network transport errors are usually transient on long full-breadth runs.
+                    metrics.retry_5xx = metrics.retry_5xx.saturating_add(1);
+                    limiter.on_rate_limited();
+                    sleep(backoff_for_attempt(attempt)).await;
+                    continue;
+                }
+                return Err(format!("{label} fetch failed: {err}"));
+            }
+        };
 
         let status = resp.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < KALSHI_MAX_RETRIES {
             metrics.retry_429 = metrics.retry_429.saturating_add(1);
             limiter.on_rate_limited();
-            sleep(backoff_for_attempt(attempt)).await;
+            sleep(retry_delay(status, resp.headers(), attempt)).await;
             continue;
         }
         if status.is_server_error() && attempt < KALSHI_MAX_RETRIES {
             metrics.retry_5xx = metrics.retry_5xx.saturating_add(1);
             limiter.on_rate_limited();
-            sleep(backoff_for_attempt(attempt)).await;
+            sleep(retry_delay(status, resp.headers(), attempt)).await;
             continue;
         }
         if !status.is_success() {
             return Err(format!("{label} fetch failed: http {status}"));
         }
 
-        let body = resp
-            .json::<T>()
-            .await
-            .map_err(|e| format!("{label} parse failed: {e}"))?;
+        let body = match resp.json::<T>().await {
+            Ok(body) => body,
+            Err(err) => {
+                if attempt < KALSHI_MAX_RETRIES {
+                    metrics.retry_5xx = metrics.retry_5xx.saturating_add(1);
+                    limiter.on_rate_limited();
+                    sleep(backoff_for_attempt(attempt)).await;
+                    continue;
+                }
+                return Err(format!("{label} parse failed: {err}"));
+            }
+        };
         limiter.on_success();
         return Ok((body, metrics));
     }
+}
+
+fn retry_delay(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    attempt: usize,
+) -> TokioDuration {
+    let base = backoff_for_attempt(attempt);
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return base;
+    }
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|secs| TokioDuration::from_secs(secs.min(60)));
+    retry_after.map_or(base, |d| d.max(base))
 }
 
 fn parse_prob_from_dollars(raw: Option<&str>) -> Option<f64> {

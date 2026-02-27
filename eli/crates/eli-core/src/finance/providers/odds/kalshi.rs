@@ -109,9 +109,15 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             })
             .collect();
 
+        let generated_at = Utc::now();
         return Ok(OddsResponse {
             base_url: KALSHI_BASE_URL.to_string(),
-            generated_at: Utc::now(),
+            generated_at,
+            schema_version: "finance.odds.v2".to_string(),
+            freshness_summary: odds_response_freshness_summary(generated_at, &[], None),
+            applied_policy: AppliedPolicy::default(),
+            decision_trace: vec![],
+            run_meta: odds_run_meta(0, 0, 0, filtered.len()),
             series: None,
             events: vec![],
             markets: vec![],
@@ -281,9 +287,15 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             }
         }
 
+        let generated_at = Utc::now();
         return Ok(OddsResponse {
             base_url: KALSHI_BASE_URL.to_string(),
-            generated_at: Utc::now(),
+            generated_at,
+            schema_version: "finance.odds.v2".to_string(),
+            freshness_summary: odds_response_freshness_summary(generated_at, &[], None),
+            applied_policy: AppliedPolicy::default(),
+            decision_trace: vec![],
+            run_meta: odds_run_meta(filtered.len(), 0, filtered.len(), 0),
             series: None,
             events: vec![],
             markets: vec![],
@@ -548,8 +560,9 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                                     ticker: m.ticker,
                                     title: m.title,
                                     event_ticker: m.event_ticker,
+                                    freshness: odds_freshness(None),
                                     yes_price: m.yes_price,
-                                    volume: m.volume,
+                                    volume: m.volume.map(|v| v * 100),
                                     status: m.status,
                                     source: Some("kalshi".to_string()),
                                     market_id: None,
@@ -573,9 +586,19 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
 
                 if !filtered.is_empty() {
                     let analytics = build_odds_analytics_from_listed(&filtered);
+                    let generated_at = Utc::now();
                     return Ok(OddsResponse {
                         base_url: KALSHI_BASE_URL.to_string(),
-                        generated_at: Utc::now(),
+                        generated_at,
+                        schema_version: "finance.odds.v2".to_string(),
+                        freshness_summary: odds_response_freshness_summary(
+                            generated_at,
+                            &[],
+                            Some(&filtered),
+                        ),
+                        applied_policy: AppliedPolicy::default(),
+                        decision_trace: vec![],
+                        run_meta: odds_run_meta(0, 0, 0, filtered.len()),
                         series: None,
                         events: vec![],
                         markets: vec![],
@@ -685,8 +708,9 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                     ticker: m.ticker,
                     title: m.title,
                     event_ticker: m.event_ticker,
+                    freshness: odds_freshness(None),
                     yes_price: m.yes_price,
-                    volume: m.volume,
+                    volume: m.volume.map(|v| v * 100),
                     status: m.status,
                     source: Some("kalshi".to_string()),
                     market_id: None,
@@ -709,9 +733,19 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
         }
 
         let analytics = build_odds_analytics_from_listed(&filtered);
+        let generated_at = Utc::now();
         return Ok(OddsResponse {
             base_url: KALSHI_BASE_URL.to_string(),
-            generated_at: Utc::now(),
+            generated_at,
+            schema_version: "finance.odds.v2".to_string(),
+            freshness_summary: odds_response_freshness_summary(
+                generated_at,
+                &[],
+                Some(&filtered),
+            ),
+            applied_policy: AppliedPolicy::default(),
+            decision_trace: vec![],
+            run_meta: odds_run_meta(0, 0, 0, filtered.len()),
             series: None,
             events: vec![],
             markets: vec![],
@@ -856,11 +890,12 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                             ticker: m.ticker,
                             title: m.title,
                             event_ticker: m.event_ticker,
+                            freshness: odds_freshness(None),
                             status: m.status,
                             yes_price: m.yes_price,
                             yes_bid: m.yes_bid,
                             yes_ask: m.yes_ask,
-                            volume: m.volume,
+                            volume: m.volume.map(|v| v * 100),
                             source: Some("kalshi".to_string()),
                             market_id: None,
                             event_id: None,
@@ -998,11 +1033,12 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                         ticker: m.ticker,
                         title: m.title,
                         event_ticker: m.event_ticker,
+                        freshness: odds_freshness(None),
                         status: m.status,
                         yes_price: m.yes_price,
                         yes_bid: m.yes_bid,
                         yes_ask: m.yes_ask,
-                        volume: m.volume,
+                        volume: m.volume.map(|v| v * 100),
                         source: Some("kalshi".to_string()),
                         market_id: None,
                         event_id: None,
@@ -1074,11 +1110,12 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                     ticker: m.ticker,
                     title: m.title,
                     event_ticker: m.event_ticker,
+                    freshness: odds_freshness(None),
                     status: m.status,
                     yes_price: m.yes_price,
                     yes_bid: m.yes_bid,
                     yes_ask: m.yes_ask,
-                    volume: m.volume,
+                    volume: m.volume.map(|v| v * 100),
                     source: Some("kalshi".to_string()),
                     market_id: None,
                     event_id: None,
@@ -1162,9 +1199,15 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
     }
 
     let analytics = build_odds_analytics(&markets);
+    let generated_at = Utc::now();
     Ok(OddsResponse {
         base_url: KALSHI_BASE_URL.to_string(),
-        generated_at: Utc::now(),
+        generated_at,
+        schema_version: "finance.odds.v2".to_string(),
+        freshness_summary: odds_response_freshness_summary(generated_at, &markets, None),
+        applied_policy: AppliedPolicy::default(),
+        decision_trace: vec![],
+        run_meta: odds_run_meta(events.len(), markets.len(), 0, 0),
         series,
         events,
         markets,
@@ -1179,4 +1222,3 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
         field_semantics: default_odds_field_semantics(),
     })
 }
-

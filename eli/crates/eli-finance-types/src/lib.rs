@@ -189,6 +189,109 @@ pub fn parse_event_at(raw: &str) -> Result<DateTime<Utc>> {
     ))
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyMode {
+    Observe,
+    Assist,
+    Enforce,
+}
+
+impl Default for PolicyMode {
+    fn default() -> Self {
+        Self::Observe
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct AppliedPolicy {
+    #[serde(default)]
+    pub mode: PolicyMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshnessState {
+    Live,
+    Delayed,
+    Eod,
+    Historical,
+    Stale,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshnessOrigin {
+    ProviderTimestamp,
+    ProviderLastUpdated,
+    TransportReceived,
+    Derived,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshnessQuality {
+    Exact,
+    Estimated,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Freshness {
+    pub observed_at: DateTime<Utc>,
+    pub collected_at: DateTime<Utc>,
+    pub age_seconds: i64,
+    pub state: FreshnessState,
+    pub origin: FreshnessOrigin,
+    pub quality: FreshnessQuality,
+}
+
+impl Freshness {
+    pub fn new(
+        observed_at: DateTime<Utc>,
+        collected_at: DateTime<Utc>,
+        state: FreshnessState,
+        origin: FreshnessOrigin,
+        quality: FreshnessQuality,
+    ) -> Self {
+        let age_seconds = (collected_at - observed_at).num_seconds().max(0);
+        Self {
+            observed_at,
+            collected_at,
+            age_seconds,
+            state,
+            origin,
+            quality,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct FreshnessSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_as_of: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_age_seconds: Option<i64>,
+    #[serde(default)]
+    pub stale_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct RunMeta {
+    #[serde(default)]
+    pub latency_ms: u64,
+    #[serde(default)]
+    pub stdout_chars: usize,
+    #[serde(default)]
+    pub stored_bytes: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub coverage_counts: BTreeMap<String, usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_efficiency: Option<f64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeseriesRequest {
     pub tickers: Vec<String>,
@@ -337,6 +440,10 @@ pub struct TickerSnapshot {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_split_date: Option<DateTime<Utc>>,
+
+    pub freshness: Freshness,
+    pub price_source_kind: String,
+    pub session_state: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -345,6 +452,16 @@ pub struct SnapshotResponse {
     pub tickers: Vec<String>,
     pub generated_at: DateTime<Utc>,
     pub snapshots: Vec<TickerSnapshot>,
+    #[serde(default)]
+    pub schema_version: String,
+    #[serde(default)]
+    pub freshness_summary: FreshnessSummary,
+    #[serde(default)]
+    pub applied_policy: AppliedPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_trace: Vec<String>,
+    #[serde(default)]
+    pub run_meta: RunMeta,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analytics: Option<SnapshotAnalytics>,
@@ -535,6 +652,10 @@ pub struct FundamentalsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
+    #[serde(default)]
+    pub policy_file: Option<String>,
+    #[serde(default)]
+    pub policy_mode: Option<PolicyMode>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -549,6 +670,17 @@ pub struct SearchItem {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchResponse {
     pub query: String,
+    pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub schema_version: String,
+    #[serde(default)]
+    pub freshness_summary: FreshnessSummary,
+    #[serde(default)]
+    pub applied_policy: AppliedPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_trace: Vec<String>,
+    #[serde(default)]
+    pub run_meta: RunMeta,
     pub results: Vec<SearchItem>,
     pub macro_suggestions: Vec<SearchItem>, // Curated FRED-like IDs
 }
@@ -558,18 +690,36 @@ pub struct NewsItem {
     pub title: String,
     pub link: String,
     pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<DateTime<Utc>>,
+    pub freshness: Freshness,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NewsRequest {
     pub ticker: String,
     pub date: String, // YYYY-MM-DD
+    #[serde(default)]
+    pub policy_file: Option<String>,
+    #[serde(default)]
+    pub policy_mode: Option<PolicyMode>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NewsResponse {
     pub ticker: String,
     pub date: String,
+    pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub schema_version: String,
+    #[serde(default)]
+    pub freshness_summary: FreshnessSummary,
+    #[serde(default)]
+    pub applied_policy: AppliedPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_trace: Vec<String>,
+    #[serde(default)]
+    pub run_meta: RunMeta,
     pub news: Vec<NewsItem>,
 }
 
@@ -579,6 +729,10 @@ pub struct MacroRequest {
 
     #[serde(default)]
     pub compare_to: Option<NaiveDate>,
+    #[serde(default)]
+    pub policy_file: Option<String>,
+    #[serde(default)]
+    pub policy_mode: Option<PolicyMode>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -588,6 +742,7 @@ pub struct MacroIndicator {
     pub category: String,
     pub current_value: f64,
     pub change_1y: Option<f64>,
+    pub freshness: Freshness,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compare_value: Option<f64>,
@@ -602,6 +757,16 @@ pub struct MacroIndicator {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MacroResponse {
     pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub schema_version: String,
+    #[serde(default)]
+    pub freshness_summary: FreshnessSummary,
+    #[serde(default)]
+    pub applied_policy: AppliedPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_trace: Vec<String>,
+    #[serde(default)]
+    pub run_meta: RunMeta,
     pub indicators: Vec<MacroIndicator>,
 }
 
@@ -1419,6 +1584,7 @@ pub struct OddsMarket {
     pub ticker: String,
     pub title: String,
     pub event_ticker: String,
+    pub freshness: Freshness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1487,6 +1653,7 @@ pub struct OddsListedMarket {
     pub ticker: String,
     pub title: String,
     pub event_ticker: String,
+    pub freshness: Freshness,
     pub yes_price: Option<i64>,
     pub volume: Option<i64>,
     pub status: Option<String>,
@@ -1514,6 +1681,16 @@ pub struct OddsListedMarket {
 pub struct OddsResponse {
     pub base_url: String,
     pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub schema_version: String,
+    #[serde(default)]
+    pub freshness_summary: FreshnessSummary,
+    #[serde(default)]
+    pub applied_policy: AppliedPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_trace: Vec<String>,
+    #[serde(default)]
+    pub run_meta: RunMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<OddsSeries>,
     pub events: Vec<OddsEvent>,
@@ -1873,6 +2050,16 @@ pub struct OddsSyncAnalysis {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OddsSyncResponse {
     pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub schema_version: String,
+    #[serde(default)]
+    pub freshness_summary: FreshnessSummary,
+    #[serde(default)]
+    pub applied_policy: AppliedPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_trace: Vec<String>,
+    #[serde(default)]
+    pub run_meta: RunMeta,
     #[serde(default)]
     pub sync_status: OddsSyncStatus,
     pub sources: Vec<OddsSyncSourceResult>,
