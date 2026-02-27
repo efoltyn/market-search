@@ -8,6 +8,81 @@ pub(crate) fn json_value_to_string(value: serde_json::Value) -> String {
     }
 }
 
+fn odds_freshness(observed_at: Option<DateTime<Utc>>) -> Freshness {
+    let collected_at = Utc::now();
+    match observed_at {
+        Some(observed_at) => Freshness::new(
+            observed_at,
+            collected_at,
+            FreshnessState::Live,
+            FreshnessOrigin::ProviderTimestamp,
+            FreshnessQuality::Exact,
+        ),
+        None => Freshness::new(
+            collected_at,
+            collected_at,
+            FreshnessState::Unknown,
+            FreshnessOrigin::TransportReceived,
+            FreshnessQuality::Estimated,
+        ),
+    }
+}
+
+fn odds_response_freshness_summary(
+    generated_at: DateTime<Utc>,
+    markets: &[OddsMarket],
+    listed_markets: Option<&[OddsListedMarket]>,
+) -> FreshnessSummary {
+    let mut data_as_of: Option<DateTime<Utc>> = None;
+    let mut max_age_seconds: Option<i64> = None;
+    let mut stale_count = 0usize;
+
+    for freshness in markets
+        .iter()
+        .map(|m| &m.freshness)
+        .chain(listed_markets.into_iter().flat_map(|rows| rows.iter().map(|m| &m.freshness)))
+    {
+        data_as_of = Some(match data_as_of {
+            Some(existing) => existing.max(freshness.observed_at),
+            None => freshness.observed_at,
+        });
+        max_age_seconds = Some(match max_age_seconds {
+            Some(existing) => existing.max(freshness.age_seconds),
+            None => freshness.age_seconds,
+        });
+        if matches!(freshness.state, FreshnessState::Stale) {
+            stale_count = stale_count.saturating_add(1);
+        }
+    }
+
+    FreshnessSummary {
+        data_as_of: data_as_of.or(Some(generated_at)),
+        max_age_seconds: max_age_seconds.or(Some(0)),
+        stale_count,
+    }
+}
+
+fn odds_run_meta(
+    events_count: usize,
+    markets_count: usize,
+    listed_events_count: usize,
+    listed_markets_count: usize,
+) -> RunMeta {
+    let mut coverage_counts = BTreeMap::new();
+    coverage_counts.insert("events".to_string(), events_count);
+    coverage_counts.insert("markets".to_string(), markets_count);
+    coverage_counts.insert("listed_events".to_string(), listed_events_count);
+    coverage_counts.insert("listed_markets".to_string(), listed_markets_count);
+
+    RunMeta {
+        latency_ms: 0,
+        stdout_chars: 0,
+        stored_bytes: 0,
+        coverage_counts,
+        token_efficiency: None,
+    }
+}
+
 fn parse_json_array_strings(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<serde_json::Value>>(raw)
         .unwrap_or_default()
@@ -59,40 +134,3 @@ fn matches_query_terms(phrase_match: bool, term_hits: usize, total_terms: usize)
         term_hits >= 1
     }
 }
-
-fn query_mentions_explicit_year(query: &str) -> bool {
-    query
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter_map(|token| token.parse::<i32>().ok())
-        .any(|year| (1900..=2100).contains(&year))
-}
-
-fn extract_year_tokens(text: &str) -> Vec<i32> {
-    text.split(|c: char| !c.is_ascii_alphanumeric())
-        .filter_map(|token| token.parse::<i32>().ok())
-        .filter(|year| (1900..=2100).contains(year))
-        .collect()
-}
-
-fn is_probably_stale_open_market(
-    title: &str,
-    status: Option<&str>,
-    query: Option<&str>,
-    current_year: i32,
-) -> bool {
-    let is_open = status
-        .map(|s| s.trim().eq_ignore_ascii_case("open"))
-        .unwrap_or(true);
-    if !is_open {
-        return false;
-    }
-    if let Some(q) = query {
-        if query_mentions_explicit_year(q) {
-            return false;
-        }
-    }
-    extract_year_tokens(title)
-        .into_iter()
-        .any(|year| year <= current_year - 1)
-}
-

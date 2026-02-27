@@ -159,6 +159,7 @@ pub(crate) fn build_odds_analytics_from_listed(
             ticker: m.ticker.clone(),
             title: m.title.clone(),
             event_ticker: m.event_ticker.clone(),
+            freshness: m.freshness.clone(),
             status: m.status.clone(),
             yes_price: m.yes_price,
             yes_bid: None,
@@ -209,4 +210,3 @@ struct PolyBookSnapshot {
     best_ask: Option<String>,
     timestamp: Option<String>,
 }
-

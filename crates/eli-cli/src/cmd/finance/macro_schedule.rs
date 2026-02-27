@@ -20,8 +20,19 @@ async fn cmd_finance_macro(args: FinanceMacroArgs) -> Result<()> {
     } else {
         None
     };
+    let policy_mode = eli_core::finance::policy::parse_policy_mode(Some(&args.policy_mode))
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("parse --policy-mode")?;
 
-    let req = eli_core::finance::MacroRequest { range, compare_to };
+    let req = eli_core::finance::MacroRequest {
+        range,
+        compare_to,
+        policy_file: args
+            .policy_file
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        policy_mode: Some(policy_mode),
+    };
     let resp = eli_core::finance::fetch_macro(req)
         .await
         .map_err(|e| anyhow::anyhow!(e))

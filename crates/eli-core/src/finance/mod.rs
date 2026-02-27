@@ -83,6 +83,9 @@ pub use sync::sync_odds;
 mod paper;
 pub use paper::run_paper;
 
+pub(crate) mod credentials;
+pub mod policy;
+
 pub fn normalize_tickers(tickers: &[String]) -> Vec<String> {
     let mut out: Vec<String> = tickers
         .iter()

@@ -358,6 +358,13 @@ pub(crate) async fn sync_polymarket_events(
                 ticker: market_id.clone(),
                 title,
                 event_ticker: event_id.clone(),
+                freshness: Freshness::new(
+                    Utc::now(),
+                    Utc::now(),
+                    FreshnessState::Unknown,
+                    FreshnessOrigin::TransportReceived,
+                    FreshnessQuality::Estimated,
+                ),
                 yes_price,
                 volume,
                 status: normalize_polymarket_status(m.active, m.closed),
@@ -565,23 +572,30 @@ async fn fetch_polymarket_event_page(
             .append_pair("limit", &limit.to_string())
             .append_pair("offset", &offset.to_string());
 
-        let resp = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("events fetch failed: {e}"))?;
+        let resp = match client.get(url).send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                if attempts < 6 {
+                    retry_5xx = retry_5xx.saturating_add(1);
+                    limiter.on_rate_limited();
+                    sleep(backoff_for_attempt(attempts)).await;
+                    continue;
+                }
+                return Err(format!("events fetch failed: {err}"));
+            }
+        };
         let status = resp.status();
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts < 6 {
             retry_429 = retry_429.saturating_add(1);
             limiter.on_rate_limited();
-            sleep(backoff_for_attempt(attempts)).await;
+            sleep(retry_delay(status, resp.headers(), attempts)).await;
             continue;
         }
         if status.is_server_error() && attempts < 6 {
             retry_5xx = retry_5xx.saturating_add(1);
             limiter.on_rate_limited();
-            sleep(backoff_for_attempt(attempts)).await;
+            sleep(retry_delay(status, resp.headers(), attempts)).await;
             continue;
         }
         if !status.is_success() {
@@ -670,23 +684,30 @@ async fn fetch_polymarket_market_page(
             .append_pair("limit", &limit.to_string())
             .append_pair("offset", &offset.to_string());
 
-        let resp = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("markets fetch failed: {e}"))?;
+        let resp = match client.get(url).send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                if attempts < 6 {
+                    retry_5xx = retry_5xx.saturating_add(1);
+                    limiter.on_rate_limited();
+                    sleep(backoff_for_attempt(attempts)).await;
+                    continue;
+                }
+                return Err(format!("markets fetch failed: {err}"));
+            }
+        };
         let status = resp.status();
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts < 6 {
             retry_429 = retry_429.saturating_add(1);
             limiter.on_rate_limited();
-            sleep(backoff_for_attempt(attempts)).await;
+            sleep(retry_delay(status, resp.headers(), attempts)).await;
             continue;
         }
         if status.is_server_error() && attempts < 6 {
             retry_5xx = retry_5xx.saturating_add(1);
             limiter.on_rate_limited();
-            sleep(backoff_for_attempt(attempts)).await;
+            sleep(retry_delay(status, resp.headers(), attempts)).await;
             continue;
         }
         if !status.is_success() {
@@ -842,4 +863,21 @@ fn midpoint_prob(a: Option<f64>, b: Option<f64>) -> Option<f64> {
 fn backoff_for_attempt(attempt: usize) -> TokioDuration {
     let seconds = 2u64.saturating_mul(1u64 << ((attempt.saturating_sub(1)) as u32));
     TokioDuration::from_secs(seconds.min(30))
+}
+
+fn retry_delay(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    attempt: usize,
+) -> TokioDuration {
+    let base = backoff_for_attempt(attempt);
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return base;
+    }
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|secs| TokioDuration::from_secs(secs.min(60)));
+    retry_after.map_or(base, |d| d.max(base))
 }

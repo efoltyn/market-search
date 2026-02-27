@@ -9,6 +9,15 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
     }
+    let policy_mode = eli_core::finance::policy::parse_policy_mode(Some(&args.policy_mode))
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("parse --policy-mode")?;
+    let resolved_policy = eli_core::finance::policy::load_policy(
+        args.policy_file.as_deref(),
+        policy_mode,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
+    .context("load policy")?;
 
     // When --search is provided alone (no --list-events/--list-markets/ticker),
     // search the local CSV cache from `eli finance sync` instead of hitting the API.
@@ -28,6 +37,7 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
             args.deltas_only,
             args.min_delta_pp,
             args.category.as_deref(),
+            resolved_policy.clone(),
         )?;
 
         // Check if local CSV cache exists
@@ -124,8 +134,24 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("fetch odds")?;
-    let enriched_resp =
+    let mut enriched_resp =
         enrich_odds_response_with_sync_delta(&resp, req.provider.as_deref())?;
+    if let Some(obj) = enriched_resp.as_object_mut() {
+        obj.insert(
+            "applied_policy".to_string(),
+            serde_json::json!({
+                "mode": resolved_policy.mode,
+                "sources": resolved_policy.sources,
+            }),
+        );
+        obj.insert(
+            "decision_trace".to_string(),
+            serde_json::json!([
+                "policy_driven_metadata=true",
+                "sync_delta_enrichment=best_effort",
+            ]),
+        );
+    }
 
     if let Some(out_path) = args.out {
         let wr = write_json_out_with_meta(
@@ -161,6 +187,45 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
 struct SyncDeltaLookup {
     by_market: std::collections::HashMap<String, eli_core::finance::OddsSyncMarketDelta>,
     context: serde_json::Value,
+}
+
+fn odds_search_freshness_summary(
+    generated_at: chrono::DateTime<chrono::Utc>,
+    markets: &[serde_json::Value],
+) -> serde_json::Value {
+    let mut data_as_of = generated_at;
+    let mut max_age_seconds = 0i64;
+    let mut stale_count = 0usize;
+
+    for market in markets {
+        let Some(freshness) = market.get("freshness") else {
+            continue;
+        };
+        if freshness
+            .get("state")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("stale"))
+        {
+            stale_count = stale_count.saturating_add(1);
+        }
+        if let Some(age) = freshness.get("age_seconds").and_then(|v| v.as_i64()) {
+            max_age_seconds = max_age_seconds.max(age);
+        }
+        if let Some(observed) = freshness.get("observed_at").and_then(|v| v.as_str()) {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(observed) {
+                let observed_utc = parsed.with_timezone(&chrono::Utc);
+                if observed_utc > data_as_of {
+                    data_as_of = observed_utc;
+                }
+            }
+        }
+    }
+
+    serde_json::json!({
+        "data_as_of": data_as_of,
+        "max_age_seconds": max_age_seconds,
+        "stale_count": stale_count,
+    })
 }
 
 fn sync_delta_key(source: &str, ticker: &str) -> String {
@@ -542,14 +607,19 @@ impl SearchProfile {
         }
     }
 
-    fn resolve(self, query: &str, category_filter: Option<&str>) -> Self {
+    fn resolve(
+        self,
+        query: &str,
+        category_filter: Option<&str>,
+        policy: &eli_core::finance::policy::ResolvedPolicy,
+    ) -> Self {
         match self {
             Self::Macro | Self::Broad => self,
             Self::Auto => {
                 if category_filter.is_some() {
                     return Self::Broad;
                 }
-                if query_looks_macro(query) {
+                if query_looks_macro(query, &policy.policy.filtering.macro_keywords) {
                     Self::Macro
                 } else {
                     Self::Broad
@@ -566,6 +636,7 @@ struct CsvSearchOptions {
     deltas_only: bool,
     min_delta_pp: Option<f64>,
     category_filter: Option<String>,
+    policy: eli_core::finance::policy::ResolvedPolicy,
 }
 
 impl CsvSearchOptions {
@@ -575,6 +646,7 @@ impl CsvSearchOptions {
         deltas_only: bool,
         min_delta_pp: Option<f64>,
         category_filter: Option<&str>,
+        policy: eli_core::finance::policy::ResolvedPolicy,
     ) -> Result<Self> {
         let sort_by = CsvSortBy::parse(sort_by_raw)?;
         let profile = SearchProfile::parse(profile_raw)?;
@@ -592,6 +664,7 @@ impl CsvSearchOptions {
             deltas_only,
             min_delta_pp,
             category_filter,
+            policy,
         })
     }
 
@@ -636,6 +709,7 @@ struct SearchCandidate {
     row_json: serde_json::Value,
     match_score: i64,
     volume_usd: f64,
+    sort_volume_usd: f64, // 0.0 for closed/resolved markets so open markets sort first
     delta: DeltaMetrics,
     macro_relevance_score: i64,
 }
@@ -663,8 +737,8 @@ fn sort_search_candidates(
             .partial_cmp(&a.delta.volume_abs)
             .unwrap_or(std::cmp::Ordering::Equal);
         let volume_cmp = b
-            .volume_usd
-            .partial_cmp(&a.volume_usd)
+            .sort_volume_usd
+            .partial_cmp(&a.sort_volume_usd)
             .unwrap_or(std::cmp::Ordering::Equal);
 
         match sort_by {
@@ -718,29 +792,9 @@ fn sort_search_candidates(
     });
 }
 
-fn query_looks_macro(query: &str) -> bool {
+fn query_looks_macro(query: &str, keywords: &[String]) -> bool {
     let q = query.to_ascii_lowercase();
-    let keywords = [
-        "fed",
-        "federal reserve",
-        "fomc",
-        "rate",
-        "rates",
-        "cpi",
-        "pce",
-        "ppi",
-        "inflation",
-        "unemployment",
-        "jobs",
-        "payroll",
-        "yield",
-        "treasury",
-        "tariff",
-        "gdp",
-        "recession",
-        "macro",
-    ];
-    keywords.iter().any(|k| q.contains(k))
+    keywords.iter().any(|k| q.contains(&k.to_ascii_lowercase()))
 }
 
 fn macro_relevance_score(
@@ -749,16 +803,19 @@ fn macro_relevance_score(
     topic: &str,
     country_hints: &[String],
     matched_terms: &[String],
+    policy: &eli_core::finance::policy::ResolvedPolicy,
 ) -> i64 {
     let title_l = title.to_ascii_lowercase();
     let category_l = category.to_ascii_lowercase();
     let topic_l = topic.to_ascii_lowercase();
+    let ranking = &policy.policy.ranking;
+    let filtering = &policy.policy.filtering;
     let mut score = 0i64;
     if category_l.contains("econom") || topic_l.contains("econom") {
-        score += 45;
+        score += ranking.macro_economics_boost;
     }
     if category_l.contains("financial") || topic_l.contains("financial") {
-        score += 25;
+        score += ranking.macro_financials_boost;
     }
     if category_l.contains("trade") || topic_l.contains("trade") {
         score += 20;
@@ -766,43 +823,18 @@ fn macro_relevance_score(
     if country_hints.iter().any(|h| h == "us" || h == "fomc" || h == "federal reserve") {
         score += 10;
     }
-    for kw in [
-        "federal reserve",
-        "fed",
-        "fomc",
-        "rate",
-        "inflation",
-        "cpi",
-        "pce",
-        "ppi",
-        "unemployment",
-        "payroll",
-        "tariff",
-        "gdp",
-        "recession",
-        "yield",
-        "treasury",
-    ] {
-        if title_l.contains(kw) {
-            score += 8;
+    for kw in &filtering.macro_keywords {
+        if title_l.contains(&kw.to_ascii_lowercase()) {
+            score += ranking.macro_keyword_weight;
         }
     }
-    if category_l.contains("mentions")
-        || topic_l.contains("mentions")
-        || title_l.contains(" say ")
-        || title_l.contains("tweet")
-        || title_l.contains("mentions")
-    {
-        score -= 70;
+    for kw in &filtering.macro_offtopic_keywords {
+        let kw_l = kw.to_ascii_lowercase();
+        if category_l.contains(&kw_l) || topic_l.contains(&kw_l) || title_l.contains(&kw_l) {
+            score += ranking.macro_offtopic_penalty;
+        }
     }
-    if category_l.contains("courts")
-        || topic_l.contains("airdrop")
-        || topic_l.contains("crypto")
-        || category_l.contains("airdrop")
-    {
-        score -= 20;
-    }
-    score += (matched_terms.len() as i64) * 3;
+    score += (matched_terms.len() as i64) * 3i64;
     score
 }
 
@@ -817,6 +849,8 @@ fn cmd_finance_odds_search_csv(
     explain: bool,
     opts: &CsvSearchOptions,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
+    let generated_at = chrono::Utc::now();
     #[derive(Deserialize)]
     struct OddsCsvRow {
         source: String,
@@ -840,29 +874,16 @@ fn cmd_finance_odds_search_csv(
             .any(|tok| tok == keyword)
     }
 
-    fn find_us_hints(row: &OddsCsvRow) -> Vec<String> {
+    fn find_us_hints(row: &OddsCsvRow, us_keywords: &[String]) -> Vec<String> {
         let text = format!(
             "{} {} {} {} {}",
             row.title, row.event_ticker, row.category, row.topic, row.ticker
         )
         .to_ascii_lowercase();
-        let keywords = [
-            "us",
-            "u.s.",
-            "united states",
-            "american",
-            "nfp",
-            "nonfarm payrolls",
-            "fomc",
-            "federal reserve",
-            "cpi",
-            "pce",
-            "gdpnow",
-        ];
-        keywords
+        us_keywords
             .iter()
-            .filter(|k| contains_keyword(&text, k))
-            .map(|k| k.to_string())
+            .filter(|k| contains_keyword(&text, &k.to_ascii_lowercase()))
+            .map(|k| k.to_ascii_lowercase())
             .collect()
     }
 
@@ -888,7 +909,14 @@ fn cmd_finance_odds_search_csv(
         phrase_pattern.as_ref().is_some_and(|re| re.is_match(text))
     }
 
-    fn compute_match_score(row: &OddsCsvRow, query: &str, matched_terms: &[String], volume_usd: f64) -> i64 {
+    fn compute_match_score(
+        row: &OddsCsvRow,
+        query: &str,
+        matched_terms: &[String],
+        volume_usd: f64,
+        policy: &eli_core::finance::policy::ResolvedPolicy,
+    ) -> i64 {
+        let ranking = &policy.policy.ranking;
         let q = query.to_ascii_lowercase();
         let title = row.title.to_ascii_lowercase();
         let ticker = row.ticker.to_ascii_lowercase();
@@ -898,21 +926,21 @@ fn cmd_finance_odds_search_csv(
 
         let mut score = 0.0f64;
         if !q.is_empty() && title.contains(&q) {
-            score += 30.0;
+            score += ranking.title_exact_bonus;
         }
         for t in matched_terms {
             if title.contains(t) {
-                score += 10.0;
+                score += ranking.term_match_weight;
             }
             if ticker.contains(t) || event.contains(t) {
-                score += 6.0;
+                score += ranking.ticker_event_match_weight;
             }
             if category.contains(t) || topic.contains(t) {
-                score += 4.0;
+                score += ranking.category_topic_match_weight;
             }
         }
-        score += (matched_terms.len() as f64) * 8.0;
-        score += (volume_usd.max(0.0) + 1.0).log10() * 3.0;
+        score += (matched_terms.len() as f64) * ranking.term_match_weight;
+        score += (volume_usd.max(0.0) + 1.0).log10() * ranking.volume_log_weight;
         score.round() as i64
     }
 
@@ -978,7 +1006,9 @@ fn cmd_finance_odds_search_csv(
     if !match_all && terms.is_empty() {
         anyhow::bail!("--search query cannot be empty");
     }
-    let profile_applied = opts.profile.resolve(query, opts.category_filter.as_deref());
+    let profile_applied =
+        opts.profile
+            .resolve(query, opts.category_filter.as_deref(), &opts.policy);
     let term_patterns = compile_term_patterns(&terms);
     let phrase_pattern = {
         if match_all {
@@ -1009,17 +1039,22 @@ fn cmd_finance_odds_search_csv(
     let mut loose_matches: Vec<SearchCandidate> = Vec::new();
     let mut semantic_query_expanded = false;
     let federal_reserve_policy_query = !match_all && query_lower.contains("federal reserve");
-    let fed_context_terms = [
-        "fed",
-        "federal reserve",
-        "fomc",
-        "fed funds",
-        "interest rate",
-    ];
-    let policy_action_terms = [
-        "rate", "cut", "cuts", "hike", "hikes", "hold", "decrease", "increase", "bps",
-        "basis point", "decision", "meeting",
-    ];
+    let fed_context_terms = opts
+        .policy
+        .policy
+        .filtering
+        .us_hint_keywords
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let policy_action_terms = opts
+        .policy
+        .policy
+        .filtering
+        .policy_action_keywords
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect::<Vec<_>>();
     for row in rdr.deserialize::<OddsCsvRow>() {
         let row = match row {
             Ok(r) => r,
@@ -1036,8 +1071,12 @@ fn cmd_finance_odds_search_csv(
             compute_match_terms(&searchable, &term_patterns)
         };
         let mut expanded_match = false;
-        let has_fed_context = fed_context_terms.iter().any(|t| searchable_lower.contains(t));
-        let has_policy_action = policy_action_terms.iter().any(|t| searchable_lower.contains(t));
+        let has_fed_context = fed_context_terms
+            .iter()
+            .any(|t| searchable_lower.contains(t));
+        let has_policy_action = policy_action_terms
+            .iter()
+            .any(|t| searchable_lower.contains(t));
         let policy_like = has_fed_context && has_policy_action;
         if !match_all && matched_terms.is_empty() {
             if federal_reserve_policy_query && policy_like {
@@ -1059,7 +1098,7 @@ fn cmd_finance_odds_search_csv(
             }
         }
 
-        let country_hints = find_us_hints(&row);
+        let country_hints = find_us_hints(&row, &opts.policy.policy.filtering.us_hint_keywords);
         if country_normalized.as_deref() == Some("US") && country_hints.is_empty() {
             continue;
         }
@@ -1069,8 +1108,7 @@ fn cmd_finance_odds_search_csv(
             continue;
         }
 
-        let vol_cents: f64 = row.volume.trim().parse().unwrap_or(0.0);
-        let volume_usd = vol_cents / 100.0;
+        let volume_usd: f64 = row.volume.trim().parse().unwrap_or(0.0);
         if let Some(min_usd) = min_volume_usd {
             if volume_usd < min_usd {
                 continue;
@@ -1079,13 +1117,20 @@ fn cmd_finance_odds_search_csv(
 
         let yes_price: f64 = row.yes_price.trim().parse().unwrap_or(0.0);
         let prob: f64 = row.probability.trim().parse().unwrap_or(0.0);
+        let is_open = matches!(row.status.trim().to_lowercase().as_str(), "open" | "active" | "");
+        let sort_volume_usd = if is_open { volume_usd } else { 0.0 };
         let phrase_boost = if has_phrase_match(&searchable, &phrase_pattern) {
             7
         } else {
             0
         };
-        let match_score =
-            compute_match_score(&row, query, &matched_terms, volume_usd) + phrase_boost;
+        let match_score = compute_match_score(
+            &row,
+            query,
+            &matched_terms,
+            volume_usd,
+            &opts.policy,
+        ) + phrase_boost;
         let source_for_delta = row.source.clone();
         let ticker_for_delta = row.ticker.clone();
         let delta = delta_metrics(&source_for_delta, &ticker_for_delta, delta_lookup.as_ref());
@@ -1103,15 +1148,23 @@ fn cmd_finance_odds_search_csv(
             "title": row.title,
             "event_ticker": row.event_ticker,
             "yes_price": yes_price,
-            "volume": vol_cents,
+            "volume": volume_usd,
             "volume_usd": volume_usd,
             "status": row.status,
-            "probability": prob,
+            "probability_yes": prob,
             "category": row.category,
             "topic": row.topic,
             "match_score": match_score,
             "match_terms": matched_terms,
             "country_hints": country_hints,
+            "freshness": {
+                "observed_at": generated_at,
+                "collected_at": generated_at,
+                "age_seconds": 0,
+                "state": "unknown",
+                "origin": "derived",
+                "quality": "estimated"
+            }
         });
         let macro_score = macro_relevance_score(
             row_json
@@ -1146,10 +1199,28 @@ fn cmd_finance_odds_search_csv(
                 })
                 .unwrap_or_default()
                 .as_slice(),
+            &opts.policy,
         );
         row_json["macro_relevance_score"] = serde_json::json!(macro_score);
-        if profile_applied == SearchProfile::Macro && macro_score <= -60 {
-            continue;
+        row_json["score_components"] = serde_json::json!({
+            "match_score": match_score,
+            "macro_relevance_score": macro_score,
+            "delta_prob_abs_pp": delta.probability_pp_abs,
+            "delta_yes_price_abs": delta.yes_price_abs,
+            "delta_volume_abs": delta.volume_abs,
+            "volume_usd": volume_usd,
+        });
+        if profile_applied == SearchProfile::Macro {
+            let threshold = opts.policy.policy.filtering.macro_profile_min_relevance;
+            if macro_score <= threshold {
+                row_json["policy_annotation"] = serde_json::json!({
+                    "below_macro_threshold": true,
+                    "threshold": threshold,
+                });
+                if matches!(opts.policy.mode, eli_core::finance::PolicyMode::Enforce) {
+                    continue;
+                }
+            }
         }
         if explain {
             let matched_terms_vec: Vec<String> = row_json["match_terms"]
@@ -1174,10 +1245,14 @@ fn cmd_finance_odds_search_csv(
             row_json,
             match_score,
             volume_usd,
+            sort_volume_usd,
             delta,
             macro_relevance_score: macro_score,
         };
-        if federal_reserve_policy_query && !policy_like {
+        if federal_reserve_policy_query
+            && !policy_like
+            && matches!(opts.policy.mode, eli_core::finance::PolicyMode::Enforce)
+        {
             loose_matches.push(candidate);
             continue;
         }
@@ -1196,10 +1271,28 @@ fn cmd_finance_odds_search_csv(
     let final_limit = top.or(limit).unwrap_or(25);
     matches.truncate(final_limit);
     let markets: Vec<serde_json::Value> = matches.into_iter().map(|m| m.row_json).collect();
+    let freshness_summary = odds_search_freshness_summary(generated_at, &markets);
 
     let resp = serde_json::json!({
+        "schema_version": "finance.odds.search.v2",
         "query": query,
         "source": "local_csv_cache",
+        "generated_at": generated_at,
+        "freshness_summary": freshness_summary,
+        "applied_policy": {
+            "mode": opts.policy.mode,
+            "sources": opts.policy.sources,
+        },
+        "run_meta": {
+            "latency_ms": started.elapsed().as_millis() as u64,
+            "stdout_chars": 0,
+            "stored_bytes": 0,
+            "coverage_counts": {
+                "candidates": total_matches,
+                "returned_markets": markets.len(),
+            },
+            "token_efficiency": serde_json::Value::Null,
+        },
         "csv_path": csv_path.display().to_string(),
         "total_matches": total_matches,
         "returned_matches": markets.len(),
@@ -1216,6 +1309,11 @@ fn cmd_finance_odds_search_csv(
         "top": top,
         "semantic_filter_relaxed": semantic_filter_relaxed,
         "semantic_query_expanded": semantic_query_expanded,
+        "decision_trace": [
+            "policy_driven_ranking=true",
+            "csv_cache_search=true",
+            format!("returned={}", markets.len()),
+        ],
         "delta_context": delta_context,
         "markets": markets,
     });
@@ -1233,6 +1331,8 @@ async fn cmd_finance_odds_search_live_no_csv(
     top: Option<usize>,
     opts: &CsvSearchOptions,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
+    let generated_at = chrono::Utc::now();
     let query = query.trim();
     if query.is_empty() {
         anyhow::bail!("--search query cannot be empty");
@@ -1245,7 +1345,9 @@ async fn cmd_finance_odds_search_live_no_csv(
         .as_ref()
         .map(|d| d.context.clone())
         .unwrap_or_else(|| serde_json::json!({ "available": false }));
-    let profile_applied = opts.profile.resolve(query, opts.category_filter.as_deref());
+    let profile_applied =
+        opts.profile
+            .resolve(query, opts.category_filter.as_deref(), &opts.policy);
 
     // Step 1: Search Kalshi events
     let kalshi_events_req = eli_core::finance::OddsRequest {
@@ -1313,7 +1415,9 @@ async fn cmd_finance_odds_search_live_no_csv(
 
     // Step 3: For the top events, fetch their markets with live prices
     let final_limit = top.or(limit).unwrap_or(10);
-    if profile_applied == SearchProfile::Macro {
+    if profile_applied == SearchProfile::Macro
+        && matches!(opts.policy.mode, eli_core::finance::PolicyMode::Enforce)
+    {
         all_events.retain(|event| {
             let title = event
                 .get("title")
@@ -1323,7 +1427,8 @@ async fn cmd_finance_odds_search_live_no_csv(
                 .get("category")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            macro_relevance_score(title, category, category, &[], &[]) > -10
+            macro_relevance_score(title, category, category, &[], &[], &opts.policy)
+                > opts.policy.policy.filtering.macro_profile_min_relevance
         });
     }
     all_events.truncate(final_limit.min(15)); // cap at 15 events to avoid rate limits
@@ -1370,7 +1475,13 @@ async fn cmd_finance_odds_search_live_no_csv(
                     "volume": m.volume,
                     "volume_usd": m.volume.map(|v| v as f64 / 100.0),
                     "status": m.status,
-                    "probability": m.probability_yes,
+                    "probability_yes": m.probability_yes,
+                    "freshness": m.freshness,
+                });
+                market_json["score_components"] = serde_json::json!({
+                    "delta_prob_abs_pp": delta_metrics(source, &m.ticker, delta_lookup.as_ref()).probability_pp_abs,
+                    "delta_yes_price_abs": delta_metrics(source, &m.ticker, delta_lookup.as_ref()).yes_price_abs,
+                    "delta_volume_abs": delta_metrics(source, &m.ticker, delta_lookup.as_ref()).volume_abs,
                 });
                 attach_market_delta(
                     &mut market_json,
@@ -1384,7 +1495,24 @@ async fn cmd_finance_odds_search_live_no_csv(
     }
 
     let resp = serde_json::json!({
+        "schema_version": "finance.odds.search_live.v2",
         "query": query,
+        "generated_at": generated_at,
+        "freshness_summary": odds_search_freshness_summary(generated_at, &live_markets),
+        "applied_policy": {
+            "mode": opts.policy.mode,
+            "sources": opts.policy.sources,
+        },
+        "run_meta": {
+            "latency_ms": started.elapsed().as_millis() as u64,
+            "stdout_chars": 0,
+            "stored_bytes": 0,
+            "coverage_counts": {
+                "events": all_events.len(),
+                "returned_markets": live_markets.len(),
+            },
+            "token_efficiency": serde_json::Value::Null,
+        },
         "source": "live_api",
         "note": "no local CSV cache; results fetched from live Kalshi + Polymarket APIs",
         "profile_requested": opts.profile.as_str(),
@@ -1393,6 +1521,11 @@ async fn cmd_finance_odds_search_live_no_csv(
         "events": all_events,
         "markets": live_markets,
         "total_markets": live_markets.len(),
+        "decision_trace": [
+            "policy_driven_live_search=true",
+            "csv_cache_search=false",
+            format!("returned={}", live_markets.len()),
+        ],
         "delta_context": delta_context,
     });
 
@@ -1412,6 +1545,8 @@ async fn cmd_finance_odds_search_live(
     _explain: bool,
     opts: &CsvSearchOptions,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
+    let generated_at = chrono::Utc::now();
     // First, run the normal CSV search to find matching events
     // We read the CSV and extract unique event_tickers + source
     let query_trimmed = query.trim();
@@ -1434,7 +1569,7 @@ async fn cmd_finance_odds_search_live(
     }
     let profile_applied = opts
         .profile
-        .resolve(query_trimmed, opts.category_filter.as_deref());
+        .resolve(query_trimmed, opts.category_filter.as_deref(), &opts.policy);
     let cache_dir = csv_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1486,6 +1621,7 @@ async fn cmd_finance_odds_search_live(
         source: String,
         category: String,
         total_volume_usd: f64,
+        sort_total_volume_usd: f64, // only open/active market volume, so closed events sort last
         delta_prob_pp_abs_max: f64,
         delta_yes_price_abs_max: f64,
         delta_volume_abs_max: f64,
@@ -1540,8 +1676,7 @@ async fn cmd_finance_odds_search_live(
             continue;
         }
 
-        let vol_cents: f64 = row.volume.trim().parse().unwrap_or(0.0);
-        let volume_usd = vol_cents / 100.0;
+        let volume_usd: f64 = row.volume.trim().parse().unwrap_or(0.0);
         if let Some(min_usd) = min_volume_usd {
             if volume_usd < min_usd {
                 continue;
@@ -1557,18 +1692,23 @@ async fn cmd_finance_odds_search_live(
             }
         }
 
+        let row_is_open = matches!(row.status.trim().to_lowercase().as_str(), "open" | "active" | "");
         let entry = event_map
             .entry(row.event_ticker.clone())
             .or_insert_with(|| LiveEventAggregate {
                 source: row.source.clone(),
                 category: row.category.clone(),
                 total_volume_usd: 0.0,
+                sort_total_volume_usd: 0.0,
                 delta_prob_pp_abs_max: 0.0,
                 delta_yes_price_abs_max: 0.0,
                 delta_volume_abs_max: 0.0,
                 macro_relevance_score_max: i64::MIN,
             });
         entry.total_volume_usd += volume_usd;
+        if row_is_open {
+            entry.sort_total_volume_usd += volume_usd;
+        }
         entry.delta_prob_pp_abs_max = entry.delta_prob_pp_abs_max.max(delta.probability_pp_abs);
         entry.delta_yes_price_abs_max = entry.delta_yes_price_abs_max.max(delta.yes_price_abs);
         entry.delta_volume_abs_max = entry.delta_volume_abs_max.max(delta.volume_abs);
@@ -1578,12 +1718,34 @@ async fn cmd_finance_odds_search_live(
             &row.topic,
             &[],
             &terms,
+            &opts.policy,
         ));
     }
 
     if event_map.is_empty() {
         let resp = serde_json::json!({
+            "schema_version": "finance.odds.search_live_via_csv.v2",
             "query": query_trimmed,
+            "generated_at": generated_at,
+            "freshness_summary": {
+                "data_as_of": generated_at,
+                "max_age_seconds": 0,
+                "stale_count": 0,
+            },
+            "applied_policy": {
+                "mode": opts.policy.mode,
+                "sources": opts.policy.sources,
+            },
+            "run_meta": {
+                "latency_ms": started.elapsed().as_millis() as u64,
+                "stdout_chars": 0,
+                "stored_bytes": 0,
+                "coverage_counts": {
+                    "events": 0,
+                    "returned_markets": 0,
+                },
+                "token_efficiency": serde_json::Value::Null,
+            },
             "source": "live_api_via_csv",
             "note": "no matching events found in CSV cache",
             "sort_by": opts.sort_by.as_str(),
@@ -1610,8 +1772,8 @@ async fn cmd_finance_odds_search_live(
         let av = &a.1;
         let bv = &b.1;
         let vol_cmp = bv
-            .total_volume_usd
-            .partial_cmp(&av.total_volume_usd)
+            .sort_total_volume_usd
+            .partial_cmp(&av.sort_total_volume_usd)
             .unwrap_or(std::cmp::Ordering::Equal);
         let delta_prob_cmp = bv
             .delta_prob_pp_abs_max
@@ -1708,7 +1870,13 @@ async fn cmd_finance_odds_search_live(
                         "volume": m.volume,
                         "volume_usd": m.volume.map(|v| v as f64 / 100.0),
                         "status": m.status,
-                        "probability": m.probability_yes,
+                        "probability_yes": m.probability_yes,
+                        "freshness": m.freshness,
+                    });
+                    mkt_json["score_components"] = serde_json::json!({
+                        "delta_prob_abs_pp": delta_metrics(source, &m.ticker, delta_lookup.as_ref()).probability_pp_abs,
+                        "delta_yes_price_abs": delta_metrics(source, &m.ticker, delta_lookup.as_ref()).yes_price_abs,
+                        "delta_volume_abs": delta_metrics(source, &m.ticker, delta_lookup.as_ref()).volume_abs,
                     });
                     attach_market_delta(&mut mkt_json, source, &m.ticker, delta_lookup.as_ref());
                     all_markets.push(mkt_json.clone());
@@ -1742,8 +1910,26 @@ async fn cmd_finance_odds_search_live(
         }
     }
 
+    let total_markets = all_markets.len();
     let resp = serde_json::json!({
+        "schema_version": "finance.odds.search_live_via_csv.v2",
         "query": query_trimmed,
+        "generated_at": generated_at,
+        "freshness_summary": odds_search_freshness_summary(generated_at, &all_markets),
+        "applied_policy": {
+            "mode": opts.policy.mode,
+            "sources": opts.policy.sources,
+        },
+        "run_meta": {
+            "latency_ms": started.elapsed().as_millis() as u64,
+            "stdout_chars": 0,
+            "stored_bytes": 0,
+            "coverage_counts": {
+                "events": all_events.len(),
+                "returned_markets": all_markets.len(),
+            },
+            "token_efficiency": serde_json::Value::Null,
+        },
         "source": "live_api_via_csv",
         "note": "CSV used for discovery, live API used for fresh prices",
         "events_found": all_events.len(),
@@ -1755,7 +1941,13 @@ async fn cmd_finance_odds_search_live(
         "category_filter": opts.category_filter.clone(),
         "match_all": match_all,
         "events": all_events,
-        "total_markets": all_markets.len(),
+        "markets": all_markets,
+        "total_markets": total_markets,
+        "decision_trace": [
+            "policy_driven_live_search=true",
+            "csv_cache_search=true",
+            format!("returned={}", total_markets),
+        ],
         "delta_context": delta_context,
     });
 

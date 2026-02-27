@@ -1,30 +1,22 @@
 use super::super::*;
 
-fn is_finance_like(title: &str, link: &str) -> bool {
+fn is_finance_like(title: &str, link: &str, keywords: &[String]) -> bool {
     let t = title.to_ascii_lowercase();
     let l = link.to_ascii_lowercase();
-    let finance_keywords = [
-        "stock",
-        "shares",
-        "etf",
-        "market",
-        "s&p",
-        "nasdaq",
-        "dow",
-        "invest",
-        "earnings",
-        "fed",
-        "bond",
-        "yield",
-        "economy",
-        "inflation",
-    ];
-    finance_keywords
+    keywords
         .iter()
         .any(|k| t.contains(k) || l.contains(k))
 }
 
 pub async fn fetch_news(req: NewsRequest) -> Result<NewsResponse> {
+    let started = std::time::Instant::now();
+    let generated_at = Utc::now();
+    let policy_mode = req.policy_mode.unwrap_or_default();
+    let policy_file = req
+        .policy_file
+        .as_deref()
+        .map(std::path::Path::new);
+    let resolved_policy = crate::finance::policy::load_policy(policy_file, policy_mode)?;
     let ticker = req.ticker.trim().to_ascii_uppercase();
     let date = req.date.trim();
 
@@ -41,13 +33,24 @@ pub async fn fetch_news(req: NewsRequest) -> Result<NewsResponse> {
 
     // Add "stock" to disambiguate short tickers that are common English words.
     // e.g. "SPY" alone returns espionage news, "TLT" returns tlt.ng crypto spam.
-    // Also exclude known spam domains that match ticker names.
     let base_query = if ticker.starts_with('$') {
         format!("{ticker} stock")
     } else {
         format!("${ticker} stock")
     };
-    let query = format!("{base_query} -site:tlt.ng");
+    let blocklist_suffix = resolved_policy
+        .policy
+        .filtering
+        .news_noise_domain_blocklist
+        .iter()
+        .map(|d| format!("-site:{d}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let query = if blocklist_suffix.is_empty() {
+        base_query
+    } else {
+        format!("{base_query} {blocklist_suffix}")
+    };
 
     let url = format!(
         "https://news.google.com/rss/search?q={}+after:{}+before:{}&hl=en-US&gl=US&ceid=US:en",
@@ -107,6 +110,14 @@ pub async fn fetch_news(req: NewsRequest) -> Result<NewsResponse> {
             title: html_escape::decode_html_entities(&title).to_string(),
             link,
             date: pub_date,
+            published_at: None,
+            freshness: Freshness::new(
+                generated_at,
+                generated_at,
+                FreshnessState::Unknown,
+                FreshnessOrigin::TransportReceived,
+                FreshnessQuality::Estimated,
+            ),
         });
 
         cursor = end;
@@ -116,20 +127,82 @@ pub async fn fetch_news(req: NewsRequest) -> Result<NewsResponse> {
     }
 
     // For short/ambiguous tickers, filter obvious non-finance noise while preserving coverage.
+    let mut stale_count = 0usize;
+    let mut max_age_seconds = 0i64;
+    let mut data_as_of: Option<DateTime<Utc>> = None;
+    let collected_at = generated_at;
     if ticker.len() <= 4 {
         let filtered: Vec<NewsItem> = news
             .iter()
-            .filter(|n| is_finance_like(&n.title, &n.link))
+            .filter(|n| {
+                is_finance_like(
+                    &n.title,
+                    &n.link,
+                    &resolved_policy.policy.filtering.news_finance_keywords,
+                )
+            })
             .cloned()
             .collect();
-        if filtered.len() >= 5 {
+        if filtered.len() >= resolved_policy.policy.filtering.news_short_ticker_min_filtered_results {
             news = filtered;
         }
+    }
+
+    let policy_freshness = &resolved_policy.policy.freshness;
+    for item in &mut news {
+        let published_at = chrono::DateTime::parse_from_rfc2822(&item.date)
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
+            .or_else(|| chrono::DateTime::parse_from_rfc3339(&item.date).ok().map(|d| d.with_timezone(&Utc)));
+        let observed_at = published_at.unwrap_or(collected_at);
+        let freshness = crate::finance::policy::freshness_from_observed(
+            observed_at,
+            collected_at,
+            policy_freshness,
+            FreshnessOrigin::ProviderTimestamp,
+            if published_at.is_some() {
+                FreshnessQuality::Exact
+            } else {
+                FreshnessQuality::Estimated
+            },
+        );
+        max_age_seconds = max_age_seconds.max(freshness.age_seconds);
+        if matches!(freshness.state, FreshnessState::Stale) {
+            stale_count = stale_count.saturating_add(1);
+        }
+        data_as_of = Some(data_as_of.map(|d| d.max(observed_at)).unwrap_or(observed_at));
+        item.published_at = published_at;
+        item.freshness = freshness;
     }
 
     Ok(NewsResponse {
         ticker,
         date: date.to_string(),
+        generated_at,
+        schema_version: "finance.news.v2".to_string(),
+        freshness_summary: FreshnessSummary {
+            data_as_of,
+            max_age_seconds: Some(max_age_seconds),
+            stale_count,
+        },
+        applied_policy: AppliedPolicy {
+            mode: resolved_policy.mode,
+            sources: resolved_policy.sources,
+        },
+        decision_trace: vec![
+            "policy_driven_news_filtering=true".to_string(),
+            format!("articles={}", news.len()),
+        ],
+        run_meta: RunMeta {
+            latency_ms: started.elapsed().as_millis() as u64,
+            stdout_chars: 0,
+            stored_bytes: 0,
+            coverage_counts: std::collections::BTreeMap::from([(
+                "articles".to_string(),
+                news.len(),
+            )]),
+            token_efficiency: None,
+        },
         news,
     })
 }

@@ -1,53 +1,18 @@
 pub async fn fetch_macro(req: MacroRequest) -> Result<MacroResponse> {
-    let indicators = vec![
-        // === Inflation ===
-        ("CPIAUCSL", "CPI (Headline Inflation)", "inflation"),
-        ("CPILFESL", "Core CPI (Ex Food & Energy)", "inflation"),
-        ("PCEPILFE", "Core PCE (Fed Preferred Inflation)", "inflation"),
-        ("PPIACO", "PPI (Producer Prices)", "inflation"),
-        ("T10YIE", "10Y Breakeven Inflation", "inflation"),
-        // === Employment ===
-        ("UNRATE", "Unemployment Rate", "employment"),
-        ("PAYEMS", "Non-farm Payrolls", "employment"),
-        ("ICSA", "Initial Jobless Claims", "employment"),
-        ("JTSJOL", "Job Openings (JOLTS)", "employment"),
-        // === GDP & Output ===
-        ("GDPC1", "Real GDP", "gdp"),
-        ("INDPRO", "Industrial Production", "gdp"),
-        // === Interest Rates & Yields ===
-        ("FEDFUNDS", "Fed Funds Rate", "rates"),
-        ("DGS2", "2-Year Treasury Yield", "rates"),
-        ("DGS10", "10-Year Treasury Yield", "rates"),
-        ("DGS30", "30-Year Treasury Yield", "rates"),
-        ("T10Y2Y", "10Y-2Y Yield Spread", "rates"),
-        ("DFII10", "10Y TIPS Real Yield", "rates"),
-        ("MORTGAGE30US", "30-Year Mortgage Rate", "rates"),
-        // === Debt & Fiscal ===
-        ("GFDEGDQ188S", "Federal Debt to GDP (Total)", "debt"),
-        ("FYGFGDQ188S", "Federal Debt to GDP (Public)", "debt"),
-        ("GFDEBTN", "Federal Debt Total", "debt"),
-        // === Money Supply & Fed ===
-        ("M2SL", "M2 Money Supply", "money"),
-        ("WALCL", "Fed Balance Sheet Total Assets", "money"),
-        // === Consumer & Housing ===
-        ("UMCSENT", "Consumer Sentiment (UMich)", "consumer"),
-        ("RSAFS", "Retail Sales", "consumer"),
-        ("PSAVERT", "Personal Savings Rate", "consumer"),
-        ("CSUSHPISA", "Case-Shiller Home Price Index", "consumer"),
-        ("HOUST", "Housing Starts", "consumer"),
-        ("TOTALSA", "Total Vehicle Sales", "consumer"),
-        // === Credit & Risk ===
-        ("BAMLH0A0HYM2", "High Yield Credit Spread", "credit"),
-        // === Commodities & FX ===
-        ("DCOILWTICO", "WTI Oil Price", "commodities"),
-        ("DTWEXBGS", "Trade-Weighted Dollar Index", "commodities"),
-    ];
-
+    let started = std::time::Instant::now();
+    let now = Utc::now();
+    let policy_mode = req.policy_mode.unwrap_or_default();
+    let policy_file = req
+        .policy_file
+        .as_deref()
+        .map(std::path::Path::new);
+    let resolved_policy = crate::finance::policy::load_policy(policy_file, policy_mode)?;
+    let indicators = resolved_policy.policy.macro_catalog.indicators.clone();
     let range = req.range.unwrap_or(Span {
         n: 1,
         unit: SpanUnit::Year,
     });
-    let end = Utc::now();
+    let end = now;
     let mut start = end - range.approx_duration() - Duration::days(400); // extra for 1y change
     let compare_to_dt = req.compare_to.and_then(|d| {
         d.and_hms_opt(23, 59, 59)
@@ -64,11 +29,15 @@ pub async fn fetch_macro(req: MacroRequest) -> Result<MacroResponse> {
     use futures::stream::{self, StreamExt};
     let granularity = Span { n: 1, unit: SpanUnit::Month };
     let quarterly = Span { n: 3, unit: SpanUnit::Month };
-    let out: Vec<MacroIndicator> = stream::iter(indicators.iter().map(|(id, name, category)| {
-        let id = id.to_string();
-        let name = name.to_string();
-        let category = category.to_string();
+    let freshness_policy = resolved_policy.policy.freshness.clone();
+    let out: Vec<MacroIndicator> =
+        stream::iter(indicators.iter().map(|indicator| {
+        let id = indicator.id.clone();
+        let name = indicator.name.clone();
+        let category = indicator.category.clone();
         let compare_to_dt = compare_to_dt.clone();
+        let freshness_policy = freshness_policy.clone();
+        let collected_at = now;
         async move {
             // Try monthly first; fall back to quarterly for GDP-type series.
             let series = fetch_fred_series(&[id.clone()], start, end, granularity).await;
@@ -110,12 +79,20 @@ pub async fn fetch_macro(req: MacroRequest) -> Result<MacroResponse> {
                         }
                     }
                 }
+                let freshness = crate::finance::policy::freshness_from_observed(
+                    latest.t,
+                    collected_at,
+                    &freshness_policy,
+                    FreshnessOrigin::ProviderTimestamp,
+                    FreshnessQuality::Exact,
+                );
                 return Some(MacroIndicator {
                     symbol: id,
                     name,
                     category,
                     current_value: latest.c,
                     change_1y,
+                    freshness,
                     compare_value,
                     delta_abs,
                     delta_pct,
@@ -129,9 +106,41 @@ pub async fn fetch_macro(req: MacroRequest) -> Result<MacroResponse> {
     .collect()
     .await;
 
+    let data_as_of = out.iter().map(|i| i.freshness.observed_at).max();
+    let max_age_seconds = out.iter().map(|i| i.freshness.age_seconds).max();
+    let stale_count = out
+        .iter()
+        .filter(|i| matches!(i.freshness.state, FreshnessState::Stale))
+        .count();
+    let decision_trace = vec![
+        format!("catalog_indicators={}", indicators.len()),
+        format!("fetched_indicators={}", out.len()),
+        "policy_driven_catalog=true".to_string(),
+    ];
+
     Ok(MacroResponse {
-        generated_at: Utc::now(),
+        generated_at: now,
+        schema_version: "finance.macro.v2".to_string(),
+        freshness_summary: FreshnessSummary {
+            data_as_of,
+            max_age_seconds,
+            stale_count,
+        },
+        applied_policy: AppliedPolicy {
+            mode: resolved_policy.mode,
+            sources: resolved_policy.sources,
+        },
+        decision_trace,
+        run_meta: RunMeta {
+            latency_ms: started.elapsed().as_millis() as u64,
+            stdout_chars: 0,
+            stored_bytes: 0,
+            coverage_counts: std::collections::BTreeMap::from([(
+                "indicators".to_string(),
+                out.len(),
+            )]),
+            token_efficiency: None,
+        },
         indicators: out,
     })
 }
-

@@ -1013,6 +1013,8 @@ async fn try_agent_direct_route(
         let macro_resp = eli_core::finance::fetch_macro(eli_core::finance::MacroRequest {
             range: Some(eli_core::finance::Span::parse("1y").map_err(|e| anyhow::anyhow!(e))?),
             compare_to: None,
+            policy_file: None,
+            policy_mode: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!(e))
@@ -1141,6 +1143,8 @@ async fn try_agent_direct_route(
         let subject = extract_subject_after_for(task).unwrap_or_else(|| task.to_string());
         let search = eli_core::finance::fetch_search(eli_core::finance::SearchRequest {
             query: subject.clone(),
+            policy_file: None,
+            policy_mode: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!(e))
@@ -1158,6 +1162,8 @@ async fn try_agent_direct_route(
                 .unwrap_or("apple");
             let fallback_search = eli_core::finance::fetch_search(eli_core::finance::SearchRequest {
                 query: fallback_query.to_string(),
+                policy_file: None,
+                policy_mode: None,
             })
             .await
             .map_err(|e| anyhow::anyhow!(e))
@@ -1182,6 +1188,8 @@ async fn try_agent_direct_route(
         let news = eli_core::finance::fetch_news(eli_core::finance::NewsRequest {
             ticker: symbol.clone(),
             date: today.clone(),
+            policy_file: None,
+            policy_mode: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!(e))
@@ -1265,6 +1273,8 @@ async fn try_agent_direct_route(
     if let Some(subject) = extract_price_subject(task) {
         let search = eli_core::finance::fetch_search(eli_core::finance::SearchRequest {
             query: subject.clone(),
+            policy_file: None,
+            policy_mode: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!(e))
@@ -2191,6 +2201,8 @@ async fn try_swarm_worker_direct_route(
             if let Ok(macro_resp) = eli_core::finance::fetch_macro(eli_core::finance::MacroRequest {
                 range: Some(eli_core::finance::Span::parse("1y").map_err(|e| anyhow::anyhow!(e))?),
                 compare_to: None,
+                policy_file: None,
+                policy_mode: None,
             })
             .await
             .map_err(|e| anyhow::anyhow!(e)) {

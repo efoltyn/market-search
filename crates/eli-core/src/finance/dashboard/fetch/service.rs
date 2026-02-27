@@ -23,6 +23,8 @@ async fn fetch_dashboard_recession(max_ms: Option<u64>) -> Result<DashboardRespo
         fetch_macro(MacroRequest {
             range: None,
             compare_to: None,
+            policy_file: None,
+            policy_mode: None,
         })
         .await
     };

@@ -9,8 +9,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
-const TOP_MOVERS_LIMIT: usize = 10;
+const TOP_MOVERS_LIMIT: usize = 5;
 const PROBABILITY_CHANGE_EPSILON: f64 = 0.0001;
+const TOP_PROBABILITY_MOVE_MIN_PCT_POINTS: f64 = 1.0;
+const TOP_YES_PRICE_MOVE_MIN_CENTS: i64 = 2;
+const TOP_VOLUME_MOVE_MIN_UNITS: i64 = 1_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct OddsSyncState {
@@ -61,6 +64,8 @@ pub(crate) struct OddsSyncMarketState {
     pub(crate) volume: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) clob_token_ids: Option<Vec<String>>,
 }
 
 pub(crate) struct SourceDeltaBuild {
@@ -127,6 +132,7 @@ pub(crate) fn build_source_delta(
 
     let mut new_markets = 0usize;
     let mut removed_markets = 0usize;
+    let mut updated_markets = 0usize;
     let mut changed_markets = 0usize;
     let mut unchanged_markets = 0usize;
     let mut probability_changed_markets = 0usize;
@@ -146,6 +152,7 @@ pub(crate) fn build_source_delta(
         if let Some(prev) = previous {
             let changed = metric_changes.any_changed;
             if changed {
+                updated_markets += 1;
                 changed_markets += 1;
                 probability_changed_markets += usize::from(metric_changes.probability_changed);
                 yes_price_changed_markets += usize::from(metric_changes.yes_price_changed);
@@ -176,6 +183,10 @@ pub(crate) fn build_source_delta(
                 yes_price: current_state.yes_price,
                 volume: current_state.volume,
                 status: current_state.status.clone().or_else(|| prev.status.clone()),
+                clob_token_ids: current_state
+                    .clob_token_ids
+                    .clone()
+                    .or_else(|| prev.clob_token_ids.clone()),
             };
             next_state_markets.insert(key.clone(), merged);
         } else {
@@ -208,12 +219,15 @@ pub(crate) fn build_source_delta(
 
     let current_markets_count = next_state_markets.len();
     let compared_markets = current_markets_count + removed_markets;
+    let churn_markets = new_markets + removed_markets;
 
     let source_delta = OddsSyncSourceDelta {
         source: source.to_string(),
         previous_markets,
         current_markets: current_markets_count,
         compared_markets,
+        updated_markets,
+        churn_markets,
         new_markets,
         removed_markets,
         changed_markets,
@@ -252,6 +266,8 @@ pub(crate) fn apply_source_delta_baseline_reset(
 ) {
     source_delta.previous_markets = previous_markets;
     source_delta.compared_markets = 0;
+    source_delta.updated_markets = 0;
+    source_delta.churn_markets = 0;
     source_delta.new_markets = 0;
     source_delta.removed_markets = 0;
     source_delta.changed_markets = 0;
@@ -278,6 +294,8 @@ pub(crate) fn build_overall_delta(
     let previous_markets = source_deltas.iter().map(|d| d.previous_markets).sum();
     let current_markets = source_deltas.iter().map(|d| d.current_markets).sum();
     let compared_markets = source_deltas.iter().map(|d| d.compared_markets).sum();
+    let updated_markets = source_deltas.iter().map(|d| d.updated_markets).sum();
+    let churn_markets = source_deltas.iter().map(|d| d.churn_markets).sum();
     let new_markets = source_deltas.iter().map(|d| d.new_markets).sum();
     let removed_markets = source_deltas.iter().map(|d| d.removed_markets).sum();
     let changed_markets = source_deltas.iter().map(|d| d.changed_markets).sum();
@@ -299,6 +317,8 @@ pub(crate) fn build_overall_delta(
         previous_markets,
         current_markets,
         compared_markets,
+        updated_markets,
+        churn_markets,
         new_markets,
         removed_markets,
         changed_markets,
@@ -446,6 +466,7 @@ fn market_to_state(market: &OddsListedMarket) -> OddsSyncMarketState {
         yes_price: market.yes_price,
         volume: market.volume,
         status: market.status.clone(),
+        clob_token_ids: market.clob_token_ids.clone(),
     }
 }
 
@@ -547,7 +568,12 @@ fn sort_by_abs_desc(values: &mut [OddsSyncMarketDelta], key: impl Fn(&OddsSyncMa
 fn top_probability_moves(deltas: &[OddsSyncMarketDelta], limit: usize) -> Vec<OddsSyncMarketDelta> {
     let mut out: Vec<OddsSyncMarketDelta> = deltas
         .iter()
-        .filter(|d| d.change_kind == "updated" && d.probability_delta_pct_points.is_some())
+        .filter(|d| {
+            d.change_kind == "updated"
+                && d.probability_delta_pct_points
+                    .map(|v| v.abs() >= TOP_PROBABILITY_MOVE_MIN_PCT_POINTS)
+                    .unwrap_or(false)
+        })
         .cloned()
         .collect();
     sort_by_abs_desc(&mut out, |d| d.probability_delta_pct_points.unwrap_or(0.0));
@@ -558,7 +584,12 @@ fn top_probability_moves(deltas: &[OddsSyncMarketDelta], limit: usize) -> Vec<Od
 fn top_yes_price_moves(deltas: &[OddsSyncMarketDelta], limit: usize) -> Vec<OddsSyncMarketDelta> {
     let mut out: Vec<OddsSyncMarketDelta> = deltas
         .iter()
-        .filter(|d| d.change_kind == "updated" && d.yes_price_delta.is_some())
+        .filter(|d| {
+            d.change_kind == "updated"
+                && d.yes_price_delta
+                    .map(|v| v.abs() >= TOP_YES_PRICE_MOVE_MIN_CENTS)
+                    .unwrap_or(false)
+        })
         .cloned()
         .collect();
     sort_by_abs_desc(&mut out, |d| d.yes_price_delta.unwrap_or(0) as f64);
@@ -569,7 +600,12 @@ fn top_yes_price_moves(deltas: &[OddsSyncMarketDelta], limit: usize) -> Vec<Odds
 fn top_volume_moves(deltas: &[OddsSyncMarketDelta], limit: usize) -> Vec<OddsSyncMarketDelta> {
     let mut out: Vec<OddsSyncMarketDelta> = deltas
         .iter()
-        .filter(|d| d.change_kind == "updated" && d.volume_delta.is_some())
+        .filter(|d| {
+            d.change_kind == "updated"
+                && d.volume_delta
+                    .map(|v| v.abs() >= TOP_VOLUME_MOVE_MIN_UNITS)
+                    .unwrap_or(false)
+        })
         .cloned()
         .collect();
     sort_by_abs_desc(&mut out, |d| d.volume_delta.unwrap_or(0) as f64);
@@ -580,6 +616,7 @@ fn top_volume_moves(deltas: &[OddsSyncMarketDelta], limit: usize) -> Vec<OddsSyn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eli_finance_types::{Freshness, FreshnessOrigin, FreshnessQuality, FreshnessState};
 
     fn listed_market(
         ticker: &str,
@@ -592,6 +629,13 @@ mod tests {
             ticker: ticker.to_string(),
             title: format!("title {ticker}"),
             event_ticker: format!("event {ticker}"),
+            freshness: Freshness::new(
+                Utc::now(),
+                Utc::now(),
+                FreshnessState::Unknown,
+                FreshnessOrigin::Derived,
+                FreshnessQuality::Estimated,
+            ),
             yes_price,
             volume,
             status: status.map(ToString::to_string),
@@ -626,6 +670,7 @@ mod tests {
                         yes_price: Some(50),
                         volume: Some(1_000),
                         status: Some("open".to_string()),
+                        clob_token_ids: None,
                     },
                 ),
                 (
@@ -639,6 +684,7 @@ mod tests {
                         yes_price: Some(30),
                         volume: Some(2_000),
                         status: Some("open".to_string()),
+                        clob_token_ids: None,
                     },
                 ),
             ]),
@@ -681,6 +727,7 @@ mod tests {
             yes_price: Some(50),
             volume: Some(100),
             status: Some("open".to_string()),
+            clob_token_ids: None,
         };
         let current = OddsSyncMarketState {
             ticker: "X".to_string(),
@@ -691,6 +738,7 @@ mod tests {
             yes_price: Some(50),
             volume: Some(100),
             status: Some("open".to_string()),
+            clob_token_ids: None,
         };
 
         let delta = build_market_delta("kalshi", Some(&previous), Some(&current));
