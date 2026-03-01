@@ -44,47 +44,27 @@ async fn mcp_read_request<R>(reader: &mut R) -> Result<Option<serde_json::Value>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+    use tokio::io::AsyncBufReadExt as _;
 
-    let mut content_length: Option<usize> = None;
-    let mut line = Vec::new();
-
+    let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_until(b'\n', &mut line).await?;
+        let n = reader.read_line(&mut line).await?;
         if n == 0 {
             return Ok(None);
         }
-
-        if line == b"\r\n" || line == b"\n" {
-            break;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-
-        let header = std::str::from_utf8(&line)
-            .context("invalid mcp header utf8")?
-            .trim();
-        if let Some((name, value)) = header.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                let len = value
-                    .trim()
-                    .parse::<usize>()
-                    .context("invalid content-length")?;
-                content_length = Some(len);
-            }
-        }
+        let request = serde_json::from_str(trimmed).context("parse mcp request json")?;
+        return Ok(Some(request));
     }
-
-    let len = content_length.context("missing content-length header")?;
-    let mut payload = vec![0u8; len];
-    reader.read_exact(&mut payload).await?;
-    let request = serde_json::from_slice(&payload).context("parse mcp request json")?;
-    Ok(Some(request))
 }
 
 fn mcp_write_response<W: std::io::Write>(out: &mut W, response: &serde_json::Value) -> Result<()> {
-    let body = serde_json::to_vec(response).context("serialize response")?;
-    write!(out, "Content-Length: {}\r\n\r\n", body.len())?;
-    out.write_all(&body)?;
+    let body = serde_json::to_string(response).context("serialize response")?;
+    writeln!(out, "{body}")?;
     out.flush()?;
     Ok(())
 }
@@ -94,7 +74,7 @@ fn mcp_initialize(id: serde_json::Value) -> serde_json::Value {
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2025-11-25",
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "eli", "version": "0.1.0" }
         }
