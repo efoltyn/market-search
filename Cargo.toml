@@ -58,6 +58,7 @@ tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 rand = "0.8"
 base64 = "0.22"
 rsa = { version = "0.9", features = ["pem"] }
+evalexpr = "11.3"
 
 eli-adapters = { path = "crates/eli-adapters", version = "0.1.0" }
 eli-cli = { path = "crates/eli-cli", version = "0.1.0" }
