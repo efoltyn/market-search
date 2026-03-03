@@ -24,6 +24,7 @@ pub async fn run() -> Result<()> {
         Some(Command::Web { cmd }) => cmd_web(cmd).await,
         Some(Command::Agent { cmd }) => cmd_agent(cmd, cli.provider, cli.model).await,
         Some(Command::Code(args)) => cmd_code(args).await,
+        Some(Command::Sentinel { cmd }) => cmd_sentinel(cmd).await,
         Some(Command::Mcp) => cmd_mcp().await,
     }
 }

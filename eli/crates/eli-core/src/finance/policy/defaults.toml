@@ -1,0 +1,82 @@
+[ranking]
+title_exact_bonus = 30.0
+term_match_weight = 8.0
+ticker_event_match_weight = 6.0
+category_topic_match_weight = 4.0
+volume_log_weight = 3.0
+macro_keyword_weight = 8
+macro_economics_boost = 45
+macro_financials_boost = 25
+macro_mentions_penalty = -70
+macro_offtopic_penalty = -20
+delta_prob_weight = 1.0
+delta_yes_price_weight = 1.0
+delta_volume_weight = 1.0
+novelty_weight = 1.0
+confidence_weight = 1.0
+
+[filtering]
+macro_profile_min_relevance = -60
+enforce_requires_match_terms = true
+enforce_min_volume_usd = 0.0
+macro_keywords = ["federal reserve","fed","fomc","rate","inflation","cpi","pce","ppi","unemployment","payroll","tariff","gdp","recession","yield","treasury"]
+macro_offtopic_keywords = ["mentions","tweet","airdrop","courts","crypto"]
+us_hint_keywords = ["us","u.s.","united states","american","nfp","nonfarm payrolls","fomc","federal reserve","cpi","pce","gdpnow"]
+policy_action_keywords = ["rate","cut","cuts","hike","hikes","hold","decrease","increase","bps","basis point","decision","meeting"]
+news_finance_keywords = ["stock","shares","etf","market","s&p","nasdaq","dow","invest","earnings","fed","bond","yield","economy","inflation"]
+news_noise_domain_blocklist = ["tlt.ng"]
+news_short_ticker_min_filtered_results = 5
+
+[freshness]
+live_after_seconds = 30
+delayed_after_seconds = 900
+stale_after_seconds = 21600
+
+[stdout_compaction]
+top_categories = 8
+top_markets_by_volume = 3
+top_markets_by_informative_volume = 3
+top_anomalous_zero_yes_markets = 2
+top_near_even_high_volume_markets = 2
+top_high_confidence_high_volume_markets = 2
+top_probability_moves = 3
+top_yes_price_moves = 3
+top_volume_moves = 3
+max_title_chars = 96
+max_category_chars = 32
+
+[macro_catalog]
+indicators = [
+  { id = "CPIAUCSL", name = "CPI (Headline Inflation)", category = "inflation" },
+  { id = "CPILFESL", name = "Core CPI (Ex Food & Energy)", category = "inflation" },
+  { id = "PCEPILFE", name = "Core PCE (Fed Preferred Inflation)", category = "inflation" },
+  { id = "PPIACO", name = "PPI (Producer Prices)", category = "inflation" },
+  { id = "T10YIE", name = "10Y Breakeven Inflation", category = "inflation" },
+  { id = "UNRATE", name = "Unemployment Rate", category = "employment" },
+  { id = "PAYEMS", name = "Non-farm Payrolls", category = "employment" },
+  { id = "ICSA", name = "Initial Jobless Claims", category = "employment" },
+  { id = "JTSJOL", name = "Job Openings (JOLTS)", category = "employment" },
+  { id = "GDPC1", name = "Real GDP", category = "gdp" },
+  { id = "INDPRO", name = "Industrial Production", category = "gdp" },
+  { id = "FEDFUNDS", name = "Fed Funds Rate", category = "rates" },
+  { id = "DGS2", name = "2-Year Treasury Yield", category = "rates" },
+  { id = "DGS10", name = "10-Year Treasury Yield", category = "rates" },
+  { id = "DGS30", name = "30-Year Treasury Yield", category = "rates" },
+  { id = "T10Y2Y", name = "10Y-2Y Yield Spread", category = "rates" },
+  { id = "DFII10", name = "10Y TIPS Real Yield", category = "rates" },
+  { id = "MORTGAGE30US", name = "30-Year Mortgage Rate", category = "rates" },
+  { id = "GFDEGDQ188S", name = "Federal Debt to GDP (Total)", category = "debt" },
+  { id = "FYGFGDQ188S", name = "Federal Debt to GDP (Public)", category = "debt" },
+  { id = "GFDEBTN", name = "Federal Debt Total", category = "debt" },
+  { id = "M2SL", name = "M2 Money Supply", category = "money" },
+  { id = "WALCL", name = "Fed Balance Sheet Total Assets", category = "money" },
+  { id = "UMCSENT", name = "Consumer Sentiment (UMich)", category = "consumer" },
+  { id = "RSAFS", name = "Retail Sales", category = "consumer" },
+  { id = "PSAVERT", name = "Personal Savings Rate", category = "consumer" },
+  { id = "CSUSHPISA", name = "Case-Shiller Home Price Index", category = "consumer" },
+  { id = "HOUST", name = "Housing Starts", category = "consumer" },
+  { id = "TOTALSA", name = "Total Vehicle Sales", category = "consumer" },
+  { id = "BAMLH0A0HYM2", name = "High Yield Credit Spread", category = "credit" },
+  { id = "DCOILWTICO", name = "WTI Oil Price", category = "commodities" },
+  { id = "DTWEXBGS", name = "Trade-Weighted Dollar Index", category = "commodities" },
+]

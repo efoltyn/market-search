@@ -79,6 +79,12 @@ enum Command {
     /// Parse Rust source into a structural map (functions, structs, enums, impls, traits).
     Code(CodeArgs),
 
+    /// Run 24/7 sentinel monitoring and interruption queue workflows.
+    Sentinel {
+        #[command(subcommand)]
+        cmd: SentinelCommand,
+    },
+
     /// Start MCP (Model Context Protocol) server — exposes eli tools as native Claude Code tools via JSON-RPC stdio.
     Mcp,
 }
@@ -151,6 +157,29 @@ enum AgentCommand {
     Compete(AgentModeArgs),
     /// Run worker debate and synthesize consensus.
     Debate(AgentModeArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum SentinelCommand {
+    /// Start the sentinel daemon in the background.
+    Start(SentinelStartArgs),
+    /// Stop the sentinel daemon.
+    Stop(SentinelStopArgs),
+    /// Print sentinel daemon status.
+    Status(SentinelStatusArgs),
+    /// Register a new sentinel trigger subscription.
+    Subscribe(SentinelSubscribeArgs),
+    /// Remove a sentinel subscription by id or name.
+    Unsubscribe(SentinelUnsubscribeArgs),
+    /// List configured sentinel subscriptions.
+    List(SentinelListArgs),
+    /// Emit a synthetic alert packet for wiring tests.
+    Test(SentinelTestArgs),
+    /// Replay recent packets from queue file.
+    Replay(SentinelReplayArgs),
+    /// Internal daemon process entrypoint.
+    #[command(hide = true)]
+    DaemonRun(SentinelDaemonRunArgs),
 }
 
 #[derive(Debug, Serialize)]
@@ -247,6 +276,135 @@ enum FinancePaperSideArg {
 enum FinancePaperOrderActionArg {
     Buy,
     Sell,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum SentinelSeverityArg {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelPathArgs {
+    /// Sentinel root directory.
+    #[arg(long = "sentinel-dir")]
+    sentinel_dir: Option<PathBuf>,
+
+    /// Queue JSONL file override.
+    #[arg(long = "queue-file")]
+    queue_file: Option<PathBuf>,
+
+    /// Intelligence packets JSONL file override.
+    #[arg(long = "packets-file")]
+    packets_file: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelStartArgs {
+    #[command(flatten)]
+    paths: SentinelPathArgs,
+
+    /// Daemon evaluation interval in seconds.
+    #[arg(long = "interval-secs", default_value_t = 15)]
+    interval_secs: u64,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelStopArgs {
+    #[command(flatten)]
+    paths: SentinelPathArgs,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelStatusArgs {
+    #[command(flatten)]
+    paths: SentinelPathArgs,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelSubscribeArgs {
+    #[command(flatten)]
+    paths: SentinelPathArgs,
+
+    /// Human-readable subscription name.
+    #[arg(long)]
+    name: String,
+
+    /// Trigger expression, e.g. \"pyth_wti > 80 && poly_hormuz_yes > 0.50\".
+    #[arg(long)]
+    expr: String,
+
+    /// Optional variable mapping (repeatable): var=provider:query
+    #[arg(long = "var")]
+    vars: Vec<String>,
+
+    /// Why this alert matters (stored in packet/playbook).
+    #[arg(long = "why")]
+    why: Option<String>,
+
+    /// Prompt template for the follow-up playbook.
+    #[arg(long = "prompt-template")]
+    prompt_template: Option<String>,
+
+    /// Alert severity.
+    #[arg(long, value_enum, default_value = "medium")]
+    severity: SentinelSeverityArg,
+
+    /// Cooldown between repeated triggers (seconds).
+    #[arg(long = "cooldown-secs", default_value_t = 300)]
+    cooldown_secs: u64,
+
+    /// Start enabled (default true).
+    #[arg(long, default_value_t = true)]
+    enabled: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelUnsubscribeArgs {
+    #[command(flatten)]
+    paths: SentinelPathArgs,
+
+    /// Subscription id or exact name.
+    #[arg(long = "id")]
+    id_or_name: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelListArgs {
+    #[command(flatten)]
+    paths: SentinelPathArgs,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelTestArgs {
+    #[command(flatten)]
+    paths: SentinelPathArgs,
+
+    /// Synthetic test scenario.
+    #[arg(long, default_value = "generic")]
+    scenario: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelReplayArgs {
+    #[command(flatten)]
+    paths: SentinelPathArgs,
+
+    /// Number of recent queue lines to replay.
+    #[arg(long = "max-lines", default_value_t = 50)]
+    max_lines: usize,
+}
+
+#[derive(clap::Args, Debug)]
+struct SentinelDaemonRunArgs {
+    #[command(flatten)]
+    paths: SentinelPathArgs,
+
+    /// Daemon evaluation interval in seconds.
+    #[arg(long = "interval-secs", default_value_t = 15)]
+    interval_secs: u64,
 }
 
 #[derive(clap::Args, Debug)]
