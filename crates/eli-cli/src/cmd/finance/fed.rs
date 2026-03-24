@@ -188,12 +188,8 @@ async fn cmd_finance_eia(args: FinanceEiaArgs) -> Result<()> {
         );
     }
 
-    let api_key = std::env::var("EIA_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        anyhow::bail!(
-            "EIA API key required. Set EIA_API_KEY env var or register free at https://www.eia.gov/opendata/register.php"
-        );
-    }
+    let api_key = eli_core::finance::resolve_eia_api_key()
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     let req = eli_core::finance::EiaRequest {
         api_key,

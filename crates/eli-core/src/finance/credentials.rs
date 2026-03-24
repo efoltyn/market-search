@@ -19,6 +19,8 @@ struct InventoryFile {
     #[serde(default)]
     fred: Option<FredInventory>,
     #[serde(default)]
+    eia: Option<EiaInventory>,
+    #[serde(default)]
     kalshi: Option<KalshiInventory>,
     #[serde(default)]
     polymarket: Option<PolymarketInventory>,
@@ -28,6 +30,12 @@ struct InventoryFile {
 
 #[derive(Clone, Debug, Deserialize, Default)]
 struct FredInventory {
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+struct EiaInventory {
     #[serde(default)]
     api_key: Option<String>,
 }
@@ -251,6 +259,27 @@ pub(crate) fn resolve_fred_api_key() -> std::result::Result<String, String> {
         })?;
 
     Ok(api_key)
+}
+
+pub(crate) fn resolve_eia_api_key() -> std::result::Result<String, String> {
+    let api_key_env = std::env::var("EIA_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+
+    if let Some(api_key) = api_key_env {
+        return Ok(api_key);
+    }
+
+    let inv = read_inventory_file()?;
+    let eia = inv.as_ref().and_then(|v| v.eia.as_ref());
+
+    eia.and_then(|e| normalized(e.api_key.as_deref()))
+        .ok_or_else(|| {
+            format!(
+                "eia api key missing; set EIA_API_KEY or configure [eia].api_key in {}. Register free at https://www.eia.gov/opendata/register.php",
+                inventory_path().display()
+            )
+        })
 }
 
 pub(crate) fn has_fred_api_configuration_hint() -> bool {

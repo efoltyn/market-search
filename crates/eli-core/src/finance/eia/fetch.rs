@@ -129,7 +129,7 @@ impl EiaPreset {
             }],
             Self::ElectricityDemand => vec![EiaQuerySpec {
                 route: "electricity/rto/daily-region-data/data/",
-                label: "US Electricity Demand (daily)",
+                label: "Balancing Authority Electricity Demand (daily)",
                 facets: vec![("type", "D")], frequency: "daily", data_col: "value",
             }],
             Self::NuclearOutages => vec![EiaQuerySpec {
@@ -272,30 +272,60 @@ pub async fn fetch_eia(req: EiaRequest) -> Result<EiaResponse> {
         for row in &data {
             let period = row.get("period").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let value: f64 = row
-                .get("value")
-                .and_then(|v| v.as_str().or_else(|| v.as_f64().map(|_| "")))
-                .and_then(|s| if s.is_empty() {
-                    row.get("value").and_then(|v| v.as_f64())
-                } else {
-                    s.parse::<f64>().ok()
+                .get(spec.data_col)
+                .and_then(|v| {
+                    v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
                 })
                 .unwrap_or(0.0);
-            let units = row.get("units").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let units_key = format!("{}-units", spec.data_col);
+            let units = row
+                .get("units")
+                .or_else(|| row.get(&units_key))
+                .or_else(|| row.get("value-units"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let product = row.get("product").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let product_name = row.get("product-name")
                 .or_else(|| row.get("productName"))
+                .or_else(|| row.get("type-name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let area = row.get("duoarea").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let area_name = row.get("area-name")
+            let area = row
+                .get("duoarea")
+                .or_else(|| row.get("respondent"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let area_name_base = row.get("area-name")
                 .or_else(|| row.get("areaName"))
+                .or_else(|| row.get("respondent-name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let series = row.get("series").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let timezone = row
+                .get("timezone-description")
+                .or_else(|| row.get("timezone"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let area_name = if !area_name_base.is_empty() && !timezone.is_empty() {
+                format!("{} ({})", area_name_base, timezone)
+            } else if !area_name_base.is_empty() {
+                area_name_base
+            } else {
+                timezone.to_string()
+            };
+            let series = row
+                .get("series")
+                .or_else(|| row.get("seriesId"))
+                .or_else(|| row.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let series_description = row.get("series-description")
                 .or_else(|| row.get("seriesDescription"))
+                .or_else(|| row.get("type-name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();

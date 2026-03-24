@@ -153,6 +153,10 @@ pub(crate) mod credentials;
 pub fn has_fred_api_attachment_hint() -> bool {
     credentials::has_fred_api_configuration_hint()
 }
+
+pub fn resolve_eia_api_key() -> std::result::Result<String, String> {
+    credentials::resolve_eia_api_key()
+}
 pub mod odds_db;
 pub mod policy;
 
