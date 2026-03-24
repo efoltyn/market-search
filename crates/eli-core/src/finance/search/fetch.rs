@@ -71,7 +71,29 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
     });
 
     // FRED search: live API if key available (800K+ series), else hardcoded catalog (60 series).
-    results.extend(search_fred_live_or_catalog(&query).await);
+    // Dedupe against Yahoo results by symbol, then merge by score.
+    let fred_results = search_fred_live_or_catalog(&query).await;
+    {
+        let existing_symbols: std::collections::HashSet<String> = results
+            .iter()
+            .map(|r| r.symbol.to_ascii_uppercase())
+            .collect();
+        for fred_item in fred_results {
+            if !existing_symbols.contains(&fred_item.symbol.to_ascii_uppercase()) {
+                results.push(fred_item);
+            }
+        }
+        // Re-sort: FRED items with high popularity should interleave with Yahoo results,
+        // not just sit at the bottom. Yahoo scores are typically 10K-100K range;
+        // FRED popularity is 0-100. Boost FRED items so popular series rank competitively.
+        results.sort_by(|a, b| {
+            let score_a = a.score.unwrap_or(0.0)
+                + if a.exchange.as_deref() == Some("FRED") { 5000.0 } else { 0.0 };
+            let score_b = b.score.unwrap_or(0.0)
+                + if b.exchange.as_deref() == Some("FRED") { 5000.0 } else { 0.0 };
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
 
     // Policy-driven macro suggestions from catalog.
     let macro_items: Vec<SearchItem> = resolved_policy
