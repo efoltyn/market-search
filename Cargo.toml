@@ -26,7 +26,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "BUSL-1.1"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/efoltyn/eli"
 
 [workspace.dependencies]
