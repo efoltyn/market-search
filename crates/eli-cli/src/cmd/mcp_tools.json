@@ -25,7 +25,7 @@
                 "properties": {
                     "preset": {
                         "type": "string",
-                        "description": "Curated ticker group: macro (31 FRED + oil/gold/BTC), forex_majors (9 USD pairs), yield_curve (11 Treasury tenors DGS1MO–DGS30), liquidity (WALCL/TGA/RRP net liquidity), crypto (BTC/ETH/SOL). Merges with any explicit tickers."
+                        "description": "14 presets: macro, yield_curve, liquidity, credit (ICE BofA OAS), financial_conditions (NFCI/STLFSI4/VIX), recession (Sahm/spreads/claims), fed_balance_sheet (QE/QT), housing (Case-Shiller/starts/mortgage), labor (NFP/JOLTS/wages), inflation (CPI/PCE/sticky/median), real_rates (TIPS), consumer_credit (delinquency/SLOOS), forex_majors, crypto."
                     },
                     "tickers": {
                         "type": "string",

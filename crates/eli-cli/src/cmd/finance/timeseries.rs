@@ -1499,8 +1499,103 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
         "crypto" => vec![
             "PYTH:BTC", "PYTH:ETH", "PYTH:SOL",
         ],
+        // Credit spreads: ICE BofA OAS indices (daily, free, no API key)
+        "credit" | "credit_spreads" | "spreads" => vec![
+            "BAMLC0A0CM",     // IG Corporate OAS
+            "BAMLC0A4CBBB",   // BBB Corporate OAS
+            "BAMLH0A0HYM2",   // High Yield OAS
+            "BAMLH0A1HYBB",   // BB High Yield OAS
+            "BAMLH0A2HYB",    // B High Yield OAS
+            "BAMLH0A3HYC",    // CCC & Lower OAS
+            "BAMLEMCBPIOAS",   // EM Corporate OAS
+        ],
+        // Financial conditions indices (weekly)
+        "financial_conditions" | "conditions" | "nfci" => vec![
+            "NFCI",           // Chicago Fed National Financial Conditions
+            "ANFCI",          // Adjusted NFCI (removes biz cycle)
+            "STLFSI4",        // St. Louis Financial Stress Index V4
+            "VIXCLS",         // VIX daily close
+        ],
+        // Recession indicators
+        "recession" | "recession_indicators" => vec![
+            "SAHMREALTIME",   // Sahm Rule (real-time)
+            "RECPROUSM156N",  // Smoothed Recession Probabilities (0-100%)
+            "T10Y2Y",         // 10Y-2Y spread
+            "T10Y3M",         // 10Y-3M spread (NY Fed model input)
+            "ICSA",           // Initial claims (weekly)
+            "UNRATE",         // Unemployment rate
+            "INDPRO",         // Industrial production
+            "CFNAI",          // Chicago Fed National Activity Index
+        ],
+        // Fed balance sheet and money supply
+        "fed_balance_sheet" | "fed_bs" | "qe" | "qt" => vec![
+            "WALCL",          // Fed total assets
+            "TREAST",         // Fed Treasury holdings
+            "WSHOMCB",        // Fed MBS holdings
+            "WRBWFRBL",       // Reserve balances
+            "RRPONTSYD",      // Reverse repo
+            "WTREGEN",        // Treasury General Account
+            "M2SL",           // M2 money supply
+            "BOGMBASE",       // Monetary base
+        ],
+        // Housing market
+        "housing" => vec![
+            "CSUSHPISA",      // Case-Shiller National HPI
+            "SPCS20RSA",      // Case-Shiller 20-City
+            "HOUST",          // Housing starts
+            "HOUST1F",        // Single-family starts
+            "PERMIT",         // Building permits
+            "HSN1F",          // New home sales
+            "EXHOSLUSM495S",  // Existing home sales
+            "MORTGAGE30US",   // 30Y mortgage rate
+        ],
+        // Labor market deep dive
+        "labor" | "employment" => vec![
+            "PAYEMS",         // Nonfarm payrolls
+            "UNRATE",         // Unemployment rate
+            "U6RATE",         // U-6 (broadest unemployment)
+            "ICSA",           // Initial claims
+            "CCSA",           // Continued claims
+            "JTSJOL",         // JOLTS job openings
+            "JTSQUL",         // JOLTS quits
+            "CIVPART",        // Labor force participation
+            "CES0500000003",  // Average hourly earnings
+            "AWHAETP",        // Average weekly hours
+        ],
+        // Inflation deep dive
+        "inflation" => vec![
+            "CPIAUCSL",       // Headline CPI
+            "CPILFESL",       // Core CPI
+            "PCEPILFE",       // Core PCE (Fed's target)
+            "PPIFIS",         // PPI Final Demand
+            "T10YIE",         // 10Y breakeven inflation
+            "T5YIFR",         // 5Y5Y forward inflation expectation
+            "MICH",           // UMich 1Y inflation expectation
+            "CORESTICKM157SFRBATL", // Atlanta Fed sticky CPI
+            "MEDCPIM158SFRBCLE",    // Cleveland Fed median CPI
+        ],
+        // Real rates (TIPS yields)
+        "real_rates" | "tips" => vec![
+            "DFII5",          // 5Y TIPS yield
+            "DFII7",          // 7Y TIPS yield
+            "DFII10",         // 10Y TIPS yield
+            "DFII20",         // 20Y TIPS yield
+            "DFII30",         // 30Y TIPS yield
+            "T5YIE",          // 5Y breakeven
+            "T10YIE",         // 10Y breakeven
+        ],
+        // Consumer credit and banking
+        "consumer_credit" | "banking" => vec![
+            "TOTALSL",        // Total consumer credit
+            "REVOLSL",        // Revolving (credit cards)
+            "NONREVSL",       // Nonrevolving (auto/student)
+            "DRCCLACBS",      // Credit card delinquency rate
+            "DRSFRMACBS",     // Mortgage delinquency rate
+            "BUSLOANS",       // C&I loans
+            "DRTSCILM",      // SLOOS lending standards
+        ],
         other => anyhow::bail!(
-            "unknown --preset '{other}' (supported: macro, forex_majors, yield_curve, liquidity, crypto)"
+            "unknown --preset '{other}' (supported: macro, forex_majors, yield_curve, liquidity, crypto, credit, financial_conditions, recession, fed_balance_sheet, housing, labor, inflation, real_rates, consumer_credit)"
         ),
     };
     Ok(tickers.into_iter().map(String::from).collect())
