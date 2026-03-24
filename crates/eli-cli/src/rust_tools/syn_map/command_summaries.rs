@@ -229,8 +229,6 @@ fn timeseries_summary_parts(value: &serde_json::Value) -> Vec<String> {
         .and_then(|v| v.as_object())
     {
         let mut returns: Vec<(String, f64)> = Vec::new();
-        let mut vols: Vec<(String, f64)> = Vec::new();
-        let mut sharpes: Vec<(String, f64)> = Vec::new();
         for (ticker, statv) in stats {
             let Some(stat) = statv.as_object() else {
                 continue;
@@ -242,64 +240,13 @@ fn timeseries_summary_parts(value: &serde_json::Value) -> Vec<String> {
             {
                 returns.push((ticker.clone(), r));
             }
-            if let Some(v) = stat
-                .get("annualized_vol")
-                .and_then(|v| v.as_f64())
-                .or_else(|| stat.get("vol_annualized").and_then(|v| v.as_f64()))
-            {
-                vols.push((ticker.clone(), v));
-            }
-            if let Some(s) = stat
-                .get("sharpe_ratio")
-                .and_then(|v| v.as_f64())
-                .or_else(|| stat.get("sharpe").and_then(|v| v.as_f64()))
-            {
-                sharpes.push((ticker.clone(), s));
-            }
         }
         if let Some((hi_t, hi_v, lo_t, lo_v)) = top_two_by_abs_change(&returns) {
             out.push(format!("best_return={hi_t}:{}", fmt_pct(hi_v)));
             out.push(format!("worst_return={lo_t}:{}", fmt_pct(lo_v)));
         }
-        if !vols.is_empty() {
-            vols.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            out.push(format!("highest_vol={}:{}", vols[0].0, fmt_pct(vols[0].1)));
-        }
-        if !sharpes.is_empty() {
-            sharpes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            out.push(format!("best_sharpe={}:{:.2}", sharpes[0].0, sharpes[0].1));
-        }
     }
 
-    if let Some(cm) = map
-        .get("analytics")
-        .and_then(|a| a.get("correlation_matrix"))
-        .and_then(|v| v.as_object())
-    {
-        let mut pairs: Vec<(String, String, f64)> = Vec::new();
-        for (a, rowv) in cm {
-            let Some(row) = rowv.as_object() else {
-                continue;
-            };
-            for (b, cv) in row {
-                if a >= b {
-                    continue;
-                }
-                if let Some(c) = cv.as_f64() {
-                    pairs.push((a.clone(), b.clone(), c));
-                }
-            }
-        }
-        if !pairs.is_empty() {
-            let avg = pairs.iter().map(|p| p.2).sum::<f64>() / pairs.len() as f64;
-            pairs.sort_by(|x, y| x.2.partial_cmp(&y.2).unwrap_or(std::cmp::Ordering::Equal));
-            let low = &pairs[0];
-            let high = &pairs[pairs.len() - 1];
-            out.push(format!("corr_avg={avg:.3}"));
-            out.push(format!("corr_max={}-{}:{:.3}", high.0, high.1, high.2));
-            out.push(format!("corr_min={}-{}:{:.3}", low.0, low.1, low.2));
-        }
-    }
     out
 }
 

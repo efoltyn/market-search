@@ -198,7 +198,12 @@ pub fn freshness_from_observed(
 }
 
 pub fn parse_policy_mode(raw: Option<&str>) -> Result<PolicyMode> {
-    match raw.unwrap_or("observe").trim().to_ascii_lowercase().as_str() {
+    match raw
+        .unwrap_or("observe")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "observe" => Ok(PolicyMode::Observe),
         "assist" => Ok(PolicyMode::Assist),
         "enforce" => Ok(PolicyMode::Enforce),
@@ -221,7 +226,10 @@ mod tests {
         };
         assert_eq!(freshness_state_for_age(1, &p), FreshnessState::Live);
         assert_eq!(freshness_state_for_age(100, &p), FreshnessState::Delayed);
-        assert_eq!(freshness_state_for_age(1800, &p), FreshnessState::Historical);
+        assert_eq!(
+            freshness_state_for_age(1800, &p),
+            FreshnessState::Historical
+        );
         assert_eq!(freshness_state_for_age(7200, &p), FreshnessState::Stale);
     }
 
@@ -247,17 +255,13 @@ macro_profile_min_relevance = 95
         assert_eq!(resolved.mode, PolicyMode::Assist);
         assert_eq!(resolved.policy.filtering.macro_profile_min_relevance, 95);
         assert!(resolved.policy.ranking.term_match_weight > 0.0);
-        assert!(
-            resolved
-                .sources
-                .iter()
-                .any(|s| s == "embedded:finance/policy/defaults.toml")
-        );
-        assert!(
-            resolved
-                .sources
-                .iter()
-                .any(|s| s == &path.display().to_string())
-        );
+        assert!(resolved
+            .sources
+            .iter()
+            .any(|s| s == "embedded:finance/policy/defaults.toml"));
+        assert!(resolved
+            .sources
+            .iter()
+            .any(|s| s == &path.display().to_string()));
     }
 }

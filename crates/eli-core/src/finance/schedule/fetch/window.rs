@@ -1,3 +1,36 @@
+fn merge_macro_events(
+    rows_out: &mut Vec<MacroScheduleEvent>,
+    incoming: Vec<MacroScheduleEvent>,
+) {
+    let existing: std::collections::BTreeSet<(String, String)> = rows_out
+        .iter()
+        .map(|e| (e.date.clone(), e.title.clone()))
+        .collect();
+    for row in incoming {
+        if !existing.contains(&(row.date.clone(), row.title.clone())) {
+            rows_out.push(row);
+        }
+    }
+}
+
+fn merge_macro_days(
+    days_out: &mut Vec<MacroScheduleDay>,
+    incoming: Vec<MacroScheduleDay>,
+) {
+    let mut by_date: std::collections::BTreeMap<String, usize> = days_out
+        .iter()
+        .map(|day| (day.date.clone(), day.release_count))
+        .collect();
+    for day in incoming {
+        let entry = by_date.entry(day.date).or_insert(0);
+        *entry = (*entry).max(day.release_count);
+    }
+    *days_out = by_date
+        .into_iter()
+        .map(|(date, release_count)| MacroScheduleDay { date, release_count })
+        .collect();
+}
+
 async fn fetch_schedule_window(
     client: &reqwest::Client,
     kind: ScheduleKind,
@@ -7,9 +40,6 @@ async fn fetch_schedule_window(
     tickers: &BTreeSet<String>,
 ) -> Result<ScheduleResponse> {
     let mut warnings = Vec::new();
-    let mut earnings = Vec::new();
-    let mut macro_events = Vec::new();
-    let mut macro_days = Vec::new();
 
     // Collect all dates in the window.
     let mut dates = Vec::new();
@@ -70,55 +100,113 @@ async fn fetch_schedule_window(
         if !do_macro {
             return (Vec::new(), Vec::new(), Vec::new());
         }
-        // Fetch day counts + per-day details in parallel
-        let counts_fut = timeout(
-            TokioDuration::from_secs(SCHEDULE_PER_DAY_TIMEOUT_SECS),
-            fetch_fred_macro_counts(client, start_date, end_date),
-        );
-        let day_futs: Vec<_> = dates
-            .iter()
-            .map(|&d| {
-                let client = client.clone();
-                async move {
-                    match timeout(
-                        TokioDuration::from_secs(SCHEDULE_PER_DAY_TIMEOUT_SECS),
-                        fetch_fred_macro_for_day(&client, d),
-                    )
-                    .await
-                    {
-                        Ok(Ok(rows)) => (Some(rows), None),
-                        Ok(Err(e)) => (None, Some(format!("fred macro {d}: {e}"))),
-                        Err(_) => (None, Some(format!("fred macro {d}: timed out"))),
-                    }
-                }
-            })
-            .collect();
-        let (counts_result, day_results) =
-            tokio::join!(counts_fut, futures::future::join_all(day_futs));
         let mut m_days = Vec::new();
         let mut m_events = Vec::new();
         let mut warn = Vec::new();
-        match counts_result {
-            Ok(Ok(days)) => m_days = days,
-            Ok(Err(e)) => warn.push(format!("fred macro counts: {e}")),
-            Err(_) => warn.push("fred macro counts: timed out".to_string()),
-        }
-        for (rows, w) in day_results {
-            if let Some(r) = rows {
-                m_events.extend(r);
+
+        if macro_profile == ScheduleMacroProfile::Major {
+            match timeout(
+                TokioDuration::from_secs(SCHEDULE_HTTP_TIMEOUT_SECS),
+                fetch_official_major_macro(start_date, end_date),
+            )
+            .await
+            {
+                Ok(Ok((rows, days, official_warn))) => {
+                    m_events = rows;
+                    m_days = days;
+                    warn.extend(official_warn);
+                }
+                Ok(Err(e)) => warn.push(format!("official macro major failed: {e}")),
+                Err(_) => warn.push("official macro major: timed out".to_string()),
             }
-            if let Some(w) = w {
-                warn.push(w);
+            // BEA JSON as supplementary source even for Major (exact times, more BEA releases).
+            match timeout(
+                TokioDuration::from_secs(SCHEDULE_HTTP_TIMEOUT_SECS),
+                fetch_bea_macro_events(start_date, end_date),
+            )
+            .await
+            {
+                Ok(Ok(bea_rows)) => {
+                    // Merge BEA events, preferring BEA for duplicates (has exact times).
+                    let existing: std::collections::BTreeSet<(String, String)> = m_events
+                        .iter()
+                        .map(|e| (e.date.clone(), e.title.clone()))
+                        .collect();
+                    for row in bea_rows {
+                        if !existing.contains(&(row.date.clone(), row.title.clone())) {
+                            m_events.push(row);
+                        } else {
+                            // Update existing event with BEA time if available.
+                            if let Some(existing_event) = m_events.iter_mut().find(|e| {
+                                e.date == row.date && e.title == row.title
+                            }) {
+                                if row.time.is_some() {
+                                    existing_event.time = row.time.clone();
+                                    existing_event.source = "bea".to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Err(e)) => warn.push(format!("bea calendar: {e}")),
+                Err(_) => warn.push("bea calendar: timed out".to_string()),
+            }
+            return (m_events, m_days, warn);
+        }
+
+        // Non-major profiles: official major + BEA are the stable baseline.
+        // FRED is supplementary only, and only via the real API.
+        let official_fut = timeout(
+            TokioDuration::from_secs(SCHEDULE_HTTP_TIMEOUT_SECS),
+            fetch_official_major_macro(start_date, end_date),
+        );
+        let bea_fut = timeout(
+            TokioDuration::from_secs(SCHEDULE_HTTP_TIMEOUT_SECS),
+            fetch_bea_macro_events(start_date, end_date),
+        );
+        let (official_res, bea_res, fred_api_res) =
+            if crate::finance::credentials::has_fred_api_configuration_hint() {
+                let fred_api_fut = timeout(
+                    TokioDuration::from_secs(SCHEDULE_HTTP_TIMEOUT_SECS),
+                    fetch_fred_macro_api_events(client, start_date, end_date, macro_profile.clone()),
+                );
+                let (official_res, bea_res, fred_api_res) =
+                    tokio::join!(official_fut, bea_fut, fred_api_fut);
+                (official_res, bea_res, Some(fred_api_res))
+            } else {
+                let (official_res, bea_res) = tokio::join!(official_fut, bea_fut);
+                (official_res, bea_res, None)
+            };
+
+        match official_res {
+            Ok(Ok((rows, days, official_warn))) => {
+                m_events.extend(rows);
+                m_days = days;
+                warn.extend(official_warn);
+            }
+            Ok(Err(e)) => warn.push(format!("official macro supplemental failed: {e}")),
+            Err(_) => warn.push("official macro supplemental: timed out".to_string()),
+        }
+
+        // BEA events first (reliable, exact times).
+        match bea_res {
+            Ok(Ok(rows)) => merge_macro_events(&mut m_events, rows),
+            Ok(Err(e)) => warn.push(format!("bea calendar: {e}")),
+            Err(_) => warn.push("bea calendar: timed out".to_string()),
+        }
+
+        if let Some(fred_api_res) = fred_api_res {
+            match fred_api_res {
+                Ok(Ok(rows)) => merge_macro_events(&mut m_events, rows),
+                Ok(Err(e)) => warn.push(format!("fred api supplemental calendar: {e}")),
+                Err(_) => warn.push("fred api supplemental calendar: timed out".to_string()),
             }
         }
         (m_events, m_days, warn)
     };
 
-    let ((earn, earn_warn), (m_events, m_days, macro_warn)) =
+    let ((earnings, earn_warn), (macro_events, macro_days, macro_warn)) =
         tokio::join!(earnings_fut, macro_fut);
-    earnings = earn;
-    macro_events = m_events;
-    macro_days = m_days;
     warnings.extend(earn_warn);
     warnings.extend(macro_warn);
 

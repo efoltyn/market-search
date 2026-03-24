@@ -1,23 +1,68 @@
+fn is_major_us_release_id(release_id: Option<u32>) -> bool {
+    matches!(
+        release_id,
+        Some(
+            10 |   // Consumer Price Index
+            46 |   // Producer Price Index
+            50 |   // Employment Situation (NFP)
+            51 |   // International Trade in Goods and Services
+            53 |   // Gross Domestic Product
+            54 |   // Personal Income and Outlays (PCE)
+            101 |  // FOMC Press Release
+            180 |  // Unemployment Insurance Weekly Claims Report
+            192    // Job Openings and Labor Turnover Survey
+        )
+    )
+}
+
+/// Returns true if the given date is an FOMC rate decision day (last day of
+/// a scheduled 2-day meeting). FRED lists "FOMC Press Release" on many dates
+/// for data refreshes — this filter keeps only actual meeting decisions.
+/// Source: federalreserve.gov/monetarypolicy/fomccalendars.htm
+fn is_fomc_decision_day(d: chrono::NaiveDate) -> bool {
+    use chrono::NaiveDate;
+    static FOMC_DECISION_DAYS: &[(i32, u32, u32)] = &[
+        // Official Federal Reserve meeting schedules published through January 2028.
+        // 2025
+        (2025, 1, 29), (2025, 3, 19), (2025, 5, 7), (2025, 6, 18),
+        (2025, 7, 30), (2025, 9, 17), (2025, 10, 29), (2025, 12, 10),
+        // 2026
+        (2026, 1, 28), (2026, 3, 18), (2026, 4, 29), (2026, 6, 17),
+        (2026, 7, 29), (2026, 9, 16), (2026, 10, 28), (2026, 12, 9),
+        // 2027
+        (2027, 1, 27), (2027, 3, 17), (2027, 4, 28), (2027, 6, 9),
+        (2027, 7, 28), (2027, 9, 15), (2027, 10, 27), (2027, 12, 8),
+        // 2028 (only January date is currently published via the 2027 schedule release)
+        (2028, 1, 26),
+    ];
+    FOMC_DECISION_DAYS.iter().any(|(y, m, day)| {
+        NaiveDate::from_ymd_opt(*y, *m, *day).map_or(false, |meeting| meeting == d)
+    })
+}
+
 fn is_major_us_macro_title(title: &str) -> bool {
     let t = title.to_ascii_lowercase();
     let include = [
         "consumer price index",
-        "cpi",
         "core pce",
         "personal consumption expenditures",
+        "personal income and outlays",
         "employment situation",
         "nonfarm payroll",
         "unemployment insurance weekly claims report",
-        "state unemployment insurance weekly claims report",
         "fomc",
         "federal open market committee",
-        "gdp",
         "gross domestic product",
+        "advance monthly sales for retail and food services",
         "retail sales",
+        "new residential construction",
+        "housing starts",
         "producer price index",
-        "ppi",
         "job openings",
         "jolts",
+        "job openings and labor turnover survey",
+        "international trade",
+        "corporate profits",
     ];
     let exclude = [
         "eurostat",
@@ -25,6 +70,18 @@ fn is_major_us_macro_title(title: &str) -> bool {
         "coinbase",
         "ice bofa",
         "international financial statistics",
+        "current median",
+        "median cpi",
+        "sticky",
+        "research consumer price index",
+        "consumer price index, australia",
+        "consumer price index, japan",
+        "monthly state retail sales",
+        "state retail sales",
+        "state unemployment insurance weekly claims report",
+        "median consumer price index",
+        "trimmed mean",
+        "cleveland fed",
     ];
     include.iter().any(|k| t.contains(k)) && !exclude.iter().any(|k| t.contains(k))
 }

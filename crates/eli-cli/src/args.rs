@@ -86,7 +86,67 @@ enum Command {
     },
 
     /// Start MCP (Model Context Protocol) server — exposes eli tools as native Claude Code tools via JSON-RPC stdio.
-    Mcp,
+    Mcp(McpArgs),
+
+    /// Log research picks for a report to track performance over time.
+    Picks {
+        #[command(subcommand)]
+        cmd: PicksCommand,
+    },
+
+    /// Start the local web monitor dashboard (reports + picks + daemons).
+    Serve(ServeArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum PicksCommand {
+    /// Record ticker/market picks at current prices for a given report.
+    Log(PicksLogArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct PicksLogArgs {
+    /// Path to the HTML report file (supports ~/).
+    #[arg(long)]
+    report: String,
+
+    /// Equity ticker(s) to track at current price (comma-separated or repeatable).
+    #[arg(long, value_delimiter = ',')]
+    ticker: Vec<String>,
+
+    /// Prediction market slug(s) to track at current probability (comma-separated or repeatable).
+    #[arg(long, value_delimiter = ',')]
+    market: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct McpArgs {
+    /// Run as HTTP server instead of stdio (MCP Streamable HTTP transport).
+    #[arg(long, default_value_t = false)]
+    http: bool,
+
+    /// Port for HTTP mode.
+    #[arg(long, default_value = "8484")]
+    port: u16,
+}
+
+#[derive(clap::Args, Debug)]
+struct ServeArgs {
+    /// Port to listen on.
+    #[arg(long, default_value = "3333")]
+    port: u16,
+
+    /// Directory containing HTML and MD reports.
+    #[arg(long, default_value = "~/Downloads/eli-code/eli_research/reports/html")]
+    reports_dir: String,
+
+    /// Sentinel state directory for subscriptions, packets, and daemon status.
+    #[arg(long)]
+    sentinel_dir: Option<PathBuf>,
+
+    /// Open browser after starting.
+    #[arg(long, default_value_t = false)]
+    open: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -105,20 +165,10 @@ enum FinanceCommand {
     Sec(FinanceFilingsArgs),
     /// Fetch news context for a specific ticker and date.
     News(FinanceNewsArgs),
-    /// Fetch key macro economic indicators (CPI, Unemployment, GDP, etc).
-    Macro(FinanceMacroArgs),
-    /// Fetch broad FX basket performance with USD-relative deltas and biggest move dates.
-    Forex(FinanceForexArgs),
     /// Fetch earnings and macro release schedules (no-auth public endpoints).
     Schedule(FinanceScheduleArgs),
     /// Aggregate implied Fed policy trajectory from local prediction-market cache.
     RatePath(FinanceRatePathArgs),
-    /// Fetch US treasury yield curve with key spreads.
-    YieldCurve(FinanceYieldCurveArgs),
-    /// Run a preset multi-tool macro dashboard.
-    Dashboard(FinanceDashboardArgs),
-    /// Latest spot prices from Pyth Hermes (REST).
-    Prices(FinancePricesArgs),
     /// Prediction market discovery + pricing (Kalshi default; falls back to Polymarket).
     Odds(FinanceOddsArgs),
     /// Listed options chains with IV/skew summaries (Yahoo Finance).
@@ -127,6 +177,33 @@ enum FinanceCommand {
     Sync(FinanceSyncArgs),
     /// Local paper trading sandbox using live Kalshi/Polymarket prices.
     Paper(FinancePaperArgs),
+    /// Interactive Brokers via local TWS / IB Gateway.
+    Ibkr(FinanceIbkrArgs),
+    /// Recent US Treasury auction results (bid-to-cover, tails, bidder breakdown).
+    Auctions(FinanceAuctionsArgs),
+    /// CFTC Commitment of Traders positioning (spec vs commercial, weekly).
+    Cot(FinanceCotArgs),
+    /// Futures term structure (forward curve) for commodities.
+    Curve(FinanceCurveArgs),
+    /// NY Fed Markets: overnight rates (SOFR/EFFR), reverse repo, SOMA holdings, dealer positions.
+    Nyfed(FinanceNyfedArgs),
+    /// CBOE volatility indices / term structure: VIX, VVIX, OVX, GVZ, SKEW.
+    #[command(name = "volatility", visible_alias = "volsurface")]
+    Volsurface(FinanceVolsurfaceArgs),
+    /// OFR Financial Stress Index: composite + credit/equity/funding/vol decomposition.
+    Stress(FinanceStressArgs),
+    /// Treasury fiscal data: national debt, daily statement, average interest rates.
+    Fiscal(FinanceFiscalArgs),
+    /// ECB Statistical Data Warehouse: EUR/USD, Euro STR, M3, EURIBOR, yield curve, balance sheet.
+    Ecb(FinanceEcbArgs),
+    /// EIA: US petroleum inventories (crude, gasoline, distillate), natural gas storage.
+    Eia(FinanceEiaArgs),
+    /// BIS: global central bank policy rates, total assets, credit-to-GDP gaps, property prices.
+    Bis(FinanceBisArgs),
+    /// BOJ: Bank of Japan monetary base, balance sheet, TANKAN, call rate, money stock.
+    Boj(FinanceBojArgs),
+    /// BOE: Bank of England Bank Rate, SONIA, gilt yields, M4, GBP FX rates.
+    Boe(FinanceBoeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -143,6 +220,8 @@ enum WebCommand {
 
 #[derive(Subcommand, Debug)]
 enum AgentCommand {
+    /// Generate a market intelligence report (JSON + HTML) using Eli tools and optional model synthesis.
+    Report(AgentReportArgs),
     /// Run a single Eli worker from a natural-language task.
     Run(AgentRunArgs),
     /// Run many Eli workers in parallel from a task template and vars file.
@@ -279,11 +358,32 @@ enum FinancePaperOrderActionArg {
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum FinanceIbkrCommandArg {
+    Snapshot,
+    Timeseries,
+    AccountSummary,
+    Positions,
+    Portfolio,
+    OpenOrders,
+    PlaceOrder,
+    CancelOrder,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
 enum SentinelSeverityArg {
     Low,
     Medium,
     High,
     Critical,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum SentinelSpawnTargetArg {
+    Default,
+    Codex,
+    Claude,
+    Gemini,
+    Both,
 }
 
 #[derive(clap::Args, Debug)]
@@ -328,13 +428,35 @@ struct SentinelSubscribeArgs {
     #[command(flatten)]
     paths: SentinelPathArgs,
 
-    /// Human-readable subscription name.
+    /// Human-readable subscription name (internal slug).
     #[arg(long)]
     name: String,
 
-    /// Trigger expression, e.g. \"pyth_wti > 80 && poly_hormuz_yes > 0.50\".
+    /// Human-readable prediction statement shown in the UI.
+    /// Example: "Gold will reach 5200 before Friday close"
     #[arg(long)]
-    expr: String,
+    title: Option<String>,
+
+    /// Title of the report that authored this prediction.
+    #[arg(long = "source-report")]
+    source_report_title: Option<String>,
+
+    /// Date of the source report (ISO format, e.g. 2026-03-06).
+    #[arg(long = "source-date")]
+    source_report_date: Option<String>,
+
+    /// Filename of the source report (relative to reports_dir) for opening in the UI.
+    #[arg(long = "source-file")]
+    source_report_file: Option<String>,
+
+    /// Key evidence snippet or quote from the source report justifying this prediction.
+    #[arg(long = "source-evidence")]
+    source_evidence: Option<String>,
+
+    /// Trigger expression, e.g. \"pyth_wti > 80 && poly_hormuz_yes > 0.50\".
+    /// Optional when --fire-at is set (defaults to "true" for pure checkpoint daemons).
+    #[arg(long)]
+    expr: Option<String>,
 
     /// Optional variable mapping (repeatable): var=provider:query
     #[arg(long = "var")]
@@ -359,6 +481,43 @@ struct SentinelSubscribeArgs {
     /// Start enabled (default true).
     #[arg(long, default_value_t = true)]
     enabled: bool,
+
+    /// Spawn headless AI agent (claude/codex) when this subscription triggers.
+    #[arg(long = "spawn-agent", default_value_t = false)]
+    spawn_agent: bool,
+
+    /// Which headless writer(s) should fire when this subscription triggers.
+    #[arg(long = "spawn-target", value_enum, default_value = "default")]
+    spawn_target: SentinelSpawnTargetArg,
+
+    /// Legacy spawn cooldown field retained for compatibility with existing subscriptions.
+    /// Spawn routing now uses rolling per-hour budgets instead.
+    #[arg(long = "spawn-cooldown-secs", default_value_t = 14400, hide = true)]
+    spawn_cooldown_secs: u64,
+
+    /// Human-readable prediction thesis this daemon encodes.
+    /// When set, fires on HIT (condition met) OR MISS (deadline elapsed without condition met).
+    #[arg(long = "prediction")]
+    prediction: Option<String>,
+
+    /// Which variable name in --expr to track as the prediction target (e.g., "pyth_wti").
+    #[arg(long = "target-var")]
+    target_var: Option<String>,
+
+    /// Predicted numeric target for target-var (e.g., 90.0).
+    #[arg(long = "target-value")]
+    target_value: Option<f64>,
+
+    /// Prediction deadline in RFC3339 format (e.g., 2026-04-01T00:00:00Z).
+    /// Fires MISS if condition not met by this time.
+    #[arg(long = "deadline")]
+    deadline: Option<String>,
+
+    /// Scheduled fire time in RFC3339 format (e.g., 2026-03-12T16:03:00Z).
+    /// Daemon fires ONCE at this exact time. Expr is evaluated at that moment for HIT/MISS.
+    /// Omit --expr for a pure checkpoint (always fires, no condition).
+    #[arg(long = "fire-at")]
+    fire_at: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -405,6 +564,73 @@ struct SentinelDaemonRunArgs {
     /// Daemon evaluation interval in seconds.
     #[arg(long = "interval-secs", default_value_t = 15)]
     interval_secs: u64,
+}
+
+#[derive(clap::Args, Debug)]
+struct AgentReportArgs {
+    /// Report objective/prompt. Defaults to Eli three-pillar research framework.
+    #[arg(long)]
+    prompt: Option<String>,
+
+    /// Comma-separated market tickers for snapshot/timeseries.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "SPY,QQQ,IWM,DIA,^VIX,BTC-USD,ETH-USD,SOL-USD,DX-Y.NYB,GC=F,CL=F"
+    )]
+    tickers: Vec<String>,
+
+    /// Historical lookback span for timeseries (e.g. 14d, 30d, 3mo).
+    #[arg(long, default_value = "14d")]
+    lookback: String,
+
+    /// Timeseries granularity (e.g. 15min, 1h, 1d).
+    #[arg(long, default_value = "1h")]
+    granularity: String,
+
+    /// Lock clock-sensitive tools to N minutes before report start.
+    #[arg(long = "lock-minutes", conflicts_with = "as_of")]
+    lock_minutes: Option<u64>,
+
+    /// Explicit report anchor time (RFC3339 or YYYY-MM-DD).
+    #[arg(long = "as-of", conflicts_with = "lock_minutes")]
+    as_of: Option<String>,
+
+    /// Comma-separated odds search queries.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "recession,fed,inflation,iran,oil,china,taiwan"
+    )]
+    odds_queries: Vec<String>,
+
+    /// Number of top markets per odds query.
+    #[arg(long, default_value_t = 8)]
+    top: usize,
+
+    /// Comma-separated web queries for narrative context.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "stock market today,treasury yields today,fed policy outlook,oil geopolitical risk"
+    )]
+    web_queries: Vec<String>,
+
+    /// Max runtime budget per command invocation (milliseconds).
+    #[arg(long = "max-ms", default_value_t = 45000)]
+    max_ms: u64,
+
+    /// Comma-separated fallback models for synthesis worker.
+    #[arg(long = "fallback-models", value_delimiter = ',')]
+    fallback_models: Vec<String>,
+
+    /// Optional explicit HTML output path.
+    #[arg(long = "html-out")]
+    html_out: Option<PathBuf>,
+
+    /// Output JSON path for the report envelope.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -767,86 +993,6 @@ struct WebExtractArgs {
 }
 
 #[derive(clap::Args, Debug)]
-pub struct FinanceMacroArgs {
-    /// Time range for calculating changes (e.g. 1y).
-    #[arg(long, default_value = "1y")]
-    pub range: String,
-    /// Optional historical comparison date (YYYY-MM-DD).
-    #[arg(long = "compare-to")]
-    pub compare_to: Option<String>,
-    /// Output format (json only).
-    #[arg(long, default_value = "json")]
-    pub format: String,
-    /// Optional policy file override.
-    #[arg(long = "policy-file")]
-    pub policy_file: Option<PathBuf>,
-    /// Policy mode: observe | assist | enforce.
-    #[arg(long = "policy-mode", default_value = "observe")]
-    pub policy_mode: String,
-    /// Output file path.
-    #[arg(short, long)]
-    pub out: Option<PathBuf>,
-}
-
-#[derive(clap::Args, Debug)]
-pub struct FinanceForexArgs {
-    /// Time range for FX performance (e.g. 1y, 6mo).
-    #[arg(long, default_value = "1y")]
-    pub range: String,
-    /// Candle granularity (e.g. 1d, 4h).
-    #[arg(long, default_value = "1d")]
-    pub granularity: String,
-    /// Optional explicit Yahoo FX tickers (repeatable or comma-separated), e.g. EURUSD=X.
-    #[arg(long = "pairs", value_delimiter = ',')]
-    pub pairs: Vec<String>,
-    /// Optional currency filter (comma-separated), e.g. CAD,JPY,EUR.
-    #[arg(long = "currencies", value_delimiter = ',')]
-    pub currencies: Vec<String>,
-    /// Optional country filter (comma-separated), e.g. US,CA,JP,GB,EU.
-    #[arg(long = "countries", value_delimiter = ',')]
-    pub countries: Vec<String>,
-    /// Optional preset groups (comma-separated): majors,g10,em,europe,americas,asia,commodity.
-    #[arg(long = "groups", value_delimiter = ',')]
-    pub groups: Vec<String>,
-    /// Include selected EM FX pairs in the default basket.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    pub include_em: bool,
-    /// Optional as-of date/time (YYYY-MM-DD or RFC3339).
-    #[arg(long = "as-of")]
-    pub as_of: Option<String>,
-    /// Optional event timestamp for pre/post analysis (YYYY-MM-DD or RFC3339).
-    #[arg(long = "event-at")]
-    pub event_at: Option<String>,
-    /// Optional pre/post window around --event-at (e.g. 6h,12h,1d,3d).
-    #[arg(long = "event-window")]
-    pub event_window: Option<String>,
-    /// Optional historical comparison anchors (comma-separated YYYY-MM-DD or RFC3339).
-    #[arg(long = "compare-as-of", value_delimiter = ',')]
-    pub compare_as_of: Vec<String>,
-    /// Optional horizon windows for USD deltas (comma-separated), e.g. 1d,1w,1mo,3mo,1y.
-    #[arg(long = "horizons", value_delimiter = ',')]
-    pub horizons: Vec<String>,
-    /// Optional max number of resolved pairs after filtering.
-    #[arg(long = "max-pairs")]
-    pub max_pairs: Option<usize>,
-    /// Include the latest N close points per pair (compact timeseries context).
-    #[arg(long = "recent-points", default_value_t = 0)]
-    pub recent_points: usize,
-    /// Number of largest daily USD-impact moves to include.
-    #[arg(long, default_value_t = 12)]
-    pub top: usize,
-    /// Optional cache directory for timeseries fetches.
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
-    /// Output format (json only).
-    #[arg(long, default_value = "json")]
-    pub format: String,
-    /// Output file path.
-    #[arg(short, long)]
-    pub out: Option<PathBuf>,
-}
-
-#[derive(clap::Args, Debug)]
 pub struct FinanceScheduleArgs {
     /// Schedule kind: earnings | macro | all.
     #[arg(long, default_value = "all")]
@@ -866,6 +1012,12 @@ pub struct FinanceScheduleArgs {
     /// Macro-only: keep only major US releases (CPI, PCE, GDP, jobs, FOMC, claims).
     #[arg(long, default_value_t = false)]
     pub major: bool,
+    /// Minimum market cap for earnings (e.g. 10B, 500M, 1T).
+    #[arg(long = "min-cap")]
+    pub min_cap: Option<String>,
+    /// Filter earnings by report time: pre-market | after-hours.
+    #[arg(long)]
+    pub time: Option<String>,
     /// Macro filtering profile: broad | market | major.
     #[arg(long = "macro-profile", default_value = "market")]
     pub macro_profile: String,
@@ -894,13 +1046,13 @@ pub struct FinanceRatePathArgs {
 }
 
 #[derive(clap::Args, Debug)]
-pub struct FinanceYieldCurveArgs {
-    /// Optional comparison windows (comma-separated): 3mo,1y.
-    #[arg(long, value_delimiter = ',')]
-    pub compare: Vec<String>,
-    /// Require all curve tenors (1mo..30y); fail if any are missing.
-    #[arg(long, default_value_t = false)]
-    pub strict: bool,
+pub struct FinanceAuctionsArgs {
+    /// Filter by security type: bill, note, bond, tips, frn, or all.
+    #[arg(long, default_value = "all")]
+    pub security_type: String,
+    /// Number of recent auctions to return.
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
     /// Output format (json only).
     #[arg(long, default_value = "json")]
     pub format: String,
@@ -910,17 +1062,189 @@ pub struct FinanceYieldCurveArgs {
 }
 
 #[derive(clap::Args, Debug)]
-pub struct FinanceDashboardArgs {
-    /// Dashboard preset (v1 supports: recession).
+pub struct FinanceCotArgs {
+    /// Search query to filter by contract name (e.g. "gold", "crude oil", "10y note").
     #[arg(long)]
-    pub preset: String,
-    /// Optional per-section timeout budget in milliseconds.
-    #[arg(long = "max-ms")]
-    pub max_ms: Option<u64>,
+    pub query: Option<String>,
+    /// Number of weeks of data to fetch. Default 12.
+    #[arg(long, default_value_t = 12)]
+    pub weeks: usize,
+    /// Report type: auto (detect from query), disaggregated (commodities), or financial (rates/FX/equity).
+    #[arg(long, default_value = "auto")]
+    pub report: String,
     /// Output format (json only).
     #[arg(long, default_value = "json")]
     pub format: String,
     /// Output file path.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceCurveArgs {
+    /// Commodity to chart (e.g. oil, gold, natgas, silver, copper). Use --list to see all.
+    #[arg(long)]
+    pub commodity: Option<String>,
+    /// Number of forward months to include (default 12, max 24).
+    #[arg(long, default_value_t = 12)]
+    pub months: usize,
+    /// List supported commodities.
+    #[arg(long, default_value_t = false)]
+    pub list: bool,
+    /// Output file path.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceNyfedArgs {
+    /// Endpoint: rates | rrp | soma | dealers
+    #[arg(long, default_value = "rates")]
+    pub kind: String,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceVolsurfaceArgs {
+    /// Comma-separated CBOE index symbols (default: all 9). Options: VIX,VIX9D,VIX3M,VIX6M,VIX1Y,VVIX,OVX,GVZ,SKEW
+    #[arg(long)]
+    pub symbols: Option<String>,
+    /// Number of historical trading days (default: latest only)
+    #[arg(long)]
+    pub history: Option<usize>,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceStressArgs {
+    /// Days of history (default: 30)
+    #[arg(long, default_value_t = 30)]
+    pub range: usize,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceFiscalArgs {
+    /// Endpoint: debt | statement | interest
+    #[arg(long, default_value = "debt")]
+    pub kind: String,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceEcbArgs {
+    /// Preset: eurusd | fx_majors | estr | m3 | euribor | yield_curve | balance_sheet
+    #[arg(long)]
+    pub preset: Option<String>,
+    /// SDMX dataset (e.g. EXR, BSI, FM, EST, YC). Use with --key.
+    #[arg(long)]
+    pub dataset: Option<String>,
+    /// SDMX dimension key (e.g. D.USD.EUR.SP00.A). Use with --dataset.
+    #[arg(long)]
+    pub key: Option<String>,
+    /// Start period (YYYY-MM-DD or YYYY-MM or YYYY).
+    #[arg(long, default_value = "2025-01-01")]
+    pub start: String,
+    /// End period.
+    #[arg(long)]
+    pub end: Option<String>,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceEiaArgs {
+    /// Preset: crude | gasoline | distillate | all | nat_gas
+    #[arg(long)]
+    pub preset: Option<String>,
+    /// Custom API route (e.g. petroleum/stoc/wstk/data/).
+    #[arg(long)]
+    pub route: Option<String>,
+    /// Start date (YYYY-MM-DD).
+    #[arg(long)]
+    pub start: Option<String>,
+    /// Max observations to return (default 52 = ~1 year weekly).
+    #[arg(long, default_value = "52")]
+    pub length: usize,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceBisArgs {
+    /// Preset: policy_rates | assets | credit_gap | property | eer
+    #[arg(long)]
+    pub preset: Option<String>,
+    /// SDMX dataset (e.g. WS_CBPOL). Use with --key.
+    #[arg(long)]
+    pub dataset: Option<String>,
+    /// SDMX key (e.g. M.US+XM+JP+GB). Use with --dataset.
+    #[arg(long)]
+    pub key: Option<String>,
+    /// Country codes (comma-separated, e.g. US,XM,JP,GB).
+    #[arg(long)]
+    pub countries: Option<String>,
+    /// Start period (YYYY-MM).
+    #[arg(long, default_value = "2020-01")]
+    pub start: String,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceBojArgs {
+    /// Preset: policy_rate | call_rate | monetary_base | balance_sheet | money_stock | tankan | fx
+    #[arg(long)]
+    pub preset: Option<String>,
+    /// BOJ database name (e.g. IR01, FM01, BS01, CO). Use with --codes.
+    #[arg(long)]
+    pub db: Option<String>,
+    /// BOJ series codes (comma-separated).
+    #[arg(long)]
+    pub codes: Option<String>,
+    /// Start date (YYYYMM format for BOJ).
+    #[arg(long, default_value = "202401")]
+    pub start: String,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FinanceBoeArgs {
+    /// Preset: bank_rate | sonia | gilts | m4 | fx | all
+    #[arg(long)]
+    pub preset: Option<String>,
+    /// Series codes (comma-separated, e.g. IUDBEDR,IUDSOIA).
+    #[arg(long)]
+    pub codes: Option<String>,
+    /// Start date (DD/Mon/YYYY format, e.g. 01/Jan/2025).
+    #[arg(long, default_value = "01/Jan/2025")]
+    pub start: String,
+    /// End date (DD/Mon/YYYY or "now").
+    #[arg(long, default_value = "now")]
+    pub end: String,
+    #[arg(long, default_value = "json")]
+    pub format: String,
     #[arg(long)]
     pub out: Option<PathBuf>,
 }
@@ -958,13 +1282,37 @@ struct FinanceSnapshotArgs {
     #[arg(long)]
     tickers_file: Option<PathBuf>,
 
-    /// Data provider (mock | yahoo).
+    /// Data provider (mock | yahoo | ibkr).
     #[arg(long, default_value = "yahoo")]
     provider: String,
+
+    /// Optional IBKR account code (e.g. U1234567). Used when --provider ibkr.
+    #[arg(long)]
+    ibkr_account: Option<String>,
+
+    /// Optional IBKR host override.
+    #[arg(long)]
+    ibkr_host: Option<String>,
+
+    /// Optional IBKR port override.
+    #[arg(long)]
+    ibkr_port: Option<u16>,
+
+    /// Optional IBKR client id override.
+    #[arg(long)]
+    ibkr_client_id: Option<i32>,
+
+    /// Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.
+    #[arg(long)]
+    ibkr_market_data_type: Option<i32>,
 
     /// Optional trailing return windows (comma-separated): 1mo,3mo,6mo,1y.
     #[arg(long, value_delimiter = ',')]
     returns: Vec<String>,
+
+    /// End timestamp for the snapshot reconstruction (RFC3339 or YYYY-MM-DD).
+    #[arg(long)]
+    as_of: Option<String>,
 
     /// Output format (currently: json).
     #[arg(long, default_value = "json")]
@@ -993,8 +1341,36 @@ struct FinanceFundamentalsArgs {
 #[derive(clap::Args, Debug)]
 struct FinanceSearchArgs {
     /// Search query (e.g. "Apple" or "Inflation").
+    #[arg(long, required = false)]
+    query: Option<String>,
+
+    /// Search query (positional alternative to --query).
+    #[arg(index = 1, required = false)]
+    query_positional: Option<String>,
+
+    /// Data provider (yahoo | ibkr).
+    #[arg(long, default_value = "yahoo")]
+    provider: String,
+
+    /// Optional IBKR account code (e.g. U1234567). Used when --provider ibkr.
     #[arg(long)]
-    query: String,
+    ibkr_account: Option<String>,
+
+    /// Optional IBKR host override.
+    #[arg(long)]
+    ibkr_host: Option<String>,
+
+    /// Optional IBKR port override.
+    #[arg(long)]
+    ibkr_port: Option<u16>,
+
+    /// Optional IBKR client id override.
+    #[arg(long)]
+    ibkr_client_id: Option<i32>,
+
+    /// Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.
+    #[arg(long)]
+    ibkr_market_data_type: Option<i32>,
 
     /// Output format (currently: json).
     #[arg(long, default_value = "json")]
@@ -1007,33 +1383,6 @@ struct FinanceSearchArgs {
     /// Policy mode: observe | assist | enforce.
     #[arg(long = "policy-mode", default_value = "observe")]
     policy_mode: String,
-
-    /// Write full JSON output to a file instead of stdout.
-    #[arg(long)]
-    out: Option<PathBuf>,
-}
-
-#[derive(clap::Args, Debug)]
-struct FinancePricesArgs {
-    /// Discover price feeds by query (e.g. "pepe").
-    #[arg(long)]
-    query: Option<String>,
-
-    /// Asset type filter (e.g. crypto, equity, fx, metal, rates).
-    #[arg(long)]
-    asset_type: Option<String>,
-
-    /// Explicit Pyth price feed IDs (repeatable or comma-separated).
-    #[arg(long, value_delimiter = ',')]
-    ids: Vec<String>,
-
-    /// Auto-select the top ranked candidate when query matching is ambiguous.
-    #[arg(long, default_value_t = false)]
-    auto_select: bool,
-
-    /// Output format (currently: json).
-    #[arg(long, default_value = "json")]
-    format: String,
 
     /// Write full JSON output to a file instead of stdout.
     #[arg(long)]
@@ -1145,6 +1494,10 @@ struct FinanceOddsArgs {
     #[arg(long, default_value_t = false)]
     live: bool,
 
+    /// Include mention/speech-prediction markets (filtered by default).
+    #[arg(long, default_value_t = false)]
+    include_mentions: bool,
+
     /// Include orderbook depth (heavier call; Polymarket orderbook supported).
     #[arg(long)]
     orderbook: bool,
@@ -1184,9 +1537,13 @@ struct FinanceOptionsArgs {
     #[arg(long, visible_alias = "tickers")]
     ticker: String,
 
-    /// Expiration date (YYYY-MM-DD). If omitted, uses the first available expiry.
+    /// Expiration date (YYYY-MM-DD). If omitted, summary mode uses the first usable future expiry.
     #[arg(long)]
     expiry: Option<String>,
+
+    /// Target days to expiry. If set and --expiry is omitted, picks the closest listed expiry.
+    #[arg(long = "target-dte")]
+    target_dte: Option<i64>,
 
     /// Filter: calls | puts | both (default: both).
     #[arg(long = "type", value_name = "calls|puts|both")]
@@ -1204,6 +1561,35 @@ struct FinanceOptionsArgs {
     #[arg(long)]
     expirations: bool,
 
+    /// Fetch ALL expirations and compute cross-expiry analytics.
+    /// Dumps full chain to --out file, prints term structure summary to stdout.
+    #[arg(long)]
+    all: bool,
+
+    /// Data provider (yahoo | ibkr).
+    #[arg(long, default_value = "yahoo")]
+    provider: String,
+
+    /// Optional IBKR account code (e.g. U1234567). Used when --provider ibkr.
+    #[arg(long)]
+    ibkr_account: Option<String>,
+
+    /// Optional IBKR host override.
+    #[arg(long)]
+    ibkr_host: Option<String>,
+
+    /// Optional IBKR port override.
+    #[arg(long)]
+    ibkr_port: Option<u16>,
+
+    /// Optional IBKR client id override.
+    #[arg(long)]
+    ibkr_client_id: Option<i32>,
+
+    /// Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.
+    #[arg(long)]
+    ibkr_market_data_type: Option<i32>,
+
     /// Output format (currently: json).
     #[arg(long, default_value = "json")]
     format: String,
@@ -1219,52 +1605,52 @@ struct FinanceSyncArgs {
     #[arg(long, value_delimiter = ',')]
     sources: Vec<String>,
 
-    /// Optional page cap per source. Omit for full exhaustion.
-    #[arg(long)]
+    /// Debug only: frontier-sample page cap per source. Hides coverage and is not a normal sync control.
+    #[arg(long, hide = true)]
     max_pages: Option<usize>,
 
     /// Fail if pagination/coverage checks indicate incomplete source exhaustion.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     strict: bool,
 
     /// Include sports markets/events in sync output (default: false).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     include_sports: bool,
 
     /// Include Kalshi historical markets (archived/settled tier). Default: false.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     include_historical: bool,
 
     /// Fast refresh from Kalshi websocket ticker stream using cached baseline (no full re-pagination).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     stream_refresh: bool,
 
     /// Breadth heartbeat in hours for stream refresh mode. If cached baseline is older, force strict REST anchor sync (default: 6).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     refresh_heartbeat_hours: Option<u64>,
 
     /// WebSocket listen window in seconds for stream refresh mode (default: 300).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     stream_refresh_timeout_secs: Option<u64>,
 
     /// Cache directory for CSV files.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     cache_dir: Option<PathBuf>,
 
     /// Output format (currently: json).
-    #[arg(long, default_value = "json")]
+    #[arg(long, default_value = "json", hide = true)]
     format: String,
 
     /// Emit full verbose payload on stdout (default is compact/token-efficient).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     full: bool,
 
     /// Optional policy file override.
-    #[arg(long = "policy-file")]
+    #[arg(long = "policy-file", hide = true)]
     policy_file: Option<PathBuf>,
 
     /// Policy mode: observe | assist | enforce.
-    #[arg(long = "policy-mode", default_value = "observe")]
+    #[arg(long = "policy-mode", default_value = "observe", hide = true)]
     policy_mode: String,
 
     /// Write full JSON output to a file instead of stdout.
@@ -1368,6 +1754,11 @@ struct FinanceFilingsArgs {
 
 #[derive(clap::Args, Debug)]
 struct FinanceTimeseriesArgs {
+    /// Preset ticker group (macro, forex_majors, yield_curve, liquidity, crypto).
+    /// Expands to predefined tickers with default range/granularity. User flags override defaults.
+    #[arg(long)]
+    preset: Option<String>,
+
     /// Tickers to fetch (repeatable or comma-separated).
     #[arg(long, visible_alias = "ticker", value_delimiter = ',')]
     tickers: Vec<String>,
@@ -1396,11 +1787,31 @@ struct FinanceTimeseriesArgs {
     #[arg(long)]
     as_of: Option<String>,
 
-    /// Data provider (auto | mock | yahoo | fred). "auto" tries Yahoo first, then FRED for failures.
+    /// Data provider (auto | mock | yahoo | fred | ibkr). "auto" tries Yahoo first, then FRED for failures.
     #[arg(long, default_value = "auto")]
     provider: String,
 
-    /// Optional prediction market provider to pair with timeseries (kalshi | polymarket).
+    /// Optional IBKR account code (e.g. U1234567). Used when --provider ibkr.
+    #[arg(long)]
+    ibkr_account: Option<String>,
+
+    /// Optional IBKR host override.
+    #[arg(long)]
+    ibkr_host: Option<String>,
+
+    /// Optional IBKR port override.
+    #[arg(long)]
+    ibkr_port: Option<u16>,
+
+    /// Optional IBKR client id override.
+    #[arg(long)]
+    ibkr_client_id: Option<i32>,
+
+    /// Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.
+    #[arg(long)]
+    ibkr_market_data_type: Option<i32>,
+
+    /// Optional explicit prediction market provider to include as a timeseries series (kalshi | polymarket).
     #[arg(long)]
     odds_provider: Option<String>,
 
@@ -1408,7 +1819,7 @@ struct FinanceTimeseriesArgs {
     #[arg(long)]
     odds_market: Option<String>,
 
-    /// Prediction market side to pair (yes | no). Defaults to yes.
+    /// Prediction market side to include for --odds-market (yes | no). Defaults to yes.
     #[arg(long, default_value = "yes")]
     odds_side: String,
 
@@ -1421,6 +1832,129 @@ struct FinanceTimeseriesArgs {
     cache_dir: Option<PathBuf>,
 
     /// Output format (currently: json).
+    #[arg(long, default_value = "json")]
+    format: String,
+
+    /// Write full JSON output to a file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct FinanceIbkrArgs {
+    /// IBKR command surface.
+    #[arg(long, value_enum)]
+    command: FinanceIbkrCommandArg,
+
+    /// Optional IBKR account code (e.g. U1234567).
+    #[arg(long)]
+    account: Option<String>,
+
+    /// Optional IBKR host override.
+    #[arg(long)]
+    host: Option<String>,
+
+    /// Optional IBKR port override.
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// Optional IBKR client id override.
+    #[arg(long)]
+    client_id: Option<i32>,
+
+    /// Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.
+    #[arg(long)]
+    market_data_type: Option<i32>,
+
+    /// Optional timeout in seconds for the bridge request.
+    #[arg(long)]
+    timeout_secs: Option<u64>,
+
+    /// Tickers for snapshot / timeseries commands (repeatable or comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    tickers: Vec<String>,
+
+    /// Range for timeseries requests (e.g. 1d, 1mo, 1y).
+    #[arg(long, default_value = "1mo")]
+    range: String,
+
+    /// Granularity for timeseries requests (e.g. 1min, 5min, 1h, 1d).
+    #[arg(long, default_value = "1day")]
+    granularity: String,
+
+    /// Contract symbol for order placement.
+    #[arg(long)]
+    symbol: Option<String>,
+
+    /// Contract security type for orders (default: STK).
+    #[arg(long)]
+    sec_type: Option<String>,
+
+    /// Contract exchange (default: SMART).
+    #[arg(long)]
+    exchange: Option<String>,
+
+    /// Contract primary exchange.
+    #[arg(long)]
+    primary_exchange: Option<String>,
+
+    /// Contract currency (default: USD).
+    #[arg(long)]
+    currency: Option<String>,
+
+    /// Contract expiry / contract month (e.g. 20260320).
+    #[arg(long)]
+    expiry: Option<String>,
+
+    /// Contract strike price.
+    #[arg(long)]
+    strike: Option<f64>,
+
+    /// Contract right (C/P).
+    #[arg(long)]
+    right: Option<String>,
+
+    /// Contract multiplier.
+    #[arg(long)]
+    multiplier: Option<String>,
+
+    /// Trading class.
+    #[arg(long)]
+    trading_class: Option<String>,
+
+    /// Order side for place-order (BUY or SELL).
+    #[arg(long)]
+    side: Option<String>,
+
+    /// Order type for place-order (MKT, LMT, STP, STP LMT).
+    #[arg(long)]
+    order_type: Option<String>,
+
+    /// Quantity for place-order.
+    #[arg(long)]
+    quantity: Option<f64>,
+
+    /// Limit price for limit orders.
+    #[arg(long)]
+    limit_price: Option<f64>,
+
+    /// Stop price for stop orders.
+    #[arg(long)]
+    stop_price: Option<f64>,
+
+    /// Time in force (default: DAY).
+    #[arg(long)]
+    tif: Option<String>,
+
+    /// Order id for cancel-order.
+    #[arg(long)]
+    order_id: Option<i32>,
+
+    /// Optional account summary tag filter.
+    #[arg(long)]
+    tags: Option<String>,
+
+    /// Output format (json only).
     #[arg(long, default_value = "json")]
     format: String,
 

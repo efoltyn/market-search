@@ -60,6 +60,8 @@ pub struct ChatUi {
     // Stats
     pub total_tokens: u32,
     pub elapsed_secs: u64,
+    pub request_start: Option<Instant>,
+    pub last_request_tokens: u32,
     pub prompt_mode: PromptMode,
     pub queue_len: usize,
     pub show_tips: bool,
@@ -101,6 +103,8 @@ impl ChatUi {
             last_tool_summary: None,
             total_tokens: 0,
             elapsed_secs: 0,
+            request_start: None,
+            last_request_tokens: 0,
             prompt_mode: PromptMode::Auto,
             queue_len: 0,
             show_tips: true,
@@ -685,7 +689,7 @@ impl ChatUi {
         spans.push(Span::styled(
             format!(
                 "{}{} [{}] {}s · {} tokens{}",
-                spinner, phase, mode, self.elapsed_secs, self.total_tokens, queued
+                spinner, phase, mode, self.elapsed_secs, self.last_request_tokens, queued
             ),
             Style::default().fg(Color::DarkGray),
         ));

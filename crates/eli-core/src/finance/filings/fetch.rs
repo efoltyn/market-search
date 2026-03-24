@@ -10,6 +10,7 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
         return Err(Error::InvalidInput("ticker is required".to_string()));
     }
 
+    let used_default_forms = req.forms.iter().all(|s| s.trim().is_empty());
     let mut forms = req
         .forms
         .iter()
@@ -53,11 +54,29 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
     let mut out: Vec<FilingDoc> = Vec::new();
     let client = sec_client(req.user_agent.as_deref())?;
 
-    for i in 0..n {
+    let matching_indexes = |allowed_forms: &std::collections::HashSet<String>| {
+        (0..n)
+            .filter(|&i| {
+                recent
+                    .form
+                    .get(i)
+                    .map(|form| allowed_forms.contains(&form.to_ascii_uppercase()))
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut selected_indexes = matching_indexes(&forms_set);
+    if selected_indexes.is_empty() && used_default_forms {
+        let foreign_forms = ["6-K", "20-F", "40-F"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::HashSet<_>>();
+        selected_indexes = matching_indexes(&foreign_forms);
+    }
+
+    for i in selected_indexes {
         let form = recent.form.get(i).cloned().unwrap_or_default();
-        if !forms_set.contains(&form.to_ascii_uppercase()) {
-            continue;
-        }
         let accession = recent.accession_number.get(i).cloned().unwrap_or_default();
         let filing_date = recent.filing_date.get(i).cloned().unwrap_or_default();
         if accession.trim().is_empty() || filing_date.trim().is_empty() {

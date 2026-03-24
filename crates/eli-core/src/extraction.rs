@@ -37,10 +37,11 @@ impl Default for ExtractRequest {
 /// This is a local extraction that doesn't require an LLM call.
 /// For LLM-powered extraction, use a subagent.
 pub fn extract_facts(req: ExtractRequest) -> Result<ExtractResponse> {
-    let word_count = req.content.split_whitespace().count();
+    let cleaned = strip_front_matter(&req.content);
+    let word_count = cleaned.split_whitespace().count();
 
-    if is_docs_style_content(&req.content) {
-        let docs_bullets = extract_docs_style_facts(&req.content, req.bullets);
+    if is_docs_style_content(&cleaned) {
+        let docs_bullets = extract_docs_style_facts(&cleaned, req.bullets);
         if !docs_bullets.is_empty() {
             return Ok(ExtractResponse {
                 source: req.source,
@@ -54,7 +55,7 @@ pub fn extract_facts(req: ExtractRequest) -> Result<ExtractResponse> {
     }
 
     let focus_l = req.focus.as_ref().map(|f| f.to_ascii_lowercase());
-    let candidates = candidate_segments(&req.content);
+    let candidates = candidate_segments(&cleaned);
     let mut scored: Vec<(usize, String)> = candidates
         .into_iter()
         .map(|segment| {
@@ -78,6 +79,18 @@ pub fn extract_facts(req: ExtractRequest) -> Result<ExtractResponse> {
         bullets.push(truncate_segment(&segment, 220));
         if bullets.len() >= req.bullets {
             break;
+        }
+    }
+    if bullets.is_empty() {
+        for sentence in cleaned
+            .split(|c| c == '.' || c == '!' || c == '?' || c == '\n')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            bullets.push(truncate_segment(sentence, 220));
+            if bullets.len() >= req.bullets.max(1) {
+                break;
+            }
         }
     }
 
@@ -107,6 +120,9 @@ fn candidate_segments(content: &str) -> Vec<String> {
         if trimmed.len() < 16 {
             continue;
         }
+        if is_yaml_key_value(trimmed) {
+            continue;
+        }
         if trimmed.chars().filter(|c| c.is_alphanumeric()).count() < 10 {
             continue;
         }
@@ -130,7 +146,7 @@ fn candidate_segments(content: &str) -> Vec<String> {
 }
 
 fn score_segment(segment: &str, focus: Option<&str>) -> usize {
-    let mut score = 0usize;
+    let mut score = 1usize;
     let lower = segment.to_ascii_lowercase();
 
     if segment.chars().any(|c| c.is_ascii_digit()) {
@@ -185,6 +201,30 @@ fn score_segment(segment: &str, focus: Option<&str>) -> usize {
     }
 
     score
+}
+
+fn strip_front_matter(content: &str) -> String {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---\n") {
+        return content.to_string();
+    }
+    let after = &trimmed[4..];
+    if let Some(end) = after.find("\n---\n") {
+        return after[end + 5..].to_string();
+    }
+    content.to_string()
+}
+
+fn is_yaml_key_value(line: &str) -> bool {
+    let Some((key, value)) = line.split_once(':') else {
+        return false;
+    };
+    !key.trim().is_empty()
+        && !value.trim().is_empty()
+        && key
+            .trim()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn normalize_dedupe_key(segment: &str) -> String {

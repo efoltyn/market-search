@@ -1,3 +1,20 @@
+fn build_search_ibkr_connection_config(
+    account: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    client_id: Option<i32>,
+    market_data_type: Option<i32>,
+) -> eli_core::finance::IbkrConnectionConfig {
+    eli_core::finance::IbkrConnectionConfig {
+        account,
+        host,
+        port,
+        client_id,
+        market_data_type,
+        timeout_secs: None,
+    }
+}
+
 async fn cmd_finance_fundamentals(args: FinanceFundamentalsArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
@@ -11,7 +28,9 @@ async fn cmd_finance_fundamentals(args: FinanceFundamentalsArgs) -> Result<()> {
         .collect();
 
     if tickers.is_empty() {
-        anyhow::bail!("at least one ticker is required (e.g. --tickers NVDA or --tickers NVDA,AAPL)");
+        anyhow::bail!(
+            "at least one ticker is required (e.g. --tickers NVDA or --tickers NVDA,AAPL)"
+        );
     }
 
     let futs = tickers.iter().map(|ticker| {
@@ -76,12 +95,33 @@ async fn cmd_finance_search(args: FinanceSearchArgs) -> Result<()> {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
     }
 
-    let query_for_meta = args.query.clone();
+    // Resolve query from --query flag or positional arg.
+    let resolved_query = args
+        .query
+        .or(args.query_positional)
+        .ok_or_else(|| anyhow::anyhow!("search query required (use --query or positional arg)"))?;
+    let query_for_meta = resolved_query.clone();
     let policy_mode = eli_core::finance::policy::parse_policy_mode(Some(&args.policy_mode))
         .map_err(|e| anyhow::anyhow!(e))
         .context("parse --policy-mode")?;
+    let provider = match args.provider.trim().to_ascii_lowercase().as_str() {
+        "yahoo" => eli_core::finance::ProviderKind::Yahoo,
+        "ibkr" => eli_core::finance::ProviderKind::Ibkr,
+        other => anyhow::bail!("unsupported --provider '{other}' (supported: yahoo, ibkr)"),
+    };
+    let use_ibkr = matches!(provider, eli_core::finance::ProviderKind::Ibkr);
     let req = eli_core::finance::SearchRequest {
-        query: args.query,
+        query: resolved_query,
+        provider,
+        ibkr: use_ibkr.then(|| {
+            build_search_ibkr_connection_config(
+                args.ibkr_account.clone(),
+                args.ibkr_host.clone(),
+                args.ibkr_port,
+                args.ibkr_client_id,
+                args.ibkr_market_data_type,
+            )
+        }),
         policy_file: args
             .policy_file
             .as_ref()

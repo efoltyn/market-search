@@ -22,23 +22,8 @@ fn granularity_suggestion(seconds_per_step: i64) -> String {
     }
 }
 
-fn periods_per_year(granularity: Span) -> f64 {
-    let n = granularity.n.max(1) as f64;
-    match granularity.unit {
-        SpanUnit::Minute => (252.0 * 24.0 * 60.0) / n,
-        SpanUnit::Hour => (252.0 * 24.0) / n,
-        SpanUnit::Day => 252.0 / n,
-        SpanUnit::Week => 52.0 / n,
-        SpanUnit::Month => 12.0 / n,
-        SpanUnit::Year => 1.0 / n,
-    }
-}
 
-fn default_risk_free_rate_annual() -> f64 {
-    0.04
-}
-
-pub(crate) fn build_snapshot_analytics(snapshots: &[TickerSnapshot]) -> SnapshotAnalytics {
+pub fn build_snapshot_analytics(snapshots: &[TickerSnapshot]) -> SnapshotAnalytics {
     let mut market_caps: BTreeMap<String, u64> = BTreeMap::new();
     for snap in snapshots {
         if let Some(cap) = snap.market_cap {
@@ -108,162 +93,30 @@ pub(crate) fn build_snapshot_analytics(snapshots: &[TickerSnapshot]) -> Snapshot
     }
 }
 
-fn build_timeseries_analytics(series: &[TickerSeries], granularity: Span) -> TimeseriesAnalytics {
-    let mut dates: BTreeSet<DateTime<Utc>> = BTreeSet::new();
-    for s in series {
-        for candle in &s.candles {
-            dates.insert(candle.t);
-        }
-    }
-    let aligned_dates: Vec<DateTime<Utc>> = dates.into_iter().collect();
-
-    let mut aligned_returns: BTreeMap<String, Vec<Option<f64>>> = BTreeMap::new();
+pub fn build_timeseries_analytics(series: &[TickerSeries], _granularity: Span) -> TimeseriesAnalytics {
     let mut stats: BTreeMap<String, TimeseriesStats> = BTreeMap::new();
 
-    let per_year = periods_per_year(granularity);
-    let rf_annual = default_risk_free_rate_annual();
-    let rf_per_period = if per_year > 0.0 {
-        rf_annual / per_year
-    } else {
-        0.0
-    };
-
     for s in series {
-        let mut price_map: HashMap<DateTime<Utc>, f64> = HashMap::new();
-        for candle in &s.candles {
-            price_map.insert(candle.t, candle.c);
-        }
-        let mut prices: Vec<Option<f64>> = Vec::with_capacity(aligned_dates.len());
-        for d in &aligned_dates {
-            prices.push(price_map.get(d).copied());
-        }
+        let prices: Vec<f64> = s.candles.iter().map(|c| c.c).collect();
 
-        // Align by union of timestamps; forward-fill gaps once the series has started.
-        let mut last: Option<f64> = None;
-        for p in &mut prices {
-            if p.is_some() {
-                last = *p;
-            } else if let Some(v) = last {
-                *p = Some(v);
-            }
-        }
-
-        let mut returns: Vec<Option<f64>> = Vec::with_capacity(prices.len());
-        for i in 0..prices.len() {
-            if i == 0 {
-                returns.push(None);
-                continue;
-            }
-            match (prices[i], prices[i - 1]) {
-                (Some(curr), Some(prev)) if prev != 0.0 => returns.push(Some((curr / prev) - 1.0)),
-                _ => returns.push(None),
-            }
-        }
-
-        let first = prices.iter().find_map(|v| *v);
-        let last = prices.iter().rev().find_map(|v| *v);
+        let first = prices.first().copied();
+        let last = prices.last().copied();
         let total_return = match (first, last) {
             (Some(f), Some(l)) if f != 0.0 => Some((l / f) - 1.0),
             _ => None,
         };
 
-        let valid_returns: Vec<f64> = returns.iter().filter_map(|v| *v).collect();
-        let (annualized_vol, sharpe_ratio) = if valid_returns.len() >= 2 {
-            let mean = valid_returns.iter().sum::<f64>() / valid_returns.len() as f64;
-            let mut var = 0.0;
-            for r in &valid_returns {
-                var += (*r - mean) * (*r - mean);
-            }
-            let denom = (valid_returns.len() as f64 - 1.0).max(1.0);
-            let std = (var / denom).sqrt();
-            if std > 0.0 {
-                let ann_vol = std * per_year.sqrt();
-                let sharpe = (mean - rf_per_period) * per_year.sqrt() / std;
-                (Some(ann_vol), Some(sharpe))
-            } else {
-                (Some(0.0), None)
-            }
-        } else {
-            (None, None)
-        };
-
-        aligned_returns.insert(s.ticker.clone(), returns);
         stats.insert(
             s.ticker.clone(),
             TimeseriesStats {
                 total_return,
-                annualized_vol,
-                sharpe_ratio,
-                relative_strength: None,
             },
         );
     }
 
-    // Relative strength: outperformance vs the mean total return of the request.
-    let mean_total_return = {
-        let vals: Vec<f64> = stats.values().filter_map(|s| s.total_return).collect();
-        if vals.is_empty() {
-            None
-        } else {
-            Some(vals.iter().sum::<f64>() / vals.len() as f64)
-        }
-    };
-    if let Some(mean) = mean_total_return {
-        for s in stats.values_mut() {
-            if let Some(tr) = s.total_return {
-                s.relative_strength = Some(tr - mean);
-            }
-        }
-    }
-
-    let mut correlation_matrix: BTreeMap<String, BTreeMap<String, Option<f64>>> = BTreeMap::new();
-    let tickers: Vec<String> = aligned_returns.keys().cloned().collect();
-    for t1 in &tickers {
-        let mut row: BTreeMap<String, Option<f64>> = BTreeMap::new();
-        for t2 in &tickers {
-            let r1 = aligned_returns.get(t1).cloned().unwrap_or_default();
-            let r2 = aligned_returns.get(t2).cloned().unwrap_or_default();
-            let mut xs: Vec<f64> = Vec::new();
-            let mut ys: Vec<f64> = Vec::new();
-            let n = r1.len().min(r2.len());
-            for i in 0..n {
-                if let (Some(a), Some(b)) = (r1[i], r2[i]) {
-                    xs.push(a);
-                    ys.push(b);
-                }
-            }
-            row.insert(t2.clone(), correlation(&xs, &ys));
-        }
-        correlation_matrix.insert(t1.clone(), row);
-    }
-
     TimeseriesAnalytics {
         stats,
-        correlation_matrix,
-        periods_per_year: per_year,
-        risk_free_rate_annual: rf_annual,
     }
 }
 
-fn correlation(xs: &[f64], ys: &[f64]) -> Option<f64> {
-    if xs.len() < 2 || ys.len() < 2 || xs.len() != ys.len() {
-        return None;
-    }
-    let mean_x = xs.iter().sum::<f64>() / xs.len() as f64;
-    let mean_y = ys.iter().sum::<f64>() / ys.len() as f64;
-    let mut cov = 0.0;
-    let mut var_x = 0.0;
-    let mut var_y = 0.0;
-    for i in 0..xs.len() {
-        let dx = xs[i] - mean_x;
-        let dy = ys[i] - mean_y;
-        cov += dx * dy;
-        var_x += dx * dx;
-        var_y += dy * dy;
-    }
-    if var_x == 0.0 || var_y == 0.0 {
-        return None;
-    }
-    Some(cov / (var_x.sqrt() * var_y.sqrt()))
-}
 

@@ -21,6 +21,22 @@ pub enum ProviderKind {
     Yahoo,
     /// FRED CSV export (Federal Reserve Economic Data).
     Fred,
+    /// Interactive Brokers TWS / IB Gateway via the official IB API.
+    Ibkr,
+    /// Pyth Network Benchmarks — 24/7 oracle candles (crypto, commodities, FX, metals).
+    Pyth,
+    /// Kalshi prediction market — probability candlesticks via public API.
+    Kalshi,
+    /// Polymarket prediction market — probability history via CLOB API.
+    Polymarket,
+    /// Stooq.com — historical OHLCV (US equities, indices, forex, gold) + PE ratios.
+    Stooq,
+    /// Binance — crypto OHLCV with depth back to 2017/2019.
+    Binance,
+    /// EIA — U.S. Energy Information Administration (petroleum inventories, nat gas storage).
+    Eia,
+    /// ECB — European Central Bank SDMX (EUR rates, balance sheet, M3, EURIBOR).
+    Ecb,
 }
 
 impl Default for ProviderKind {
@@ -229,6 +245,7 @@ pub enum FreshnessOrigin {
     ProviderLastUpdated,
     TransportReceived,
     Derived,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -246,6 +263,20 @@ pub struct Freshness {
     pub state: FreshnessState,
     pub origin: FreshnessOrigin,
     pub quality: FreshnessQuality,
+}
+
+impl Default for Freshness {
+    fn default() -> Self {
+        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default();
+        Self {
+            observed_at: epoch,
+            collected_at: epoch,
+            age_seconds: 0,
+            state: FreshnessState::Unknown,
+            origin: FreshnessOrigin::Unknown,
+            quality: FreshnessQuality::Estimated,
+        }
+    }
 }
 
 impl Freshness {
@@ -279,6 +310,24 @@ pub struct FreshnessSummary {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct IbkrConnectionConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<i32>,
+    /// IBKR market data type. Common values:
+    /// 1 = live, 2 = frozen, 3 = delayed, 4 = delayed-frozen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_data_type: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct RunMeta {
     #[serde(default)]
     pub latency_ms: u64,
@@ -306,6 +355,9 @@ pub struct TimeseriesRequest {
 
     #[serde(default)]
     pub max_points_per_ticker: Option<usize>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ibkr: Option<IbkrConnectionConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -389,7 +441,13 @@ pub struct SnapshotRequest {
     pub tickers: Vec<String>,
 
     #[serde(default)]
+    pub as_of: Option<DateTime<Utc>>,
+
+    #[serde(default)]
     pub provider: ProviderKind,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ibkr: Option<IbkrConnectionConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -423,6 +481,14 @@ pub struct TickerSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub day_high: Option<f64>,
 
+    /// Alias for current_price — kept for internal use, excluded from JSON output.
+    #[serde(skip_serializing)]
+    pub price: Option<f64>,
+
+    /// Session return vs previous close — trivially derivable, excluded from JSON output.
+    #[serde(skip_serializing)]
+    pub daily_return: Option<f64>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub market_cap: Option<u64>,
 
@@ -441,9 +507,21 @@ pub struct TickerSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_split_date: Option<DateTime<Utc>>,
 
+    /// Per-item freshness — used internally for FreshnessSummary computation.
+    /// Excluded from JSON output to reduce context bloat; response-level
+    /// freshness_summary provides the same info once instead of N times.
+    #[serde(skip_serializing, default)]
     pub freshness: Freshness,
     pub price_source_kind: String,
     pub session_state: String,
+    #[serde(default)]
+    pub market_closed_fallback: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity_note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -452,19 +530,37 @@ pub struct SnapshotResponse {
     pub tickers: Vec<String>,
     pub generated_at: DateTime<Utc>,
     pub snapshots: Vec<TickerSnapshot>,
-    #[serde(default)]
+    #[serde(skip_serializing, default)]
     pub schema_version: String,
-    #[serde(default)]
+    #[serde(skip_serializing, default)]
     pub freshness_summary: FreshnessSummary,
-    #[serde(default)]
+    #[serde(skip_serializing, default)]
     pub applied_policy: AppliedPolicy,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing, default)]
     pub decision_trace: Vec<String>,
-    #[serde(default)]
+    #[serde(skip_serializing, default)]
     pub run_meta: RunMeta,
+    #[serde(skip_serializing, default)]
+    pub market_closed_fallback_count: usize,
+    #[serde(skip_serializing, default)]
+    pub has_market_closed_fallback: bool,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolErrorInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<SnapshotError>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_tickers: Option<Vec<String>>,
+
+    /// Full analytics kept for internal use, excluded from JSON output.
+    #[serde(skip_serializing)]
     pub analytics: Option<SnapshotAnalytics>,
+
+    /// Market note extracted from analytics (e.g. "all returns 0.0 — market may be closed").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_note: Option<String>,
 
     /// Optional trailing returns by ticker and period (decimal returns).
     /// Shape: ticker -> period -> return
@@ -473,29 +569,22 @@ pub struct SnapshotResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TimeseriesAnalytics {
-    pub stats: BTreeMap<String, TimeseriesStats>,
-    pub correlation_matrix: BTreeMap<String, BTreeMap<String, Option<f64>>>,
-    pub periods_per_year: f64,
-
-    #[serde(default = "default_risk_free_rate_annual")]
-    pub risk_free_rate_annual: f64,
+pub struct SnapshotError {
+    pub ticker: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    pub message: String,
 }
 
-pub fn default_risk_free_rate_annual() -> f64 {
-    0.02
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TimeseriesAnalytics {
+    pub stats: BTreeMap<String, TimeseriesStats>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeseriesStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_return: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub annualized_vol: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sharpe_ratio: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relative_strength: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -638,12 +727,96 @@ pub struct FinancialStatement {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FundamentalsMetrics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_cap: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enterprise_value: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trailing_pe: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forward_pe: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trailing_eps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forward_eps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_to_book: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book_value_per_share: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enterprise_to_revenue: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enterprise_to_ebitda: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profit_margin: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gross_margin: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operating_margin: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ebitda_margin: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_on_assets: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_on_equity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_to_equity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quick_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revenue_growth: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub earnings_growth: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revenue_per_share: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_cash_per_share: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shares_outstanding: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub float_shares: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_percent_of_float: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analyst_target_mean_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommendation_mean: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommendation_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analyst_count: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FundamentalsProfile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub industry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_time_employees: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FundamentalsResponse {
     pub ticker: String,
     pub company_name: Option<String>,
     pub currency: Option<String>,
     pub generated_at: DateTime<Utc>,
     pub statements: Vec<FinancialStatement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<FundamentalsMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<FundamentalsProfile>,
     /// Informational note (e.g. "ETF — financial statements not available").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -652,6 +825,10 @@ pub struct FundamentalsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
+    #[serde(default)]
+    pub provider: ProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ibkr: Option<IbkrConnectionConfig>,
     #[serde(default)]
     pub policy_file: Option<String>,
     #[serde(default)]
@@ -692,13 +869,22 @@ pub struct NewsItem {
     pub date: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub published_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing, default)]
     pub freshness: Freshness,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity_note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NewsRequest {
     pub ticker: String,
     pub date: String, // YYYY-MM-DD
+    #[serde(default)]
+    pub as_of: Option<DateTime<Utc>>,
     #[serde(default)]
     pub policy_file: Option<String>,
     #[serde(default)]
@@ -721,6 +907,8 @@ pub struct NewsResponse {
     #[serde(default)]
     pub run_meta: RunMeta,
     pub news: Vec<NewsItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub articles: Vec<NewsItem>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -742,6 +930,7 @@ pub struct MacroIndicator {
     pub category: String,
     pub current_value: f64,
     pub change_1y: Option<f64>,
+    #[serde(skip_serializing, default)]
     pub freshness: Freshness,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -752,6 +941,14 @@ pub struct MacroIndicator {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta_pct: Option<f64>,
+
+    /// Data source: "fred", "pyth", "kalshi", "polymarket", "yahoo"
+    #[serde(default = "default_source_fred")]
+    pub source: String,
+}
+
+fn default_source_fred() -> String {
+    "fred".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -767,6 +964,10 @@ pub struct MacroResponse {
     pub decision_trace: Vec<String>,
     #[serde(default)]
     pub run_meta: RunMeta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compare_to: Option<NaiveDate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub categories: Option<BTreeMap<String, Vec<MacroIndicator>>>,
     pub indicators: Vec<MacroIndicator>,
 }
 
@@ -831,6 +1032,7 @@ pub struct ForexPairPerformance {
     pub first_observation_at: DateTime<Utc>,
     pub last_observation_at: DateTime<Utc>,
     pub observations: usize,
+    pub rate: f64,
     pub start_rate: f64,
     pub end_rate: f64,
     pub change_pct: f64,
@@ -1010,6 +1212,8 @@ pub struct ForexResponse {
     pub selection: ForexSelection,
     pub pairs: Vec<ForexPairPerformance>,
     pub summary: ForexSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basket_summary: Option<ForexSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub comparisons: Vec<ForexComparisonPoint>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -1022,6 +1226,8 @@ pub struct ForexResponse {
     pub usd_benchmark: Option<ForexUsdBenchmark>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub biggest_daily_usd_moves: Vec<ForexHitEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub top_daily_impact_moves: Vec<ForexHitEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<String>,
 }
@@ -1046,12 +1252,18 @@ pub enum RatePathSourceMode {
 pub struct RatePathMeeting {
     pub date: String,
     pub label: String,
+    /// P(no change at this meeting)
     pub hold_prob: f64,
+    /// P(any cut at this meeting)
+    pub cut_prob: f64,
+    /// P(cut exactly 25bp)
     pub cut_25bp_prob: f64,
+    /// P(cut >25bp, i.e. 50bp+)
     pub cut_50bp_plus_prob: f64,
+    /// P(hike)
     pub hike_prob: f64,
-    pub implied_rate: f64,
-    pub source: String,
+    /// Total Kalshi volume across all contracts for this meeting (proxy for market conviction).
+    pub volume: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1059,23 +1271,69 @@ pub struct RatePathResponse {
     pub generated_at: DateTime<Utc>,
     pub as_of: DateTime<Utc>,
     pub age_seconds: i64,
+    /// Current policy anchor rate used for meeting-bucket classification.
     pub current_rate: f64,
+    pub current_rate_basis: String,
+    pub current_rates: RatePathCurrentRates,
     pub meetings: Vec<RatePathMeeting>,
     pub source_mode: String,
+    /// Fraction of expected FOMC meetings (8 per year) with data in the cache.
     pub coverage_ratio: f64,
-    pub confidence: f64,
 
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<String>,
+
+    /// Cumulative "hike/cut by date X" signals from prediction markets.
+    /// NOT per-meeting — represents P(any hike/cut occurs by deadline).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub cumulative_signals: Vec<CumulativeFedSignal>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CumulativeFedSignal {
+    pub direction: String,
+    pub by_date: String,
+    pub probability: f64,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RatePathCurrentRates {
+    /// Same value as `current_rate`, repeated so all current-rate facts live together.
+    pub classification_anchor_rate: f64,
+    pub classification_anchor_basis: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_lower_bound: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_upper_bound: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_midpoint: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_range_as_of: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_rate_as_of: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_average_effective_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_average_effective_rate_as_of: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct YieldCurveRequest {
     #[serde(default)]
+    pub compare_1mo: bool,
+
+    #[serde(default)]
     pub compare_3mo: bool,
 
     #[serde(default)]
+    pub compare_6mo: bool,
+
+    #[serde(default)]
     pub compare_1y: bool,
+
     #[serde(default)]
     pub strict: bool,
 }
@@ -1087,13 +1345,40 @@ pub struct YieldCurvePoint {
     /// Percent level from FRED (e.g. 4.32 means 4.32%).
     pub current_yield: f64,
 
+    /// Change vs 1 month ago in basis points.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_1mo_bps: Option<f64>,
+
     /// Change vs 3 months ago in basis points.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_3mo_bps: Option<f64>,
 
+    /// Change vs 6 months ago in basis points.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_6mo_bps: Option<f64>,
+
     /// Change vs 1 year ago in basis points.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_1y_bps: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct YieldCurveSpreads {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread_2y10y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread_3mo10y: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct YieldCurveComparison {
+    pub label: String,
+    pub as_of: DateTime<Utc>,
+    pub curve: Vec<YieldCurvePoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread_2y10y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread_3mo10y: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1108,6 +1393,10 @@ pub struct YieldCurveResponse {
     /// In percentage points.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spread_3mo10y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spreads: Option<YieldCurveSpreads>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub comparisons: Vec<YieldCurveComparison>,
     pub coverage_ratio: f64,
     pub confidence: f64,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -1163,6 +1452,8 @@ pub struct DashboardResponse {
     pub options: Option<OptionsResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_path: Option<RatePathResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yield_curve: Option<YieldCurveResponse>,
     // Generic escape hatch: new presets use this instead of adding typed fields.
     // Each key is a section name; value is a JSON payload for that section.
     // Allows adding new presets in service.rs without touching this struct.
@@ -1226,6 +1517,10 @@ pub struct ScheduleRequest {
     pub major_only: bool,
     #[serde(default)]
     pub macro_profile: ScheduleMacroProfile,
+    #[serde(default)]
+    pub min_market_cap: Option<f64>,
+    #[serde(default)]
+    pub time_filter: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1303,6 +1598,8 @@ pub struct PricePoint {
     pub value: f64,
     pub timestamp: u64,
     pub received_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1340,9 +1637,16 @@ pub struct PriceCandidate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OptionsRequest {
     pub ticker: String,
+    #[serde(default)]
+    pub provider: ProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ibkr: Option<IbkrConnectionConfig>,
     /// Specific expiration date (YYYY-MM-DD). If None, returns first available expiry.
     #[serde(default)]
     pub expiry: Option<String>,
+    /// Target days-to-expiry. If set and expiry is omitted, chooses the closest listed expiry.
+    #[serde(default)]
+    pub target_dte_days: Option<i64>,
     /// Filter: "calls", "puts", or None for both.
     #[serde(default)]
     pub option_type: Option<String>,
@@ -1392,7 +1696,20 @@ pub struct OptionsMetrics {
     pub total_put_oi: u64,
     pub atm_iv_call: Option<f64>,
     pub atm_iv_put: Option<f64>,
+    /// Combined ATM IV (average of call and put ATM IV).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atm_iv: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skew_near_put_call_iv_ratio: Option<f64>,
+    #[serde(default)]
+    pub has_iv_data: bool,
+    #[serde(default)]
+    pub has_liquid_near_money: bool,
     pub max_pain: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_quality: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expirations_analyzed: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1406,7 +1723,17 @@ pub struct OptionsResponse {
     pub error: Option<ToolErrorInfo>,
     pub expirations: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_expiry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_expiry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_dte_days: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_days_to_expiry: Option<i64>,
+    #[serde(default)]
+    pub auto_selected_expiry: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection_reason: Option<String>,
     pub calls: Vec<OptionContract>,
     pub puts: Vec<OptionContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1419,27 +1746,68 @@ pub struct OptionsResponse {
     pub multi_expiry_summary: Option<MultiExpirySummary>,
 }
 
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExpirySnapshot {
     pub expiry: String,
     pub days_to_expiry: i64,
     pub total_volume: u64,
     pub total_oi: u64,
+    pub call_oi: u64,
+    pub put_oi: u64,
     pub put_call_ratio_volume: f64,
     pub put_call_ratio_oi: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_pain: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atm_iv: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_monthly: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MultiExpirySummary {
     pub snapshots: Vec<ExpirySnapshot>,
     pub aggregate_volume: u64,
+    pub aggregate_oi: u64,
     pub weighted_put_call_ratio: f64,
     /// "bullish" if near-term P/C < 0.7, "bearish" if > 1.3, else "neutral"
     pub near_term_bias: String,
+    /// Top 3 expirations by OI — where the action concentrates
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oi_concentration: Option<Vec<OiConcentration>>,
+    /// IV term structure: ATM IV at each expiry date
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iv_term_structure: Option<Vec<IvTermPoint>>,
+    /// Max pain across all expirations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_pain_range: Option<MaxPainRange>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OiConcentration {
+    pub expiry: String,
+    pub days_to_expiry: i64,
+    pub oi: u64,
+    pub pct_of_total: f64,
+    pub is_monthly: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IvTermPoint {
+    pub expiry: String,
+    pub days_to_expiry: i64,
+    pub atm_iv: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MaxPainRange {
+    pub min_expiry: String,
+    pub min_pain: f64,
+    pub max_expiry: String,
+    pub max_pain: f64,
+    pub nearest_monthly_pain: Option<f64>,
+    pub nearest_monthly_expiry: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1584,6 +1952,7 @@ pub struct OddsMarket {
     pub ticker: String,
     pub title: String,
     pub event_ticker: String,
+    #[serde(skip_serializing, default)]
     pub freshness: Freshness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -1653,6 +2022,7 @@ pub struct OddsListedMarket {
     pub ticker: String,
     pub title: String,
     pub event_ticker: String,
+    #[serde(skip_serializing, default)]
     pub freshness: Freshness,
     pub yes_price: Option<i64>,
     pub volume: Option<i64>,
@@ -1820,8 +2190,24 @@ impl Default for OddsSyncStatus {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OddsSyncMode {
+    Exhaustive,
+    FrontierSample,
+    StreamRefresh,
+}
+
+impl Default for OddsSyncMode {
+    fn default() -> Self {
+        Self::Exhaustive
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OddsSyncCoverage {
+    #[serde(default)]
+    pub sync_mode: OddsSyncMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_max_pages: Option<usize>,
     pub events_pages_fetched: usize,
@@ -1842,6 +2228,8 @@ pub struct OddsSyncCoverage {
     pub series_backfill_cap: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_backfill_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_warning: Option<String>,
     pub strict_pass: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub strict_fail_reasons: Vec<String>,
@@ -2062,11 +2450,19 @@ pub struct OddsSyncResponse {
     pub run_meta: RunMeta,
     #[serde(default)]
     pub sync_status: OddsSyncStatus,
+    #[serde(default)]
+    pub sync_mode: OddsSyncMode,
     pub sources: Vec<OddsSyncSourceResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<OddsSyncSourceResult>,
     pub total_events: usize,
     pub total_markets: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub merged_csv_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_files: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analysis: Option<OddsSyncAnalysis>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2236,4 +2632,328 @@ pub struct PaperResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_trade: Option<PaperTradeFill>,
     pub state_path: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LiquidityRequest {
+    /// How far back to fetch (e.g. "1y", "2y"). Defaults to 1y internally.
+    #[serde(default)]
+    pub range: Option<Span>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LiquidityComponent {
+    pub series_id: String,
+    pub label: String,
+    pub latest_value: f64,
+    pub latest_date: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LiquidityDataPoint {
+    pub date: DateTime<Utc>,
+    /// WALCL value (Fed balance sheet total assets, millions USD).
+    pub walcl: f64,
+    /// WTREGEN value (Treasury General Account, millions USD).
+    pub tga: f64,
+    /// RRPONTSYD value (Overnight Reverse Repo, millions USD).
+    pub rrp: f64,
+    /// Net liquidity = WALCL - TGA - RRP (millions USD).
+    pub net_liquidity: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LiquidityResponse {
+    pub generated_at: DateTime<Utc>,
+    pub as_of: DateTime<Utc>,
+    pub age_seconds: i64,
+    pub components: Vec<LiquidityComponent>,
+    pub net_liquidity_latest: f64,
+    /// Change from earliest to latest in the series.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub net_liquidity_change: Option<f64>,
+    /// Percentage change from earliest to latest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub net_liquidity_change_pct: Option<f64>,
+    pub series: Vec<LiquidityDataPoint>,
+    pub coverage_ratio: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuctionsRequest {
+    /// Filter by security type: bill, note, bond, tips, frn, or "all".
+    #[serde(default)]
+    pub security_type: Option<String>,
+    /// How many recent auctions to return. Default 50.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuctionResult {
+    pub cusip: String,
+    pub security_type: String,
+    pub security_term: String,
+    pub auction_date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maturity_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub high_yield: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bid_to_cover_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_accepted: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tendered: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_bidder_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indirect_bidder_pct: Option<f64>,
+    /// Tail = high_yield - when_issued_yield. Positive tail = weak demand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_bps: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuctionsResponse {
+    pub generated_at: DateTime<Utc>,
+    pub auctions: Vec<AuctionResult>,
+    pub count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CotRequest {
+    /// Search query to filter by contract name (e.g. "gold", "crude oil", "10y note").
+    #[serde(default)]
+    pub query: Option<String>,
+    /// How many weeks of data to fetch. Default 12.
+    #[serde(default)]
+    pub weeks: Option<usize>,
+    /// Report type: "disaggregated" (commodities) or "financial" (rates/FX/equity index). Default "disaggregated".
+    #[serde(default)]
+    pub report: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CotPosition {
+    pub contract_name: String,
+    pub report_date: String,
+    pub open_interest: i64,
+    /// Managed money (disaggregated) or leveraged funds (financial) net position.
+    pub spec_net: i64,
+    pub spec_long: i64,
+    pub spec_short: i64,
+    /// Producer/merchant (disaggregated) or dealer (financial) net position.
+    pub commercial_net: i64,
+    pub commercial_long: i64,
+    pub commercial_short: i64,
+    /// Spec net as percentage of open interest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_net_pct_oi: Option<f64>,
+    /// Week-over-week change in spec net.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_net_change: Option<i64>,
+    /// Report family: "disaggregated" or "financial" (TFF).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_family: Option<String>,
+    /// "FutOnly" or "Combined" (futures + options).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub futonly_or_combined: Option<String>,
+    /// Underlying commodity name from CFTC (e.g. "CRUDE OIL", "GOLD").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commodity_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CotResponse {
+    pub generated_at: DateTime<Utc>,
+    pub report_type: String,
+    pub positions: Vec<CotPosition>,
+    pub contracts_found: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+// ──────────────────────────────────────────────────────────────
+// NY Fed Markets API
+// ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NyFedRequest {
+    pub kind: String, // rates | rrp | soma | dealers
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NyFedRateItem {
+    pub name: String,
+    pub rate_pct: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percentile_1: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percentile_25: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percentile_75: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percentile_99: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_billions: Option<f64>,
+    pub effective_date: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NyFedRrpItem {
+    pub effective_date: String,
+    pub total_billions: f64,
+    pub counterparty_count: u32,
+    pub rate_pct: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NyFedSomaItem {
+    pub security_type: String,
+    pub par_value_billions: f64,
+    pub percent_of_total: f64,
+    pub as_of_date: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NyFedDealerItem {
+    pub description: String,
+    pub value_millions: f64,
+    pub report_date: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NyFedResponse {
+    pub generated_at: DateTime<Utc>,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rates: Option<Vec<NyFedRateItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rrp: Option<Vec<NyFedRrpItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soma: Option<Vec<NyFedSomaItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dealers: Option<Vec<NyFedDealerItem>>,
+}
+
+// ──────────────────────────────────────────────────────────────
+// CBOE Volatility Indices / Term Structure
+// ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VolSurfaceRequest {
+    pub symbols: Option<Vec<String>>,
+    pub history: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VolSurfaceDataPoint {
+    pub date: String,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VolSurfaceIndex {
+    pub symbol: String,
+    pub latest: VolSurfaceDataPoint,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<VolSurfaceDataPoint>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VolSurfaceResponse {
+    pub generated_at: DateTime<Utc>,
+    pub indices: Vec<VolSurfaceIndex>,
+    pub count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+// ──────────────────────────────────────────────────────────────
+// OFR Financial Stress Index
+// ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StressRequest {
+    pub range_days: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StressDataPoint {
+    pub date: String,
+    pub fsi: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub funding: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safe_assets: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volatility: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StressResponse {
+    pub generated_at: DateTime<Utc>,
+    pub latest: StressDataPoint,
+    pub history: Vec<StressDataPoint>,
+    pub count: usize,
+}
+
+// ──────────────────────────────────────────────────────────────
+// Treasury Fiscal Data API
+// ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FiscalRequest {
+    pub kind: String, // debt | statement | interest
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FiscalDebtItem {
+    pub record_date: String,
+    pub total_debt_billions: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_debt_billions: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intragovernmental_billions: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FiscalStatementItem {
+    pub record_date: String,
+    pub account: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub close_today_bal: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_today_bal: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FiscalInterestItem {
+    pub record_date: String,
+    pub security_desc: String,
+    pub avg_interest_rate_pct: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FiscalResponse {
+    pub generated_at: DateTime<Utc>,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt: Option<Vec<FiscalDebtItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<Vec<FiscalStatementItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interest: Option<Vec<FiscalInterestItem>>,
 }

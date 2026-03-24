@@ -55,7 +55,14 @@ fn classify_bucket(text: &str, current_rate: f64) -> Option<FedBucket> {
         return Some(FedBucket::Hike);
     }
     if t.contains("cut") || t.contains("lower") || t.contains("decrease") {
-        if t.contains("50") || t.contains("0.50") || t.contains("0.5") || t.contains("half") || t.contains("50bp") {
+        // -C26 = Kalshi suffix for "cut by >25bps" (i.e. 50bp, 75bp, 100bp).
+        // Also catch explicit "50bp/bps" wording, but NOT bare "50" which
+        // falsely matches target-rate strings like "3.50%".
+        if t.contains("-c26")
+            || t.contains(">25bps") || t.contains(">25 bps") || t.contains(">25bp")
+            || t.contains("50bps") || t.contains("50bp")
+            || t.contains("0.50%") || t.contains("half")
+        {
             return Some(FedBucket::Cut50Plus);
         }
         return Some(FedBucket::Cut25);

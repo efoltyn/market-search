@@ -21,6 +21,7 @@ pub(crate) fn sec_client(override_ua: Option<&str>) -> Result<reqwest::Client> {
         .no_proxy()
         .timeout(StdDuration::from_secs(25))
         .user_agent(sec_user_agent(override_ua)?)
+        .tcp_nodelay(true)
         .build()
         .map_err(|e| Error::Provider(format!("sec client init failed: {e}")))
 }

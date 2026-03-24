@@ -1,178 +1,42 @@
-async fn cmd_finance_macro(args: FinanceMacroArgs) -> Result<()> {
-    if args.format.trim().to_ascii_lowercase() != "json" {
-        anyhow::bail!("unsupported --format (only 'json' is implemented)");
-    }
-
-    let range = if args.range.is_empty() {
-        None
-    } else {
-        match eli_core::finance::Span::parse(&args.range) {
-            Ok(s) => Some(s),
-            Err(e) => anyhow::bail!("invalid --range '{}': {}", args.range, e),
-        }
-    };
-
-    let compare_to = if let Some(raw) = args.compare_to.as_deref() {
-        Some(
-            chrono::NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
-                .map_err(|_| anyhow::anyhow!("invalid --compare-to '{raw}' (expected YYYY-MM-DD)"))?,
-        )
-    } else {
-        None
-    };
-    let policy_mode = eli_core::finance::policy::parse_policy_mode(Some(&args.policy_mode))
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("parse --policy-mode")?;
-
-    let req = eli_core::finance::MacroRequest {
-        range,
-        compare_to,
-        policy_file: args
-            .policy_file
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string()),
-        policy_mode: Some(policy_mode),
-    };
-    let resp = eli_core::finance::fetch_macro(req)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("fetch macro")?;
-
-    if let Some(out_path) = args.out {
-        let wr = write_json_out_with_meta(
-            out_path,
-            &resp,
-            "finance.macro",
-            &[format!("range={}", args.range)],
-        )?;
-        println!(
-            "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
-            serde_json::to_string(&wr.out_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-            serde_json::to_string(&wr.meta_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-        );
-        return Ok(());
-    }
-
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
-    Ok(())
+/// Disk cache shared with timeseries: same ProjectDirs cache root, SHA-keyed,
+/// atomic writes (tmp + rename) so concurrent MCP calls never read partial JSON.
+fn cli_cache_path(prefix: &str, input: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(input.as_bytes());
+    let hash = format!("{:x}", h.finalize());
+    let dir = directories::ProjectDirs::from("dev", "eli", "eli")
+        .map(|d| d.cache_dir().join("finance").join(prefix))
+        .unwrap_or_else(|| std::env::temp_dir().join("eli-cache").join("finance").join(prefix));
+    dir.join(format!("{}.json", &hash[..16]))
 }
 
-async fn cmd_finance_forex(args: FinanceForexArgs) -> Result<()> {
-    if args.format.trim().to_ascii_lowercase() != "json" {
-        anyhow::bail!("unsupported --format (only 'json' is implemented)");
+fn cli_cache_read(path: &Path, ttl_secs: u64) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    let age = meta.modified().ok()?.elapsed().ok()?;
+    if age.as_secs() > ttl_secs {
+        return None;
     }
+    std::fs::read_to_string(path).ok()
+}
 
-    let range = eli_core::finance::Span::parse(&args.range)
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("parse --range")?;
-    let granularity = eli_core::finance::Span::parse(&args.granularity)
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("parse --granularity")?;
-    let as_of = if let Some(raw) = args.as_of.as_deref() {
-        Some(
-            eli_core::finance::parse_as_of(raw)
-                .map_err(|e| anyhow::anyhow!(e))
-                .context("parse --as-of")?,
-        )
-    } else {
-        None
-    };
-    let event_at = if let Some(raw) = args.event_at.as_deref() {
-        Some(
-            eli_core::finance::parse_event_at(raw)
-                .map_err(|e| anyhow::anyhow!(e))
-                .context("parse --event-at")?,
-        )
-    } else {
-        None
-    };
-    let event_window = if let Some(raw) = args.event_window.as_deref() {
-        Some(
-            eli_core::finance::Span::parse(raw)
-                .map_err(|e| anyhow::anyhow!(e))
-                .context("parse --event-window")?,
-        )
-    } else {
-        None
-    };
-    let mut compare_as_of = Vec::new();
-    for raw in &args.compare_as_of {
-        let dt = eli_core::finance::parse_as_of(raw)
-            .map_err(|e| anyhow::anyhow!(e))
-            .with_context(|| format!("parse --compare-as-of value '{raw}'"))?;
-        compare_as_of.push(dt);
+fn cli_cache_write(path: &Path, data: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    let mut horizons = Vec::new();
-    for raw in &args.horizons {
-        let span = eli_core::finance::Span::parse(raw)
-            .map_err(|e| anyhow::anyhow!(e))
-            .with_context(|| format!("parse --horizons value '{raw}'"))?;
-        horizons.push(span);
+    // Atomic: write to temp file in same dir, then rename.
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, data).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
     }
+}
 
-    let cache_dir = if let Some(path) = args.cache_dir {
-        path
+fn schedule_fred_cache_mode() -> &'static str {
+    if eli_core::finance::has_fred_api_attachment_hint() {
+        "fred-on"
     } else {
-        let paths = Paths::discover().context("discover paths")?;
-        paths.ensure_dirs().context("ensure dirs")?;
-        paths.cache_dir
-    };
-
-    let req = eli_core::finance::ForexRequest {
-        pairs: args.pairs.clone(),
-        currencies: args.currencies.clone(),
-        countries: args.countries.clone(),
-        groups: args.groups.clone(),
-        include_em: args.include_em,
-        range,
-        granularity,
-        as_of,
-        event_at,
-        event_window,
-        compare_as_of,
-        horizons,
-        max_pairs: args.max_pairs,
-        recent_points: Some(args.recent_points),
-        top: Some(args.top),
-    };
-    let resp = eli_core::finance::fetch_forex(req, &cache_dir)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("fetch forex")?;
-
-    if let Some(out_path) = args.out {
-        let wr = write_json_out_with_meta(
-            out_path,
-            &resp,
-            "finance.forex",
-            &[
-                format!("range={}", args.range),
-                format!("granularity={}", args.granularity),
-                format!("pairs={}", args.pairs.len()),
-                format!("currencies={}", args.currencies.len()),
-                format!("countries={}", args.countries.len()),
-                format!("groups={}", args.groups.len()),
-                format!("event_at={}", args.event_at.is_some()),
-                format!("event_window={}", args.event_window.as_deref().unwrap_or("")),
-                format!("compare_as_of={}", args.compare_as_of.len()),
-            ],
-        )?;
-        println!(
-            "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
-            serde_json::to_string(&wr.out_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-            serde_json::to_string(&wr.meta_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-        );
-        return Ok(());
+        "fred-off"
     }
-
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
-    Ok(())
 }
 
 async fn cmd_finance_schedule(args: FinanceScheduleArgs) -> Result<()> {
@@ -208,6 +72,18 @@ async fn cmd_finance_schedule(args: FinanceScheduleArgs) -> Result<()> {
         (start, end)
     };
 
+    let min_market_cap = args.min_cap.map(|s| parse_market_cap_threshold(&s)).transpose()?;
+    let time_filter = args.time;
+    const SCHEDULE_CACHE_SCHEMA_VERSION: &str = "v4-official-bea-fred-attachment";
+
+    // Cache: schedule data is static per day — 1 hour TTL.
+    // Key must include ALL params that change the output.
+    let fred_cache_mode = schedule_fred_cache_mode();
+    let cache_input = format!(
+        "{SCHEDULE_CACHE_SCHEMA_VERSION}|{fred_cache_mode}|{kind:?}|{start_date}|{end_date}|{macro_profile:?}|{min_market_cap:?}|{time_filter:?}|{:?}|{}",
+        &args.ticker, args.major,
+    );
+
     let req = eli_core::finance::ScheduleRequest {
         kind,
         start_date,
@@ -215,13 +91,27 @@ async fn cmd_finance_schedule(args: FinanceScheduleArgs) -> Result<()> {
         tickers: args.ticker,
         major_only: args.major,
         macro_profile,
+        min_market_cap,
+        time_filter,
+    };
+    let cache_path = cli_cache_path("schedule", &cache_input);
+    const SCHEDULE_TTL: u64 = 3600; // 1 hour
+
+    let json = if let Some(cached) = cli_cache_read(&cache_path, SCHEDULE_TTL) {
+        cached
+    } else {
+        let resp = eli_core::finance::fetch_schedule(req)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("fetch schedule")?;
+        let j = serde_json::to_string_pretty(&resp).context("serialize response")?;
+        cli_cache_write(&cache_path, &j);
+        j
     };
 
-    let resp = eli_core::finance::fetch_schedule(req)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("fetch schedule")?;
     if let Some(out_path) = args.out {
+        let resp: eli_core::finance::ScheduleResponse =
+            serde_json::from_str(&json).context("deserialize cached schedule")?;
         let wr = write_json_out_with_meta(
             out_path,
             &resp,
@@ -238,9 +128,27 @@ async fn cmd_finance_schedule(args: FinanceScheduleArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
     println!("{json}");
     Ok(())
+}
+
+fn parse_market_cap_threshold(s: &str) -> anyhow::Result<f64> {
+    let s = s.trim().to_ascii_uppercase();
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('T') {
+        (n, 1e12)
+    } else if let Some(n) = s.strip_suffix('B') {
+        (n, 1e9)
+    } else if let Some(n) = s.strip_suffix('M') {
+        (n, 1e6)
+    } else if let Some(n) = s.strip_suffix('K') {
+        (n, 1e3)
+    } else {
+        (s.as_str(), 1.0)
+    };
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid --min-cap value: {s}"))?;
+    Ok(num * multiplier)
 }
 
 async fn cmd_finance_rate_path(args: FinanceRatePathArgs) -> Result<()> {
@@ -282,34 +190,27 @@ async fn cmd_finance_rate_path(args: FinanceRatePathArgs) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_finance_yield_curve(args: FinanceYieldCurveArgs) -> Result<()> {
+async fn cmd_finance_auctions(args: FinanceAuctionsArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
     }
 
-    let mut compare_3mo = false;
-    let mut compare_1y = false;
-    for item in &args.compare {
-        match item.trim().to_ascii_lowercase().as_str() {
-            "" => {}
-            "3mo" => compare_3mo = true,
-            "1y" => compare_1y = true,
-            other => anyhow::bail!("invalid --compare value '{other}' (supported: 3mo,1y)"),
-        }
-    }
-
-    let req = eli_core::finance::YieldCurveRequest {
-        compare_3mo,
-        compare_1y,
-        strict: args.strict,
+    let security_type = match args.security_type.trim().to_ascii_lowercase().as_str() {
+        "all" | "" => None,
+        other => Some(other.to_string()),
     };
-    let resp = eli_core::finance::fetch_yield_curve(req)
+
+    let req = eli_core::finance::AuctionsRequest {
+        security_type,
+        limit: Some(args.limit),
+    };
+    let resp = eli_core::finance::fetch_auctions(req)
         .await
         .map_err(|e| anyhow::anyhow!(e))
-        .context("fetch yield curve")?;
+        .context("fetch auctions")?;
 
     if let Some(out_path) = args.out {
-        let wr = write_json_out_with_meta(out_path, &resp, "finance.yield_curve", &[])?;
+        let wr = write_json_out_with_meta(out_path, &resp, "finance.auctions", &[])?;
         println!(
             "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
             serde_json::to_string(&wr.out_path.display().to_string())
@@ -325,27 +226,46 @@ async fn cmd_finance_yield_curve(args: FinanceYieldCurveArgs) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_finance_dashboard(args: FinanceDashboardArgs) -> Result<()> {
+pub(crate) async fn cmd_finance_cot(args: FinanceCotArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
     }
 
-    let req = eli_core::finance::DashboardRequest {
-        preset: args.preset.clone(),
-        max_ms: args.max_ms,
+    let report = match args.report.trim().to_ascii_lowercase().as_str() {
+        "auto" | "" => None, // let core auto-detect from query
+        "disaggregated" | "disagg" | "commodities" => Some("disaggregated".to_string()),
+        "financial" | "fin" | "tff" => Some("financial".to_string()),
+        other => anyhow::bail!("invalid --report '{other}' (supported: auto, disaggregated, financial)"),
     };
-    let resp = eli_core::finance::fetch_dashboard(req)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("fetch dashboard")?;
+
+    let req = eli_core::finance::CotRequest {
+        query: args.query.clone(),
+        weeks: Some(args.weeks),
+        report,
+    };
+
+    // Cache: COT updates weekly (Fridays) — 6 hour TTL.
+    // Key includes all params: query, weeks, report type.
+    let cache_input = format!("{}|{}|{:?}", args.query.as_deref().unwrap_or(""), args.weeks, req.report);
+    let cot_cache_path = cli_cache_path("cot", &cache_input);
+    const COT_TTL: u64 = 6 * 3600; // 6 hours
+
+    let json = if let Some(cached) = cli_cache_read(&cot_cache_path, COT_TTL) {
+        cached
+    } else {
+        let resp = eli_core::finance::fetch_cot(req)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("fetch cot")?;
+        let j = serde_json::to_string_pretty(&resp).context("serialize response")?;
+        cli_cache_write(&cot_cache_path, &j);
+        j
+    };
 
     if let Some(out_path) = args.out {
-        let wr = write_json_out_with_meta(
-            out_path,
-            &resp,
-            "finance.dashboard",
-            &[format!("preset={}", args.preset)],
-        )?;
+        let resp: eli_core::finance::CotResponse =
+            serde_json::from_str(&json).context("deserialize cached cot")?;
+        let wr = write_json_out_with_meta(out_path, &resp, "finance.cot", &[])?;
         println!(
             "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
             serde_json::to_string(&wr.out_path.display().to_string())
@@ -356,42 +276,6 @@ async fn cmd_finance_dashboard(args: FinanceDashboardArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
-    Ok(())
-}
-
-async fn cmd_finance_prices(args: FinancePricesArgs) -> Result<()> {
-    if args.format.trim().to_ascii_lowercase() != "json" {
-        anyhow::bail!("unsupported --format (only 'json' is implemented)");
-    }
-
-    let ids_for_meta = args.ids.clone();
-    let req = eli_core::finance::PricesRequest {
-        query: args.query,
-        asset_type: args.asset_type,
-        ids: args.ids,
-        auto_select: args.auto_select,
-    };
-
-    let resp = eli_core::finance::fetch_prices(req)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("fetch prices")?;
-
-    if let Some(out_path) = args.out {
-        let wr = write_json_out_with_meta(out_path, &resp, "finance.prices", &ids_for_meta)?;
-        println!(
-            "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
-            serde_json::to_string(&wr.out_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-            serde_json::to_string(&wr.meta_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-        );
-        return Ok(());
-    }
-
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
     println!("{json}");
     Ok(())
 }

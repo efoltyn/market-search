@@ -25,6 +25,8 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
     })?;
 
     let quote_type = first.quote_type.as_ref();
+    let profile = first.asset_profile.as_ref();
+    let summary = first.summary_detail.as_ref();
     let stats = first.default_key_statistics.as_ref();
     let fin = first.financial_data.as_ref();
 
@@ -58,7 +60,7 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
         total_revenue: fin.and_then(|f| f.total_revenue).map(|v| v as i64),
         cost_of_revenue: None,
         gross_profit: fin.and_then(|f| f.gross_profits).map(|v| v as i64),
-        operating_income: fin.and_then(|f| f.operating_cashflow),
+        operating_income: None, // Yahoo financialData doesn't expose operatingIncome directly
         net_income: stats.and_then(|s| s.net_income_to_common).or_else(|| {
             // Derive from revenue * profit margin if direct net income unavailable
             let rev = fin.and_then(|f| f.total_revenue)? as f64;
@@ -78,12 +80,79 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
         free_cash_flow: fin.and_then(|f| f.free_cashflow),
     };
 
+    let metrics = eli_finance_types::FundamentalsMetrics {
+        current_price: fin.and_then(|f| f.current_price),
+        market_cap: summary.and_then(|s| s.market_cap),
+        enterprise_value: stats.and_then(|s| s.enterprise_value),
+        trailing_pe: summary.and_then(|s| s.trailing_pe),
+        forward_pe: summary
+            .and_then(|s| s.forward_pe)
+            .or_else(|| stats.and_then(|s| s.forward_pe)),
+        trailing_eps: stats.and_then(|s| s.trailing_eps),
+        forward_eps: stats.and_then(|s| s.forward_eps),
+        price_to_book: stats.and_then(|s| s.price_to_book),
+        book_value_per_share: stats.and_then(|s| s.book_value),
+        enterprise_to_revenue: stats.and_then(|s| s.enterprise_to_revenue),
+        enterprise_to_ebitda: stats.and_then(|s| s.enterprise_to_ebitda),
+        profit_margin: fin
+            .and_then(|f| f.profit_margins)
+            .or_else(|| stats.and_then(|s| s.profit_margins)),
+        gross_margin: fin.and_then(|f| f.gross_margins),
+        operating_margin: fin.and_then(|f| f.operating_margins),
+        ebitda_margin: fin.and_then(|f| f.ebitda_margins),
+        return_on_assets: fin.and_then(|f| f.return_on_assets),
+        return_on_equity: fin.and_then(|f| f.return_on_equity),
+        debt_to_equity: fin.and_then(|f| f.debt_to_equity),
+        current_ratio: fin.and_then(|f| f.current_ratio),
+        quick_ratio: fin.and_then(|f| f.quick_ratio),
+        revenue_growth: fin.and_then(|f| f.revenue_growth),
+        earnings_growth: fin
+            .and_then(|f| f.earnings_growth)
+            .or_else(|| stats.and_then(|s| s.earnings_quarterly_growth)),
+        revenue_per_share: fin.and_then(|f| f.revenue_per_share),
+        total_cash_per_share: fin.and_then(|f| f.total_cash_per_share),
+        shares_outstanding: stats.and_then(|s| s.shares_outstanding),
+        float_shares: stats.and_then(|s| s.float_shares),
+        short_ratio: stats.and_then(|s| s.short_ratio),
+        short_percent_of_float: stats.and_then(|s| s.short_percent_of_float),
+        analyst_target_mean_price: fin.and_then(|f| f.target_mean_price),
+        recommendation_mean: fin.and_then(|f| f.recommendation_mean),
+        recommendation_key: fin.and_then(|f| f.recommendation_key.clone()),
+        analyst_count: fin.and_then(|f| f.number_of_analyst_opinions),
+    };
+    let profile = eli_finance_types::FundamentalsProfile {
+        sector: profile.and_then(|p| p.sector.clone()),
+        industry: profile.and_then(|p| p.industry.clone()),
+        website: profile.and_then(|p| p.website.clone()),
+        full_time_employees: profile.and_then(|p| p.full_time_employees),
+    };
+    let metrics = if serde_json::to_value(&metrics)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .is_some_and(|fields| fields.values().any(|value| !value.is_null()))
+    {
+        Some(metrics)
+    } else {
+        None
+    };
+    let profile = if serde_json::to_value(&profile)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .is_some_and(|fields| fields.values().any(|value| !value.is_null()))
+    {
+        Some(profile)
+    } else {
+        None
+    };
+
     Ok(FundamentalsResponse {
         ticker,
         company_name,
         currency,
         generated_at: Utc::now(),
         statements: if is_etf { vec![] } else { vec![statement] },
+        metrics,
+        profile,
         note,
     })
 }

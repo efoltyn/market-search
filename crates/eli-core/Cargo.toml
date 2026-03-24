@@ -39,3 +39,5 @@ csv = "1.3"
 regex = "1.12.3"
 eli-finance-types.workspace = true
 evalexpr.workspace = true
+ibapi = "2.9.2"
+rusqlite.workspace = true

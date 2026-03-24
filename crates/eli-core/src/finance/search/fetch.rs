@@ -1,6 +1,9 @@
 use super::super::*;
 
 pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
+    if matches!(req.provider, ProviderKind::Ibkr) {
+        return crate::finance::fetch_ibkr_search(&req).await;
+    }
     let started = std::time::Instant::now();
     let generated_at = chrono::Utc::now();
     let query = req.query.trim().to_string();
@@ -8,22 +11,16 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
         return Err(Error::InvalidInput("search query is required".to_string()));
     }
     let policy_mode = req.policy_mode.unwrap_or_default();
-    let policy_file = req
-        .policy_file
-        .as_deref()
-        .map(std::path::Path::new);
+    let policy_file = req.policy_file.as_deref().map(std::path::Path::new);
     let resolved_policy = crate::finance::policy::load_policy(policy_file, policy_mode)?;
 
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .map_err(|e| Error::Provider(format!("search client init failed: {e}")))?;
+    let client = &*crate::finance::shared_client::GENERAL;
 
     let resp = client
         .get(YAHOO_SEARCH_URL)
         .query(&[
             ("q", query.as_str()),
-            ("quotesCount", "10"),
+            ("quotesCount", "25"),
             ("newsCount", "0"),
         ])
         .header("User-Agent", "Mozilla/5.0")
@@ -73,6 +70,10 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // FRED catalog search: find macro series by name (e.g. "michigan consumer sentiment" → UMCSENT).
+    // Hardcoded catalog — instant, no API key needed, always works.
+    results.extend(search_fred_catalog(&query));
+
     // Policy-driven macro suggestions from catalog.
     let macro_items: Vec<SearchItem> = resolved_policy
         .policy
@@ -104,6 +105,9 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
     } else {
         Vec::new()
     };
+    if results.is_empty() && !suggestions.is_empty() {
+        results = suggestions.clone();
+    }
 
     let data_as_of = Some(generated_at);
     Ok(SearchResponse {
@@ -137,4 +141,91 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
         results,
         macro_suggestions: suggestions,
     })
+}
+
+/// Search common FRED macro series by name. Hardcoded catalog covers 60+ popular series.
+/// No API key needed — instant, offline, always works.
+fn search_fred_catalog(query: &str) -> Vec<SearchItem> {
+    static FRED_CATALOG: &[(&str, &str)] = &[
+        ("UMCSENT", "University of Michigan Consumer Sentiment"),
+        ("UMCSENT1", "University of Michigan Consumer Sentiment 1-Year Ahead"),
+        ("MICH", "University of Michigan Inflation Expectation"),
+        ("UNRATE", "Unemployment Rate"),
+        ("PAYEMS", "All Employees, Total Nonfarm"),
+        ("CPIAUCSL", "Consumer Price Index for All Urban Consumers"),
+        ("CPILFESL", "Consumer Price Index Less Food and Energy (Core CPI)"),
+        ("PCEPI", "Personal Consumption Expenditures Price Index"),
+        ("PCEPILFE", "Personal Consumption Expenditures Excluding Food and Energy (Core PCE)"),
+        ("GDP", "Gross Domestic Product"),
+        ("GDPC1", "Real Gross Domestic Product"),
+        ("FEDFUNDS", "Federal Funds Effective Rate"),
+        ("DFF", "Federal Funds Effective Rate (Daily)"),
+        ("T10Y2Y", "10-Year Treasury Minus 2-Year Treasury Spread"),
+        ("T10Y3M", "10-Year Treasury Minus 3-Month Treasury Spread"),
+        ("DGS1MO", "1-Month Treasury Constant Maturity Rate"),
+        ("DGS3MO", "3-Month Treasury Constant Maturity Rate"),
+        ("DGS6MO", "6-Month Treasury Constant Maturity Rate"),
+        ("DGS1", "1-Year Treasury Constant Maturity Rate"),
+        ("DGS2", "2-Year Treasury Constant Maturity Rate"),
+        ("DGS5", "5-Year Treasury Constant Maturity Rate"),
+        ("DGS10", "10-Year Treasury Constant Maturity Rate"),
+        ("DGS20", "20-Year Treasury Constant Maturity Rate"),
+        ("DGS30", "30-Year Treasury Constant Maturity Rate"),
+        ("WALCL", "Federal Reserve Total Assets (Balance Sheet)"),
+        ("WTREGEN", "Treasury General Account (TGA)"),
+        ("RRPONTSYD", "Overnight Reverse Repurchase Agreements (RRP)"),
+        ("GFDEGDQ188S", "Federal Debt to GDP Ratio"),
+        ("MORTGAGE30US", "30-Year Fixed Rate Mortgage Average"),
+        ("DCOILWTICO", "Crude Oil Prices: WTI"),
+        ("DCOILBRENTEU", "Crude Oil Prices: Brent"),
+        ("GOLDAMGBD228NLBM", "Gold Fixing Price, London"),
+        ("VIXCLS", "CBOE Volatility Index: VIX"),
+        ("NASDAQCOM", "NASDAQ Composite Index"),
+        ("SP500", "S&P 500 Index"),
+        ("DTWEXBGS", "Trade Weighted U.S. Dollar Index"),
+        ("DEXUSEU", "U.S./Euro Foreign Exchange Rate"),
+        ("DEXJPUS", "Japan/U.S. Foreign Exchange Rate"),
+        ("DEXUSUK", "U.S./U.K. Foreign Exchange Rate"),
+        ("CSUSHPINSA", "Case-Shiller Home Price Index"),
+        ("HOUST", "Housing Starts"),
+        ("RSAFS", "Advance Retail Sales"),
+        ("INDPRO", "Industrial Production Index"),
+        ("PERMIT", "New Privately-Owned Housing Units Authorized"),
+        ("M2SL", "M2 Money Stock"),
+        ("ICSA", "Initial Claims (Jobless Claims)"),
+        ("CCSA", "Continued Claims"),
+        ("JTSJOL", "Job Openings: JOLTS"),
+        ("CIVPART", "Labor Force Participation Rate"),
+        ("A191RL1Q225SBEA", "Real GDP Growth Rate (Quarterly)"),
+        ("CPALTT01USM657N", "CPI Annual Change"),
+        ("BAMLH0A0HYM2", "ICE BofA High Yield Spread"),
+        ("BAMLC0A0CM", "ICE BofA Corporate Bond Spread"),
+        ("TEDRATE", "TED Spread"),
+        ("WILL5000IND", "Wilshire 5000 Total Market Index"),
+        ("STLFSI4", "St. Louis Fed Financial Stress Index"),
+        ("USREC", "NBER Recession Indicator"),
+        ("SAHMREALTIME", "Sahm Rule Recession Indicator"),
+        ("PSAVERT", "Personal Saving Rate"),
+        ("W875RX1", "Real Disposable Personal Income"),
+    ];
+
+    let q = query.to_lowercase();
+    let words: Vec<&str> = q.split_whitespace().collect();
+
+    FRED_CATALOG
+        .iter()
+        .filter(|(id, name)| {
+            let id_lower = id.to_lowercase();
+            let name_lower = name.to_lowercase();
+            // Match if all query words appear in either the ID or name
+            words.iter().all(|w| id_lower.contains(w) || name_lower.contains(w))
+        })
+        .map(|(id, name)| SearchItem {
+            symbol: id.to_string(),
+            name: Some(name.to_string()),
+            exchange: Some("FRED".to_string()),
+            asset_type: Some("MACRO".to_string()),
+            score: Some(100.0), // rank above Yahoo noise
+        })
+        .collect()
 }

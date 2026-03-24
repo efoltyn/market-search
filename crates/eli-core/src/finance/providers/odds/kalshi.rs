@@ -1,10 +1,393 @@
+/// Parse Kalshi `last_price_dollars` (e.g. "0.75") into a probability 0.0–1.0.
+/// Falls back to `last_price` (cents i64, e.g. 75 → 0.75) if dollars string is absent.
+fn kalshi_prob(yes_price_cents: Option<i64>, last_price_dollars: Option<&str>) -> Option<f64> {
+    if let Some(s) = last_price_dollars {
+        let s = s.trim();
+        if !s.is_empty() {
+            if let Ok(v) = s.parse::<f64>() {
+                if v >= 0.0 && v <= 1.0 {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    yes_price_cents.map(|p| p as f64 / 100.0)
+}
+
+/// Parse Kalshi volume: prefer `volume_fp` (string, e.g. "1234.00" = contracts),
+/// fall back to legacy `volume` (i64 contracts). Multiply by 100 to get approximate
+/// dollar volume (contracts are $0-$1 notional, but we report in cents convention).
+/// As of 2026-03-12 Kalshi deprecated legacy integer fields — volume_fp is required.
+fn kalshi_volume(volume_fp: Option<&str>, volume_legacy: Option<i64>) -> Option<i64> {
+    if let Some(s) = volume_fp {
+        let s = s.trim();
+        if !s.is_empty() {
+            if let Ok(v) = s.parse::<f64>() {
+                return Some((v * 100.0) as i64);
+            }
+        }
+    }
+    volume_legacy.map(|v| v * 100)
+}
+
+#[derive(Clone, Deserialize)]
+struct NestedEventsResp {
+    #[serde(default)]
+    events: Vec<NestedEventEntry>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+struct NestedEventEntry {
+    event_ticker: String,
+    title: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    series_ticker: Option<String>,
+    #[serde(default)]
+    markets: Vec<NestedMarketEntry>,
+}
+
+#[derive(Clone, Deserialize)]
+struct NestedMarketEntry {
+    ticker: String,
+    title: String,
+    #[serde(default)]
+    event_ticker: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default, rename = "last_price", alias = "yes_price")]
+    yes_price: Option<i64>,
+    #[serde(default)]
+    last_price_dollars: Option<String>,
+    #[serde(default)]
+    volume: Option<i64>,
+    #[serde(default)]
+    volume_fp: Option<String>,
+    #[serde(default)]
+    subtitle: Option<String>,
+    #[serde(default)]
+    yes_sub_title: Option<String>,
+}
+
+fn kalshi_search_score(query_phrase: &str, query_terms: &[String], fields: &[(&str, i64)]) -> i64 {
+    let mut score = 0i64;
+    let mut term_hits = 0usize;
+    let mut phrase_match = false;
+
+    for (field, weight) in fields {
+        let field = field.trim();
+        if field.is_empty() {
+            continue;
+        }
+        let lower = field.to_ascii_lowercase();
+        if !query_phrase.is_empty() && lower.contains(query_phrase) {
+            phrase_match = true;
+            score += weight.saturating_mul(4);
+        }
+        let hits = matched_term_count(field, query_terms);
+        term_hits = term_hits.saturating_add(hits);
+        score += (hits as i64).saturating_mul(*weight);
+    }
+
+    if !matches_query_terms(phrase_match, term_hits, query_terms.len()) {
+        return 0;
+    }
+
+    score
+}
+
+fn kalshi_search_market_display_title(
+    event_title: &str,
+    title: &str,
+    yes_sub_title: Option<&str>,
+    subtitle: Option<&str>,
+) -> String {
+    let title = title.trim();
+    let detail = yes_sub_title.or(subtitle).unwrap_or_default().trim();
+    if title.is_empty() {
+        return event_title.trim().to_string();
+    }
+    if detail.is_empty() {
+        return title.to_string();
+    }
+    if title
+        .to_ascii_lowercase()
+        .contains(&detail.to_ascii_lowercase())
+    {
+        return title.to_string();
+    }
+    format!("{title} ({detail})")
+}
+
+fn kalshi_search_status_matches(status: Option<&str>, effective_status: &str) -> bool {
+    if effective_status.eq_ignore_ascii_case("any") {
+        return true;
+    }
+    let status = status.unwrap_or_default().trim();
+    if effective_status.eq_ignore_ascii_case("open") {
+        return matches!(
+            status.to_ascii_lowercase().as_str(),
+            "" | "open" | "active" | "initialized"
+        );
+    }
+    status.eq_ignore_ascii_case(effective_status)
+}
+
+async fn search_kalshi_nested_events(
+    client: &reqwest::Client,
+    search_query: &str,
+    category_filter: Option<&str>,
+    status: Option<&str>,
+    limit: usize,
+    max_pages: usize,
+) -> Result<(Vec<OddsListedEvent>, Vec<OddsListedMarket>)> {
+    let query_phrase = search_query.trim().to_ascii_lowercase();
+    let query_terms = search_terms(&query_phrase);
+    if query_terms.is_empty() && query_phrase.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let mut category_queries: Vec<Option<String>> = if let Some(category) = category_filter
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        vec![Some(category.to_string())]
+    } else {
+        Vec::new()
+    };
+
+    if category_queries.is_empty() {
+        if let Ok(tags_map) = fetch_kalshi_tags_by_categories(client).await {
+            category_queries = derive_kalshi_categories_for_query(&query_phrase, &tags_map)
+                .into_iter()
+                .map(Some)
+                .collect();
+        }
+    }
+
+    let mut event_queries = category_queries;
+    event_queries.push(None);
+
+    let effective_status = status
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("open")
+        .to_ascii_lowercase();
+
+    let mut events_by_ticker: HashMap<String, (OddsListedEvent, i64)> = HashMap::new();
+    let mut markets_by_ticker: HashMap<String, (OddsListedMarket, i64, i64)> = HashMap::new();
+    let market_target = limit.saturating_mul(3).clamp(30, 300);
+    let event_target = limit.saturating_mul(2).clamp(20, 200);
+
+    for (query_idx, category) in event_queries.into_iter().enumerate() {
+        if query_idx > 0
+            && category.is_none()
+            && markets_by_ticker.len() >= limit.max(10)
+            && events_by_ticker.len() >= limit.max(10)
+        {
+            break;
+        }
+        let mut cursor: Option<String> = None;
+        for page_idx in 0..max_pages.max(1) {
+            if query_idx > 0 || page_idx > 0 {
+                tokio::time::sleep(StdDuration::from_millis(75)).await;
+            }
+
+            let mut query: Vec<(&str, String)> = vec![
+                ("status", effective_status.clone()),
+                ("limit", 200usize.to_string()),
+                ("with_nested_markets", "true".to_string()),
+            ];
+            if let Some(ref category_value) = category {
+                query.push(("category", category_value.clone()));
+            }
+            if let Some(ref current_cursor) = cursor {
+                if !current_cursor.trim().is_empty() {
+                    query.push(("cursor", current_cursor.trim().to_string()));
+                }
+            }
+
+            let url = format!("{}/events", KALSHI_BASE_URL);
+            let resp = match client.get(&url).query(&query).send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    warn!("kalshi nested events search fetch failed: {e}");
+                    break;
+                }
+            };
+            if !resp.status().is_success() {
+                warn!(
+                    "kalshi nested events search failed with http {} (continuing)",
+                    resp.status()
+                );
+                break;
+            }
+            let body: NestedEventsResp = match resp.json().await {
+                Ok(body) => body,
+                Err(e) => {
+                    warn!("kalshi nested events search parse failed: {e}");
+                    break;
+                }
+            };
+            if body.events.is_empty() {
+                break;
+            }
+
+            for event in body.events {
+                let category_value = event.category.clone();
+                let event_score = kalshi_search_score(
+                    &query_phrase,
+                    &query_terms,
+                    &[
+                        (&event.title, 12),
+                        (&event.event_ticker, 8),
+                        (category_value.as_deref().unwrap_or_default(), 4),
+                    ],
+                );
+                let mut best_market_score = 0i64;
+
+                for market in event.markets {
+                    if !kalshi_search_status_matches(market.status.as_deref(), &effective_status) {
+                        continue;
+                    }
+                    let display_title = kalshi_search_market_display_title(
+                        &event.title,
+                        &market.title,
+                        market.yes_sub_title.as_deref(),
+                        market.subtitle.as_deref(),
+                    );
+                    let market_score = kalshi_search_score(
+                        &query_phrase,
+                        &query_terms,
+                        &[
+                            (&display_title, 16),
+                            (&event.title, 8),
+                            (&event.event_ticker, 5),
+                            (&market.ticker, 5),
+                            (category_value.as_deref().unwrap_or_default(), 3),
+                        ],
+                    );
+                    if market_score <= 0 {
+                        continue;
+                    }
+                    best_market_score = best_market_score.max(market_score);
+
+                    let market_volume = kalshi_volume(market.volume_fp.as_deref(), market.volume)
+                        .unwrap_or_default();
+                    let listed_market = OddsListedMarket {
+                        ticker: market.ticker.clone(),
+                        title: display_title,
+                        event_ticker: market
+                            .event_ticker
+                            .clone()
+                            .unwrap_or_else(|| event.event_ticker.clone()),
+                        freshness: odds_freshness(None),
+                        yes_price: market.yes_price,
+                        volume: kalshi_volume(market.volume_fp.as_deref(), market.volume),
+                        status: market.status.clone(),
+                        source: Some("kalshi".to_string()),
+                        market_id: None,
+                        event_id: None,
+                        slug: None,
+                        outcomes: None,
+                        outcome_prices: None,
+                        clob_token_ids: None,
+                        probability_yes: kalshi_prob(
+                            market.yes_price,
+                            market.last_price_dollars.as_deref(),
+                        ),
+                        category: category_value.clone(),
+                    };
+                    let total_score = market_score + event_score / 2;
+                    match markets_by_ticker.get_mut(&market.ticker) {
+                        Some(existing) => {
+                            if total_score > existing.1
+                                || (total_score == existing.1 && market_volume > existing.2)
+                            {
+                                *existing = (listed_market, total_score, market_volume);
+                            }
+                        }
+                        None => {
+                            markets_by_ticker.insert(
+                                market.ticker.clone(),
+                                (listed_market, total_score, market_volume),
+                            );
+                        }
+                    }
+                }
+
+                let combined_event_score = event_score + best_market_score / 2;
+                if combined_event_score <= 0 {
+                    continue;
+                }
+
+                let listed_event = OddsListedEvent {
+                    ticker: event.event_ticker.clone(),
+                    title: event.title.clone(),
+                    category: category_value,
+                    series_ticker: event.series_ticker.clone(),
+                    source: Some("kalshi".to_string()),
+                    event_id: None,
+                    slug: None,
+                    tags: None,
+                };
+                match events_by_ticker.get_mut(&event.event_ticker) {
+                    Some(existing) => {
+                        if combined_event_score > existing.1 {
+                            *existing = (listed_event, combined_event_score);
+                        }
+                    }
+                    None => {
+                        events_by_ticker.insert(
+                            event.event_ticker.clone(),
+                            (listed_event, combined_event_score),
+                        );
+                    }
+                }
+            }
+
+            cursor = body.cursor.filter(|value| !value.trim().is_empty());
+            if cursor.is_none()
+                || (markets_by_ticker.len() >= market_target
+                    && events_by_ticker.len() >= event_target)
+            {
+                break;
+            }
+        }
+
+        if markets_by_ticker.len() >= market_target && events_by_ticker.len() >= event_target {
+            break;
+        }
+    }
+
+    let mut events: Vec<(OddsListedEvent, i64)> = events_by_ticker.into_values().collect();
+    events.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.ticker.cmp(&b.0.ticker)));
+    let mut markets: Vec<(OddsListedMarket, i64, i64)> = markets_by_ticker.into_values().collect();
+    markets.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| a.0.ticker.cmp(&b.0.ticker))
+    });
+
+    Ok((
+        events
+            .into_iter()
+            .take(limit)
+            .map(|(event, _)| event)
+            .collect(),
+        markets
+            .into_iter()
+            .take(limit)
+            .map(|(market, _, _)| market)
+            .collect(),
+    ))
+}
+
 pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(StdDuration::from_secs(30))
-        .connect_timeout(StdDuration::from_secs(10))
-        .build()
-        .map_err(|e| Error::Provider(format!("odds client init failed: {e}")))?;
+    let client = &*crate::finance::shared_client::GENERAL;
 
     // Handle list_series mode: return available series (optionally filtered)
     if req.list_series {
@@ -186,17 +569,87 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             .as_deref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "open".to_string());
+            .map(|s| s.to_string());
+
+        let search_mode = search_filter.is_some()
+            && req
+                .series_ticker
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            && req
+                .cursor
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty();
+
+        if search_mode {
+            if let Some(ref search) = search_filter {
+                let search_pages = req.max_pages.unwrap_or(5).max(1);
+                let (events, _) = search_kalshi_nested_events(
+                    &client,
+                    search,
+                    req.category.as_deref(),
+                    status.as_deref(),
+                    limit,
+                    search_pages,
+                )
+                .await?;
+                if !events.is_empty() {
+                    let generated_at = Utc::now();
+                    return Ok(OddsResponse {
+                        base_url: KALSHI_BASE_URL.to_string(),
+                        generated_at,
+                        schema_version: "finance.odds.v2".to_string(),
+                        freshness_summary: odds_response_freshness_summary(generated_at, &[], None),
+                        applied_policy: AppliedPolicy::default(),
+                        decision_trace: vec!["kalshi_search_mode=nested_events".to_string()],
+                        run_meta: odds_run_meta(events.len(), 0, events.len(), 0),
+                        series: None,
+                        events: vec![],
+                        markets: vec![],
+                        orderbook: None,
+                        cursor: None,
+                        available_series: None,
+                        available_events: Some(events),
+                        available_markets: None,
+                        available_tags: None,
+                        analytics: None,
+                        sources: None,
+                        field_semantics: default_odds_field_semantics(),
+                    });
+                }
+            }
+        }
 
         let mut filtered: Vec<OddsListedEvent> = Vec::new();
         while page < max_pages {
-            let mut query: Vec<(&str, String)> =
-                vec![("status", status.clone()), ("limit", limit.to_string())];
+            // Pace pages to avoid 429 rate limits (skip delay on first page).
+            // 200ms between pages keeps us well under Kalshi's rate ceiling.
+            if page > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            // Early exit: if we've already found plenty of matching events,
+            // stop paginating to save API budget and latency.
+            if search_filter.is_some() && filtered.len() >= 30 {
+                break;
+            }
+            let mut query: Vec<(&str, String)> = vec![("limit", limit.to_string())];
+            if let Some(ref st) = status {
+                query.push(("status", st.clone()));
+            }
             if let Some(ref cat) = req.category {
                 let cat = cat.trim();
                 if !cat.is_empty() {
                     query.push(("category", cat.to_string()));
+                }
+            }
+            if let Some(ref st) = req.series_ticker {
+                let st = st.trim();
+                if !st.is_empty() {
+                    query.push(("series_ticker", st.to_string()));
                 }
             }
             if let Some(ref c) = page_cursor {
@@ -327,7 +780,11 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             #[serde(default, rename = "last_price", alias = "yes_price")]
             yes_price: Option<i64>,
             #[serde(default)]
+            last_price_dollars: Option<String>,
+            #[serde(default)]
             volume: Option<i64>,
+            #[serde(default)]
+            volume_fp: Option<String>,
             #[serde(default)]
             status: Option<String>,
         }
@@ -385,6 +842,48 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                 .is_empty();
 
         if search_mode {
+            if let Some(ref search) = search_filter {
+                let search_pages = req.max_pages.unwrap_or(5).max(1);
+                let (_, nested_markets) = search_kalshi_nested_events(
+                    &client,
+                    search,
+                    req.category.as_deref(),
+                    status.as_deref(),
+                    limit,
+                    search_pages,
+                )
+                .await?;
+                if !nested_markets.is_empty() {
+                    let analytics = build_odds_analytics_from_listed(&nested_markets);
+                    let generated_at = Utc::now();
+                    return Ok(OddsResponse {
+                        base_url: KALSHI_BASE_URL.to_string(),
+                        generated_at,
+                        schema_version: "finance.odds.v2".to_string(),
+                        freshness_summary: odds_response_freshness_summary(
+                            generated_at,
+                            &[],
+                            Some(&nested_markets),
+                        ),
+                        applied_policy: AppliedPolicy::default(),
+                        decision_trace: vec!["kalshi_search_mode=nested_events".to_string()],
+                        run_meta: odds_run_meta(0, 0, 0, nested_markets.len()),
+                        series: None,
+                        events: vec![],
+                        markets: vec![],
+                        orderbook: None,
+                        cursor: None,
+                        available_series: None,
+                        available_events: None,
+                        available_markets: Some(nested_markets),
+                        available_tags: None,
+                        analytics,
+                        sources: None,
+                        field_semantics: default_odds_field_semantics(),
+                    });
+                }
+            }
+
             let mut category_hints: Vec<String> = Vec::new();
             if let Some(search_query) = search_filter.as_deref() {
                 if let Ok(tags_map) = fetch_kalshi_tags_by_categories(&client).await {
@@ -556,13 +1055,15 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                                 }
                             }
                             if seen_markets.insert(m.ticker.clone()) {
+                                let prob =
+                                    kalshi_prob(m.yes_price, m.last_price_dollars.as_deref());
                                 filtered.push(OddsListedMarket {
                                     ticker: m.ticker,
                                     title: m.title,
                                     event_ticker: m.event_ticker,
                                     freshness: odds_freshness(None),
                                     yes_price: m.yes_price,
-                                    volume: m.volume.map(|v| v * 100),
+                                    volume: kalshi_volume(m.volume_fp.as_deref(), m.volume),
                                     status: m.status,
                                     source: Some("kalshi".to_string()),
                                     market_id: None,
@@ -571,7 +1072,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                                     outcomes: None,
                                     outcome_prices: None,
                                     clob_token_ids: None,
-                                    probability_yes: m.yes_price.map(|p| p as f64 / 100.0),
+                                    probability_yes: prob,
                                     category: None,
                                 });
                             }
@@ -710,7 +1211,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                     event_ticker: m.event_ticker,
                     freshness: odds_freshness(None),
                     yes_price: m.yes_price,
-                    volume: m.volume.map(|v| v * 100),
+                    volume: kalshi_volume(m.volume_fp.as_deref(), m.volume),
                     status: m.status,
                     source: Some("kalshi".to_string()),
                     market_id: None,
@@ -719,7 +1220,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                     outcomes: None,
                     outcome_prices: None,
                     clob_token_ids: None,
-                    probability_yes: m.yes_price.map(|p| p as f64 / 100.0),
+                    probability_yes: kalshi_prob(m.yes_price, m.last_price_dollars.as_deref()),
                     category: None,
                 });
             }
@@ -738,11 +1239,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             base_url: KALSHI_BASE_URL.to_string(),
             generated_at,
             schema_version: "finance.odds.v2".to_string(),
-            freshness_summary: odds_response_freshness_summary(
-                generated_at,
-                &[],
-                Some(&filtered),
-            ),
+            freshness_summary: odds_response_freshness_summary(generated_at, &[], Some(&filtered)),
             applied_policy: AppliedPolicy::default(),
             decision_trace: vec![],
             run_meta: odds_run_meta(0, 0, 0, filtered.len()),
@@ -836,11 +1333,15 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                 #[serde(default, rename = "last_price", alias = "yes_price")]
                 yes_price: Option<i64>,
                 #[serde(default)]
+                last_price_dollars: Option<String>,
+                #[serde(default)]
                 yes_bid: Option<i64>,
                 #[serde(default)]
                 yes_ask: Option<i64>,
                 #[serde(default)]
                 volume: Option<i64>,
+                #[serde(default)]
+                volume_fp: Option<String>,
             }
 
             // If an event_ticker is also provided, list markets by event instead of series.
@@ -895,7 +1396,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                             yes_price: m.yes_price,
                             yes_bid: m.yes_bid,
                             yes_ask: m.yes_ask,
-                            volume: m.volume.map(|v| v * 100),
+                            volume: kalshi_volume(m.volume_fp.as_deref(), m.volume),
                             source: Some("kalshi".to_string()),
                             market_id: None,
                             event_id: None,
@@ -903,7 +1404,10 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                             outcomes: None,
                             outcome_prices: None,
                             clob_token_ids: None,
-                            probability_yes: m.yes_price.map(|p| p as f64 / 100.0),
+                            probability_yes: kalshi_prob(
+                                m.yes_price,
+                                m.last_price_dollars.as_deref(),
+                            ),
                             outcome_best_bids: None,
                             outcome_best_asks: None,
                             orderbook_timestamp: None,
@@ -980,11 +1484,15 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                 #[serde(default, rename = "last_price", alias = "yes_price")]
                 yes_price: Option<i64>,
                 #[serde(default)]
+                last_price_dollars: Option<String>,
+                #[serde(default)]
                 yes_bid: Option<i64>,
                 #[serde(default)]
                 yes_ask: Option<i64>,
                 #[serde(default)]
                 volume: Option<i64>,
+                #[serde(default)]
+                volume_fp: Option<String>,
             }
 
             let mut page = 0usize;
@@ -1038,7 +1546,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                         yes_price: m.yes_price,
                         yes_bid: m.yes_bid,
                         yes_ask: m.yes_ask,
-                        volume: m.volume.map(|v| v * 100),
+                        volume: kalshi_volume(m.volume_fp.as_deref(), m.volume),
                         source: Some("kalshi".to_string()),
                         market_id: None,
                         event_id: None,
@@ -1046,7 +1554,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                         outcomes: None,
                         outcome_prices: None,
                         clob_token_ids: None,
-                        probability_yes: m.yes_price.map(|p| p as f64 / 100.0),
+                        probability_yes: kalshi_prob(m.yes_price, m.last_price_dollars.as_deref()),
                         outcome_best_bids: None,
                         outcome_best_asks: None,
                         orderbook_timestamp: None,
@@ -1080,11 +1588,15 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                 #[serde(default, rename = "last_price", alias = "yes_price")]
                 yes_price: Option<i64>,
                 #[serde(default)]
+                last_price_dollars: Option<String>,
+                #[serde(default)]
                 yes_bid: Option<i64>,
                 #[serde(default)]
                 yes_ask: Option<i64>,
                 #[serde(default)]
                 volume: Option<i64>,
+                #[serde(default)]
+                volume_fp: Option<String>,
             }
 
             let url = format!("{}/markets/{}", KALSHI_BASE_URL, ticker);
@@ -1094,6 +1606,39 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                 .await
                 .map_err(|e| Error::Provider(format!("kalshi market fetch failed: {e}")))?;
             if !resp.status().is_success() {
+                if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                    if let Some(candidates) = load_kalshi_market_candidates_from_cache(ticker) {
+                        let generated_at = Utc::now();
+                        return Ok(OddsResponse {
+                            base_url: KALSHI_BASE_URL.to_string(),
+                            generated_at,
+                            schema_version: "finance.odds.v2".to_string(),
+                            freshness_summary: odds_response_freshness_summary(
+                                generated_at,
+                                &[],
+                                Some(&candidates),
+                            ),
+                            applied_policy: AppliedPolicy::default(),
+                            decision_trace: vec![format!(
+                                "market_lookup_fallback=cache_candidates:{}",
+                                ticker
+                            )],
+                            run_meta: odds_run_meta(0, 0, 0, candidates.len()),
+                            series: None,
+                            events: Vec::new(),
+                            markets: Vec::new(),
+                            orderbook: None,
+                            cursor: None,
+                            available_series: None,
+                            available_events: None,
+                            available_markets: Some(candidates),
+                            available_tags: None,
+                            analytics: None,
+                            sources: None,
+                            field_semantics: default_odds_field_semantics(),
+                        });
+                    }
+                }
                 return Err(Error::Provider(format!(
                     "kalshi market fetch failed: http {}",
                     resp.status()
@@ -1115,7 +1660,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                     yes_price: m.yes_price,
                     yes_bid: m.yes_bid,
                     yes_ask: m.yes_ask,
-                    volume: m.volume.map(|v| v * 100),
+                    volume: kalshi_volume(m.volume_fp.as_deref(), m.volume),
                     source: Some("kalshi".to_string()),
                     market_id: None,
                     event_id: None,
@@ -1123,7 +1668,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                     outcomes: None,
                     outcome_prices: None,
                     clob_token_ids: None,
-                    probability_yes: m.yes_price.map(|p| p as f64 / 100.0),
+                    probability_yes: kalshi_prob(m.yes_price, m.last_price_dollars.as_deref()),
                     outcome_best_bids: None,
                     outcome_best_asks: None,
                     orderbook_timestamp: None,
@@ -1221,4 +1766,112 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
         sources: None,
         field_semantics: default_odds_field_semantics(),
     })
+}
+
+fn load_kalshi_market_candidates_from_cache(
+    requested_ticker: &str,
+) -> Option<Vec<OddsListedMarket>> {
+    #[derive(serde::Deserialize)]
+    struct RawCacheRow {
+        source: String,
+        ticker: String,
+        title: String,
+        event_ticker: String,
+        yes_price: String,
+        volume: String,
+        status: String,
+        probability: String,
+    }
+
+    let event_prefix = requested_ticker.split('-').next()?.trim();
+    if event_prefix.is_empty() {
+        return None;
+    }
+    let cache_dir = directories::ProjectDirs::from("", "", "eli")
+        .map(|d| d.cache_dir().join("odds"))
+        .unwrap_or_else(|| std::env::temp_dir().join("eli-odds-cache"));
+    let csv_path = cache_dir.join("all_markets.csv");
+    let mut rdr = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_path(csv_path)
+        .ok()?;
+    let mut out = Vec::new();
+    for row in rdr.deserialize::<RawCacheRow>() {
+        let Ok(row) = row else { continue };
+        if !row.source.trim().eq_ignore_ascii_case("kalshi") {
+            continue;
+        }
+        if row.event_ticker.trim() != event_prefix {
+            continue;
+        }
+        let yes_price = row.yes_price.trim().parse::<i64>().ok();
+        let volume = row.volume.trim().parse::<f64>().ok().map(|v| v as i64);
+        let probability_yes = row
+            .probability
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .or_else(|| yes_price.map(|p| p as f64 / 100.0));
+        out.push(OddsListedMarket {
+            ticker: row.ticker,
+            title: row.title,
+            event_ticker: row.event_ticker,
+            freshness: odds_freshness(None),
+            category: None,
+            yes_price,
+            volume,
+            status: if row.status.trim().is_empty() {
+                None
+            } else {
+                Some(row.status)
+            },
+            source: Some("kalshi".to_string()),
+            market_id: None,
+            event_id: None,
+            slug: None,
+            outcomes: None,
+            outcome_prices: None,
+            clob_token_ids: None,
+            probability_yes,
+        });
+    }
+    out.sort_by(|a, b| {
+        b.volume
+            .unwrap_or(0)
+            .cmp(&a.volume.unwrap_or(0))
+            .then_with(|| a.ticker.cmp(&b.ticker))
+    });
+    (!out.is_empty()).then_some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kalshi_open_search_treats_active_as_live() {
+        assert!(kalshi_search_status_matches(Some("active"), "open"));
+        assert!(kalshi_search_status_matches(Some("initialized"), "open"));
+        assert!(kalshi_search_status_matches(Some("open"), "open"));
+        assert!(!kalshi_search_status_matches(Some("closed"), "open"));
+    }
+
+    #[test]
+    fn kalshi_market_display_title_includes_detail_once() {
+        let rendered = kalshi_search_market_display_title(
+            "Will there be a recession in 2026?",
+            "Will there be a recession in 2026?",
+            Some("Starts"),
+            None,
+        );
+        assert_eq!(rendered, "Will there be a recession in 2026? (Starts)");
+
+        let unchanged = kalshi_search_market_display_title(
+            "",
+            "Will oil settle above $90? (Above $90)",
+            Some("Above $90"),
+            None,
+        );
+        assert_eq!(unchanged, "Will oil settle above $90? (Above $90)");
+    }
 }

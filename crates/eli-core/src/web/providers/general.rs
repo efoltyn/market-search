@@ -249,9 +249,10 @@ pub async fn search_smart(mut req: WebSearchRequest) -> Result<WebSearchResponse
     after_time.sort_by(compare_candidates);
     after_time.truncate(req.top);
 
-    let probe_count = req.probe_top.min(after_time.len());
+    let probe_indices = select_probe_indices(&after_time, req.probe_top.min(after_time.len()));
+    let probe_count = probe_indices.len();
     if probe_count > 0 {
-        let indexed_probes = futures::stream::iter((0..probe_count).collect::<Vec<_>>())
+        let indexed_probes = futures::stream::iter(probe_indices)
             .map(|idx| {
                 let url = after_time[idx].url.clone();
                 async move {
@@ -263,9 +264,16 @@ pub async fn search_smart(mut req: WebSearchRequest) -> Result<WebSearchResponse
             .buffer_unordered(req.max_parallel)
             .collect::<Vec<_>>()
             .await;
+        let mut blocked_probe_count = 0usize;
+        let mut partial_probe_count = 0usize;
         for (idx, summary) in indexed_probes {
-            let readability = summary.fetch_status.readability_score();
             if let Some(candidate) = after_time.get_mut(idx) {
+                if summary.fetch_status == crate::web::WebReadFetchStatus::Blocked {
+                    blocked_probe_count += 1;
+                } else if summary.fetch_status == crate::web::WebReadFetchStatus::Partial {
+                    partial_probe_count += 1;
+                }
+                let readability = effective_probe_readability(candidate, &summary);
                 candidate.scores.readability = readability;
                 candidate.scores.final_score = weighted_score(
                     candidate.scores.lexical,
@@ -275,6 +283,16 @@ pub async fn search_smart(mut req: WebSearchRequest) -> Result<WebSearchResponse
                 );
                 candidate.read_probe = Some(summary);
             }
+        }
+        if blocked_probe_count > 0 {
+            warnings.push(format!(
+                "read probes blocked on {blocked_probe_count} result(s); ranking kept search-hit metadata when available"
+            ));
+        }
+        if partial_probe_count > 0 {
+            warnings.push(format!(
+                "read probes returned partial extraction on {partial_probe_count} result(s)"
+            ));
         }
     }
 
@@ -362,7 +380,13 @@ async fn fetch_provider(
 
 fn mode_targets(mode: WebSearchMode) -> Vec<ProviderTarget> {
     match mode {
-        WebSearchMode::Auto | WebSearchMode::News => vec![ProviderTarget::DuckDuckGo],
+        WebSearchMode::Auto => vec![
+            ProviderTarget::DuckDuckGo,
+            ProviderTarget::FinanceExt,
+            ProviderTarget::Community,
+            ProviderTarget::Wiki,
+        ],
+        WebSearchMode::News => vec![ProviderTarget::DuckDuckGo, ProviderTarget::FinanceExt],
         WebSearchMode::Finance => vec![ProviderTarget::DuckDuckGo, ProviderTarget::FinanceExt],
         WebSearchMode::Research => vec![ProviderTarget::Papers, ProviderTarget::DuckDuckGo],
         WebSearchMode::Tech => vec![ProviderTarget::Community, ProviderTarget::DuckDuckGo],
@@ -649,19 +673,7 @@ fn freshness_score(published: Option<DateTime<Utc>>) -> f64 {
 
 fn source_trust_score(url: &str, source: &str, provenance: &str) -> f64 {
     let domain = extract_domain(url);
-    let high_trust_domains = [
-        "reuters.com",
-        "bloomberg.com",
-        "ft.com",
-        "wsj.com",
-        "apnews.com",
-        "federalreserve.gov",
-        "sec.gov",
-    ];
-    if high_trust_domains
-        .iter()
-        .any(|d| domain_matches(&domain, d))
-    {
+    if is_high_trust_domain(&domain) {
         return 0.96;
     }
     if domain_matches(&domain, "wikipedia.org") || provenance == "encyclopedic" {
@@ -678,6 +690,74 @@ fn source_trust_score(url: &str, source: &str, provenance: &str) -> f64 {
 
 fn weighted_score(lexical: f64, freshness: f64, source_trust: f64, readability: f64) -> f64 {
     (0.45 * lexical + 0.20 * freshness + 0.20 * source_trust + 0.15 * readability).clamp(0.0, 1.0)
+}
+
+fn is_high_trust_domain(domain: &str) -> bool {
+    let high_trust_domains = [
+        "reuters.com",
+        "bloomberg.com",
+        "ft.com",
+        "wsj.com",
+        "apnews.com",
+        "federalreserve.gov",
+        "sec.gov",
+    ];
+    high_trust_domains
+        .iter()
+        .any(|needle| domain_matches(domain, needle))
+}
+
+fn is_probe_hostile_domain(domain: &str) -> bool {
+    let probe_hostile = [
+        "wsj.com",
+        "marketwatch.com",
+        "barrons.com",
+        "nytimes.com",
+        "ft.com",
+        "bloomberg.com",
+    ];
+    probe_hostile
+        .iter()
+        .any(|needle| domain_matches(domain, needle))
+}
+
+fn select_probe_indices(candidates: &[SearchCandidate], probe_count: usize) -> Vec<usize> {
+    if probe_count == 0 || candidates.is_empty() {
+        return Vec::new();
+    }
+    let mut ranked = (0..candidates.len()).collect::<Vec<_>>();
+    ranked.sort_by(|a, b| compare_probe_priority(&candidates[*a], &candidates[*b]));
+    ranked.truncate(probe_count);
+    ranked
+}
+
+fn compare_probe_priority(a: &SearchCandidate, b: &SearchCandidate) -> std::cmp::Ordering {
+    let a_hostile = is_probe_hostile_domain(&a.domain);
+    let b_hostile = is_probe_hostile_domain(&b.domain);
+    a_hostile
+        .cmp(&b_hostile)
+        .then_with(|| is_high_trust_domain(&b.domain).cmp(&is_high_trust_domain(&a.domain)))
+        .then_with(|| {
+            b.scores
+                .final_score
+                .partial_cmp(&a.scores.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| a.url.cmp(&b.url))
+}
+
+fn effective_probe_readability(candidate: &SearchCandidate, summary: &WebReadProbeSummary) -> f64 {
+    let base = summary.fetch_status.readability_score();
+    if base > 0.0 {
+        return base;
+    }
+    if summary.fetch_status == crate::web::WebReadFetchStatus::Blocked
+        && !candidate.snippet.trim().is_empty()
+        && is_high_trust_domain(&candidate.domain)
+    {
+        return 0.25;
+    }
+    base
 }
 
 fn compare_candidates(a: &SearchCandidate, b: &SearchCandidate) -> std::cmp::Ordering {

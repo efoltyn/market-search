@@ -1,22 +1,22 @@
 use super::super::providers::{sync_kalshi_events, sync_polymarket_events};
 use super::super::{
-    default_odds_field_semantics, AppliedPolicy, Freshness, FreshnessOrigin, FreshnessQuality,
-    FreshnessState, FreshnessSummary, OddsListedEvent, OddsListedMarket,
-    OddsSyncBaselineQuality, OddsSyncCoverage, OddsSyncRequest, OddsSyncResponse,
-    OddsSyncSourceDelta, OddsSyncSourceResult, OddsSyncStatus, RateLimiter, RunMeta,
+    AppliedPolicy, Freshness, FreshnessOrigin, FreshnessQuality, FreshnessState, FreshnessSummary,
+    OddsListedEvent, OddsListedMarket, OddsSyncBaselineQuality, OddsSyncCoverage, OddsSyncMode,
+    OddsSyncRequest, OddsSyncResponse, OddsSyncSourceDelta, OddsSyncSourceResult, OddsSyncStatus,
+    RateLimiter, RunMeta, default_odds_field_semantics,
 };
-use super::analysis::{build_sync_analysis, build_sync_source_analytics, SyncAnalysisInput};
+use super::analysis::{SyncAnalysisInput, build_sync_analysis, build_sync_source_analytics};
 use super::csv_cache_writer::{merge_markets_csv, write_markets_csv};
 use super::delta::{
+    OddsSyncMarketState, OddsSyncSourceState, SourceBaselineQuality,
     apply_source_delta_baseline_reset, build_delta_index, build_overall_delta, build_source_delta,
-    load_sync_state, write_delta_index, write_sync_state, OddsSyncMarketState, OddsSyncSourceState,
-    SourceBaselineQuality,
+    load_sync_state, write_delta_index, write_sync_state,
 };
 use crate::Result;
 use base64::Engine;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures::{SinkExt, StreamExt};
-use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey, Pss, RsaPrivateKey};
+use rsa::{Pss, RsaPrivateKey, pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -127,6 +127,9 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         result: OddsSyncSourceResult,
         events: Vec<OddsListedEvent>,
         markets: Vec<OddsListedMarket>,
+        /// True when this was a full catalog download (DELETE+INSERT in SQLite).
+        /// False for stream refreshes (INSERT OR REPLACE, keep old rows).
+        is_full_sync: bool,
     }
 
     let (kalshi_result, poly_result) = tokio::join!(
@@ -162,10 +165,13 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                                     },
                                     events,
                                     markets,
+                                    is_full_sync: false,
                                 });
                             }
                             Err(e) => {
-                                eprintln!("[kalshi] stream refresh failed, falling back to REST sync: {e}");
+                                eprintln!(
+                                    "[kalshi] stream refresh failed, falling back to REST sync: {e}"
+                                );
                             }
                         }
                     }
@@ -199,6 +205,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                             },
                             events,
                             markets,
+                            is_full_sync: max_pages.is_none(),
                         })
                     }
                     Err(e) => Some(SourceSyncPayload {
@@ -218,6 +225,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                         },
                         events: Vec::new(),
                         markets: Vec::new(),
+                        is_full_sync: true,
                     }),
                 }
             } else {
@@ -256,6 +264,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                                     },
                                     events,
                                     markets,
+                                    is_full_sync: false,
                                 });
                             }
                             Err(e) => {
@@ -288,6 +297,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                             },
                             events,
                             markets,
+                            is_full_sync: max_pages.is_none(),
                         })
                     }
                     Err(e) => Some(SourceSyncPayload {
@@ -307,6 +317,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                         },
                         events: Vec::new(),
                         markets: Vec::new(),
+                        is_full_sync: true,
                     }),
                 }
             } else {
@@ -315,6 +326,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         }
     );
 
+    let mut source_is_full_sync: HashMap<String, bool> = HashMap::new();
     for mut payload in [kalshi_result, poly_result].into_iter().flatten() {
         if let Some(ref p) = payload.result.csv_path {
             csv_paths.push(PathBuf::from(p));
@@ -385,6 +397,7 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
                 // Remove legacy source-only key once profile-keyed state exists.
                 sync_state.sources.remove(&source);
             }
+            source_is_full_sync.insert(source.clone(), payload.is_full_sync);
             analysis_inputs.push(SyncAnalysisInput {
                 source,
                 events: payload.events,
@@ -435,15 +448,59 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
         }
     }
 
-    let merged_path: Option<String> = if csv_paths.len() > 1 {
-        merge_markets_csv(&csv_paths, &cache_dir)
+    // When only one source was synced, include the other provider's existing CSV
+    // so that all_markets.csv always reflects both sources.
+    let mut merge_paths = csv_paths.clone();
+    if merge_paths.len() == 1 {
+        let other_csvs = ["kalshi_markets.csv", "polymarket_markets.csv"];
+        for name in &other_csvs {
+            let other = cache_dir.join(name);
+            if other.exists() && !merge_paths.contains(&other) {
+                merge_paths.push(other);
+            }
+        }
+    }
+
+    let merged_path: Option<String> = if merge_paths.len() > 1 {
+        merge_markets_csv(&merge_paths, &cache_dir)
             .ok()
             .map(|p| p.to_string_lossy().to_string())
-    } else if csv_paths.len() == 1 {
-        Some(csv_paths[0].to_string_lossy().to_string())
+    } else if merge_paths.len() == 1 {
+        Some(merge_paths[0].to_string_lossy().to_string())
     } else {
         None
     };
+
+    // Write markets to SQLite FTS5 index for instant search.
+    {
+        let db_path = cache_dir.join("markets.db");
+        match crate::finance::odds_db::open_markets_db(&db_path) {
+            Ok(conn) => {
+                let synced_at = current_sync_at.to_rfc3339();
+                for input in &analysis_inputs {
+                    let full_replace = source_is_full_sync
+                        .get(&input.source)
+                        .copied()
+                        .unwrap_or(true);
+                    let mode = if full_replace { "full" } else { "incremental" };
+                    match crate::finance::odds_db::upsert_markets(
+                        &conn,
+                        &input.markets,
+                        &input.source,
+                        &synced_at,
+                        full_replace,
+                    ) {
+                        Ok(n) => {
+                            eprintln!("[sqlite] indexed {} {} markets ({})", n, input.source, mode)
+                        }
+                        Err(e) => eprintln!("[sqlite] {} upsert error: {}", input.source, e),
+                    }
+                }
+                let _ = crate::finance::odds_db::set_sync_meta(&conn, "last_sync_at", &synced_at);
+            }
+            Err(e) => eprintln!("[sqlite] failed to open markets.db: {e}"),
+        }
+    }
 
     // Auto-emit .meta.json sidecar for the merged CSV (schema for agent discovery).
     if let Some(ref csv_path_str) = merged_path {
@@ -464,6 +521,25 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
 
     let total_events: usize = source_results.iter().map(|r| r.events_count).sum();
     let total_markets: usize = source_results.iter().map(|r| r.markets_count).sum();
+    let sync_mode = if source_results.iter().any(|src| {
+        src.coverage
+            .as_ref()
+            .map(|cov| cov.sync_mode == OddsSyncMode::FrontierSample)
+            .unwrap_or(false)
+    }) {
+        OddsSyncMode::FrontierSample
+    } else if !source_results.is_empty()
+        && source_results.iter().all(|src| {
+            src.coverage
+                .as_ref()
+                .map(|cov| cov.sync_mode == OddsSyncMode::StreamRefresh)
+                .unwrap_or(false)
+        })
+    {
+        OddsSyncMode::StreamRefresh
+    } else {
+        OddsSyncMode::Exhaustive
+    };
     let sync_status = if source_results.is_empty() {
         OddsSyncStatus::Partial
     } else if source_results.iter().all(|src| {
@@ -543,7 +619,14 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
             stale_count: 0,
         },
         applied_policy: AppliedPolicy::default(),
-        decision_trace: vec![],
+        decision_trace: match sync_mode {
+            OddsSyncMode::Exhaustive => vec!["sync_mode=exhaustive".to_string()],
+            OddsSyncMode::FrontierSample => vec![
+                "sync_mode=frontier_sample".to_string(),
+                "max_pages_is_debug_only=true".to_string(),
+            ],
+            OddsSyncMode::StreamRefresh => vec!["sync_mode=stream_refresh".to_string()],
+        },
         run_meta: RunMeta {
             latency_ms: 0,
             stdout_chars: 0,
@@ -556,10 +639,22 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
             token_efficiency: None,
         },
         sync_status,
+        sync_mode,
+        providers: source_results.clone(),
         sources: source_results,
         total_events,
         total_markets,
-        merged_csv_path: merged_path,
+        stats: Some(serde_json::json!({
+            "sources": do_kalshi as usize + do_polymarket as usize,
+            "total_events": total_events,
+            "total_markets": total_markets,
+        })),
+        merged_csv_path: merged_path.clone(),
+        output_files: Some(serde_json::json!({
+            "merged_csv_path": merged_path,
+            "sync_state_path": persisted_sync_state_path.clone(),
+            "sync_delta_index_path": persisted_delta_index_path.clone(),
+        })),
         analysis,
         delta,
         sync_state_path: persisted_sync_state_path,
@@ -572,6 +667,12 @@ fn classify_source_quality(
     coverage: Option<&OddsSyncCoverage>,
 ) -> (SourceBaselineQuality, Option<String>) {
     match coverage {
+        Some(cov) if cov.sync_mode == OddsSyncMode::FrontierSample => (
+            SourceBaselineQuality::Untrusted,
+            Some(cov.coverage_warning.clone().unwrap_or_else(|| {
+                "debug frontier sample requested via max_pages; baseline reset required".to_string()
+            })),
+        ),
         Some(cov) if cov.strict_pass => (SourceBaselineQuality::Trusted, None),
         Some(cov) if !cov.strict_fail_reasons.is_empty() => (
             SourceBaselineQuality::Untrusted,
@@ -731,6 +832,7 @@ async fn try_kalshi_stream_refresh(
     let events: Vec<OddsListedEvent> = events_by_ticker.into_values().collect();
 
     let coverage = OddsSyncCoverage {
+        sync_mode: OddsSyncMode::StreamRefresh,
         requested_max_pages: None,
         events_pages_fetched: 0,
         events_exhausted: true,
@@ -743,6 +845,7 @@ async fn try_kalshi_stream_refresh(
         series_backfill_calls: None,
         series_backfill_cap: None,
         series_backfill_truncated: None,
+        coverage_warning: None,
         strict_pass: true,
         strict_fail_reasons: Vec::new(),
     };
@@ -810,7 +913,10 @@ async fn try_polymarket_stream_refresh(
             market.yes_price = Some((probability_yes * 100.0).round() as i64);
             touched = true;
         }
-        if tokens.iter().any(|token| ws_refresh.resolved_assets.contains(token)) {
+        if tokens
+            .iter()
+            .any(|token| ws_refresh.resolved_assets.contains(token))
+        {
             market.status = Some("resolved".to_string());
             touched = true;
         }
@@ -840,6 +946,7 @@ async fn try_polymarket_stream_refresh(
     let events: Vec<OddsListedEvent> = events_by_ticker.into_values().collect();
 
     let coverage = OddsSyncCoverage {
+        sync_mode: OddsSyncMode::StreamRefresh,
         requested_max_pages: None,
         events_pages_fetched: 0,
         events_exhausted: true,
@@ -852,6 +959,7 @@ async fn try_polymarket_stream_refresh(
         series_backfill_calls: None,
         series_backfill_cap: None,
         series_backfill_truncated: None,
+        coverage_warning: None,
         strict_pass: true,
         strict_fail_reasons: Vec::new(),
     };

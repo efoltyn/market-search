@@ -49,6 +49,23 @@ impl Severity {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SpawnTarget {
+    Default,
+    Codex,
+    Claude,
+    Gemini,
+    Both,
+    All,
+}
+
+impl Default for SpawnTarget {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PacketFreshness {
     pub observed_at: DateTime<Utc>,
@@ -109,6 +126,18 @@ pub struct AlertPacket {
     pub geo_targets: Vec<GeoTarget>,
     #[serde(default)]
     pub ui_hints: UiHints,
+    /// "HIT" or "MISS" — only present when this packet resolves a prediction daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prediction_result: Option<String>,
+    /// Copy of the prediction thesis text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prediction_text: Option<String>,
+    /// Predicted numeric target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prediction_target: Option<f64>,
+    /// Actual value of target_var at fire time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prediction_actual: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -125,6 +154,23 @@ pub struct ErrorPacket {
 pub struct SubscriptionSpec {
     pub id: String,
     pub name: String,
+    /// Human-readable prediction statement shown in the UI.
+    /// Example: "Gold will reach $5,200 before Friday close"
+    /// Falls back to name if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Title of the report that authored this prediction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_report_title: Option<String>,
+    /// Date the source report was written (ISO date string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_report_date: Option<String>,
+    /// Exact filename of the source report (relative to reports_dir), for opening in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_report_file: Option<String>,
+    /// Key evidence snippet or quote from the source report justifying this prediction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_evidence: Option<String>,
     pub expr: String,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
@@ -142,6 +188,53 @@ pub struct SubscriptionSpec {
     pub enabled: bool,
     #[serde(default)]
     pub last_triggered_at: Option<DateTime<Utc>>,
+    /// Spawn headless AI agent when this subscription triggers.
+    #[serde(default)]
+    pub spawn_agent: bool,
+    /// Which headless writer(s) should fire when this subscription triggers.
+    #[serde(default)]
+    pub spawn_target: SpawnTarget,
+    /// Legacy spawn cooldown retained for compatibility with older registries.
+    /// Spawn routing now uses rolling hourly budgets per writer.
+    #[serde(default = "default_spawn_cooldown_secs")]
+    pub spawn_cooldown_secs: u64,
+    /// Timestamp of last agent spawn.
+    #[serde(default)]
+    pub last_spawned_at: Option<DateTime<Utc>>,
+    /// Human-readable prediction thesis this daemon encodes.
+    /// When set, the daemon is a falsifiable prediction — fires on HIT (condition met)
+    /// OR MISS (deadline elapsed without condition being met). Both outcomes spawn the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prediction: Option<String>,
+    /// Which observed variable name to compare against target_value (e.g., "pyth_wti").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_var: Option<String>,
+    /// Predicted numeric target for target_var (e.g., 90.0 for WTI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_value: Option<f64>,
+    /// Prediction deadline — fires MISS if condition not met by this datetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<DateTime<Utc>>,
+    /// Scheduled fire time — daemon fires ONCE at this exact time regardless of expr.
+    /// expr is still evaluated at fire time for HIT/MISS determination.
+    /// If expr is "true" and no prediction text, this is a pure checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_at: Option<DateTime<Utc>>,
+    /// When this prediction daemon was authored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// True once this prediction has resolved (HIT or MISS). Prevents double-fire.
+    #[serde(default)]
+    pub prediction_resolved: bool,
+    /// Stored outcome once resolved: "HIT" or "MISS". Persisted so the UI can show it permanently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prediction_result: Option<String>,
+    /// Actual observed value of target_var at resolution time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_actual: Option<f64>,
+    /// Timestamp when prediction resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<DateTime<Utc>>,
 }
 
 fn default_true() -> bool {
@@ -150,6 +243,10 @@ fn default_true() -> bool {
 
 fn default_cooldown_secs() -> u64 {
     300
+}
+
+fn default_spawn_cooldown_secs() -> u64 {
+    14_400 // 4 hours
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -182,8 +279,20 @@ pub struct DaemonState {
     pub connector_status: BTreeMap<String, ConnectorState>,
     #[serde(default)]
     pub queue_offsets: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub spawn_budget: SpawnBudgetState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_packet_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SpawnBudgetState {
+    #[serde(default)]
+    pub codex_recent_spawns: Vec<DateTime<Utc>>,
+    #[serde(default)]
+    pub claude_recent_spawns: Vec<DateTime<Utc>>,
+    #[serde(default)]
+    pub gemini_recent_spawns: Vec<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug)]
@@ -234,4 +343,3 @@ pub fn resolve_paths(
         packets_file,
     })
 }
-

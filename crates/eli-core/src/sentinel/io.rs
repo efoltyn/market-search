@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
@@ -32,15 +32,43 @@ pub fn load_registry(paths: &SentinelPaths) -> Result<SubscriptionRegistry> {
         return Ok(SubscriptionRegistry::default());
     }
     let raw = std::fs::read_to_string(&paths.subscriptions_file)?;
-    let parsed: SubscriptionRegistry = toml::from_str(&raw)?;
-    Ok(parsed)
+    let mut registry = match toml::from_str::<SubscriptionRegistry>(&raw) {
+        Ok(parsed) => parsed,
+        Err(primary_err) => {
+            let backup_path = subscriptions_backup_path(&paths.subscriptions_file);
+            if backup_path.exists() {
+                let backup_raw = std::fs::read_to_string(&backup_path)?;
+                if let Ok(parsed) = toml::from_str::<SubscriptionRegistry>(&backup_raw) {
+                    parsed
+                } else {
+                    return Err(primary_err.into());
+                }
+            } else {
+                return Err(primary_err.into());
+            }
+        }
+    };
+    // Deduplicate by id — a duplicate key in the TOML file can corrupt the daemon.
+    let mut seen_ids = std::collections::HashSet::new();
+    registry.subscriptions.retain(|s| seen_ids.insert(s.id.clone()));
+    Ok(registry)
 }
 
 pub fn save_registry(paths: &SentinelPaths, registry: &SubscriptionRegistry) -> Result<()> {
     let raw = toml::to_string_pretty(registry)?;
     std::fs::create_dir_all(&paths.root_dir)?;
-    std::fs::write(&paths.subscriptions_file, raw)?;
+    let tmp_path = paths.subscriptions_file.with_extension("toml.tmp");
+    let backup_path = subscriptions_backup_path(&paths.subscriptions_file);
+    if paths.subscriptions_file.exists() {
+        let _ = std::fs::copy(&paths.subscriptions_file, &backup_path);
+    }
+    std::fs::write(&tmp_path, raw)?;
+    std::fs::rename(&tmp_path, &paths.subscriptions_file)?;
     Ok(())
+}
+
+fn subscriptions_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("toml.bak")
 }
 
 pub fn load_daemon_state(paths: &SentinelPaths) -> Result<DaemonState> {
@@ -120,4 +148,3 @@ pub fn open_log(paths: &SentinelPaths) -> Result<File> {
         .open(&paths.log_file)
         .map_err(Into::into)
 }
-

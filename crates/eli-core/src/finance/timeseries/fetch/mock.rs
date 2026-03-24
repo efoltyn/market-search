@@ -91,6 +91,8 @@ pub(crate) fn generate_mock_snapshots(tickers: &[String]) -> Vec<TickerSnapshot>
                 open: Some(round_4(price * 1.002)),
                 day_low: Some(round_4(price * 0.99)),
                 day_high: Some(round_4(price * 1.01)),
+                price: Some(price),
+                daily_return: Some((price / round_4(price * 0.995)) - 1.0),
                 market_cap: Some(market_cap),
                 enterprise_value: Some(market_cap as i64),
                 shares_outstanding: Some(shares),
@@ -106,6 +108,10 @@ pub(crate) fn generate_mock_snapshots(tickers: &[String]) -> Vec<TickerSnapshot>
                 ),
                 price_source_kind: "mock".to_string(),
                 session_state: "unknown".to_string(),
+                market_closed_fallback: false,
+                effective_at: Some(now),
+                clock_status: None,
+                integrity_note: None,
             }
         })
         .collect()

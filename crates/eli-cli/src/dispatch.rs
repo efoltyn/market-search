@@ -2,7 +2,9 @@ pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "error,eli=warn,eli_cli=warn".to_string()),
+                .unwrap_or_else(|_| {
+                    "error,eli=warn,eli_cli=warn,chromiumoxide=off,chromiumoxide::conn::raw_ws::parse_errors=off".to_string()
+                }),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -25,7 +27,15 @@ pub async fn run() -> Result<()> {
         Some(Command::Agent { cmd }) => cmd_agent(cmd, cli.provider, cli.model).await,
         Some(Command::Code(args)) => cmd_code(args).await,
         Some(Command::Sentinel { cmd }) => cmd_sentinel(cmd).await,
-        Some(Command::Mcp) => cmd_mcp().await,
+        Some(Command::Mcp(args)) => {
+            if args.http {
+                cmd_mcp_http(args.port).await
+            } else {
+                cmd_mcp().await
+            }
+        }
+        Some(Command::Picks { cmd }) => cmd_picks(cmd).await,
+        Some(Command::Serve(_args)) => anyhow::bail!("serve command temporarily disabled"),
     }
 }
 
@@ -239,16 +249,24 @@ async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
             cmd_finance_filings(args).await
         }
         FinanceCommand::News(args) => cmd_finance_news(args).await,
-        FinanceCommand::Macro(args) => cmd_finance_macro(args).await,
-        FinanceCommand::Forex(args) => cmd_finance_forex(args).await,
         FinanceCommand::Schedule(args) => cmd_finance_schedule(args).await,
         FinanceCommand::RatePath(args) => cmd_finance_rate_path(args).await,
-        FinanceCommand::YieldCurve(args) => cmd_finance_yield_curve(args).await,
-        FinanceCommand::Dashboard(args) => cmd_finance_dashboard(args).await,
-        FinanceCommand::Prices(args) => cmd_finance_prices(args).await,
         FinanceCommand::Odds(args) => cmd_finance_odds(args).await,
         FinanceCommand::Options(args) => cmd_finance_options(args).await,
         FinanceCommand::Sync(args) => cmd_finance_sync(args).await,
         FinanceCommand::Paper(args) => cmd_finance_paper(args).await,
+        FinanceCommand::Ibkr(args) => cmd_finance_ibkr(args).await,
+        FinanceCommand::Auctions(args) => cmd_finance_auctions(args).await,
+        FinanceCommand::Cot(args) => cmd_finance_cot(args).await,
+        FinanceCommand::Curve(args) => cmd_finance_curve(args).await,
+        FinanceCommand::Nyfed(args) => cmd_finance_nyfed(args).await,
+        FinanceCommand::Volsurface(args) => cmd_finance_volsurface(args).await,
+        FinanceCommand::Stress(args) => cmd_finance_stress(args).await,
+        FinanceCommand::Fiscal(args) => cmd_finance_fiscal(args).await,
+        FinanceCommand::Ecb(args) => cmd_finance_ecb(args).await,
+        FinanceCommand::Eia(args) => cmd_finance_eia(args).await,
+        FinanceCommand::Bis(args) => cmd_finance_bis(args).await,
+        FinanceCommand::Boj(args) => cmd_finance_boj(args).await,
+        FinanceCommand::Boe(args) => cmd_finance_boe(args).await,
     }
 }

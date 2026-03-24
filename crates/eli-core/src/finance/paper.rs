@@ -446,11 +446,18 @@ async fn resolve_yes_probability(provider: &PaperProvider, market_ticker: &str) 
         ..Default::default()
     })
     .await?;
-
-    let market = odds
-        .markets
-        .first()
-        .ok_or_else(|| Error::Provider("market not found for paper fill".to_string()))?;
+    let mut market = odds.markets.first().cloned();
+    if market.is_none() && provider == &PaperProvider::Polymarket {
+        let event_lookup = fetch_odds(OddsRequest {
+            provider: Some("polymarket".to_string()),
+            event_ticker: Some(market_ticker.to_string()),
+            ..Default::default()
+        })
+        .await?;
+        market = event_lookup.markets.into_iter().next();
+    }
+    let market =
+        market.ok_or_else(|| Error::Provider("market not found for paper fill".to_string()))?;
 
     if let Some(prob) = market.probability_yes {
         return Ok(prob.clamp(0.0, 1.0));
@@ -470,10 +477,7 @@ async fn resolve_polymarket_yes_probability_direct(market_ticker: &str) -> Resul
         return Ok(None);
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| Error::Provider(format!("polymarket quote client init failed: {e}")))?;
+    let client = &*crate::finance::shared_client::GENERAL;
 
     let encoded = urlencoding::encode(ticker);
     let direct_url = format!("{}/markets/{}", POLYMARKET_GAMMA_URL, encoded);
@@ -636,8 +640,10 @@ async fn acquire_state_lock(state_path: &Path) -> Result<PaperStateLockGuard> {
                         lock_path.display()
                     )));
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(PAPER_STATE_LOCK_RETRY_MS))
-                    .await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(
+                    PAPER_STATE_LOCK_RETRY_MS,
+                ))
+                .await;
             }
             Err(err) => {
                 return Err(Error::Provider(format!(

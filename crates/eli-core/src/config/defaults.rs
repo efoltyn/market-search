@@ -2,7 +2,7 @@ fn default_model() -> String {
     DEFAULT_OPENROUTER_MODEL.to_string()
 }
 
-pub const DEFAULT_OPENROUTER_MODEL: &str = "arcee-ai/trinity-large-preview:free";
+pub const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
 
 fn default_provider() -> ProviderKind {
     ProviderKind::OpenRouter
@@ -46,4 +46,41 @@ fn default_parallel_subagents() -> u32 {
 
 fn default_scrollback_max_lines() -> usize {
     10_000
+}
+
+fn default_ai_agent_cmd() -> String {
+    "claude --dangerously-skip-permissions".to_string()
+}
+
+fn default_codex_agent_cmd() -> String {
+    "codex --yolo".to_string()
+}
+
+fn default_claude_agent_cmd() -> String {
+    "claude --dangerously-skip-permissions".to_string()
+}
+
+fn default_gemini_agent_cmd() -> String {
+    "gemini --yolo".to_string()
+}
+
+fn default_codex_max_spawns_per_hour() -> u32 {
+    2
+}
+
+fn default_claude_max_spawns_per_hour() -> u32 {
+    2
+}
+
+fn default_gemini_max_spawns_per_hour() -> u32 {
+    1
+}
+
+fn default_spawn_target_preference() -> crate::sentinel::SpawnTarget {
+    crate::sentinel::SpawnTarget::Codex
+}
+
+fn default_sentinel_reports_dir() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+    format!("{}/Downloads/eli-code/eli_research/reports/html", home)
 }

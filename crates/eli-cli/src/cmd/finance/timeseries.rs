@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap};
+use futures::future::join_all;
+use std::collections::{BTreeMap, HashSet};
 
 const KALSHI_CANDLESTICKS_URL: &str =
     "https://api.elections.kalshi.com/trade-api/v2/markets/candlesticks";
@@ -10,21 +11,44 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
     }
 
-    let odds_pair = parse_optional_odds_pair_request(
-        args.odds_provider.as_deref(),
-        args.odds_market.as_deref(),
-        &args.odds_side,
-    )?;
+    // Expand --preset into tickers (merged with any explicit --ticker values).
+    let mut preset_tickers: Vec<String> = Vec::new();
+    let preset_name = args.preset.as_deref().map(|s| s.trim().to_ascii_lowercase());
+    if let Some(ref preset) = preset_name {
+        preset_tickers = expand_timeseries_preset(preset)?;
+    }
 
-    let mut tickers = args.tickers;
-    if let Some(path) = args.tickers_file {
+    // Auto-detect prediction market tickers mixed in with stock/FRED tickers.
+    // KX* / KALSHI:* → Kalshi, pure numeric (6+ digits) / POLYMARKET:* → Polymarket.
+    let explicit_odds_provider = args.odds_provider.clone();
+    let explicit_odds_market = args.odds_market.clone();
+    let mut prediction_markets = Vec::new();
+    let mut preset_stock_tickers = Vec::new();
+    for t in &preset_tickers {
+        push_timeseries_input(t, &mut prediction_markets, &mut preset_stock_tickers);
+    }
+    let mut explicit_stock_tickers = Vec::new();
+    for t in &args.tickers {
+        push_timeseries_input(t, &mut prediction_markets, &mut explicit_stock_tickers);
+    }
+
+    if let Some(odds_req) = parse_optional_prediction_market_request(
+        explicit_odds_provider.as_deref(),
+        explicit_odds_market.as_deref(),
+        &args.odds_side,
+    )? {
+        push_prediction_market_request(&mut prediction_markets, odds_req);
+    }
+
+    let mut tickers = explicit_stock_tickers;
+    if let Some(ref path) = args.tickers_file {
         let raw = std::fs::read_to_string(&path).context("read tickers_file")?;
         for line in raw.lines() {
             let t = line.trim();
             if t.is_empty() || t.starts_with('#') {
                 continue;
             }
-            tickers.push(t.to_string());
+            push_timeseries_input(t, &mut prediction_markets, &mut tickers);
         }
     }
 
@@ -69,16 +93,138 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         (None, None) => {}
     }
 
+    if tickers.is_empty() && prediction_markets.is_empty() {
+        anyhow::bail!("at least one ticker is required");
+    }
+
+    // Standalone prediction market mode: only prediction-market tickers.
+    if tickers.is_empty() {
+        if !prediction_markets.is_empty() {
+            let now = chrono::Utc::now();
+            let end = as_of.unwrap_or(now).min(now);
+            let start = end
+                .checked_sub_signed(range.approx_duration())
+                .ok_or_else(|| anyhow::anyhow!("range underflow"))?;
+            let (market_series, market_errors) =
+                fetch_prediction_market_series_batch(&prediction_markets, start, end, granularity)
+                    .await;
+            if market_series.is_empty() {
+                let err_msg = market_errors
+                    .first()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| "no usable prediction market series found".to_string());
+                anyhow::bail!("{err_msg}");
+            }
+            let series = market_series;
+            let analytics =
+                eli_core::finance::build_timeseries_analytics(&series, granularity);
+            let provider = prediction_market_response_provider(&prediction_markets);
+            let tickers: Vec<String> = series.iter().map(|s| s.ticker.clone()).collect();
+            let resp = eli_core::finance::TimeseriesResponse {
+                provider,
+                tickers,
+                granularity,
+                range,
+                start,
+                end,
+                generated_at: now,
+                series,
+                status: if market_errors.is_empty() {
+                    None
+                } else {
+                    Some("partial".to_string())
+                },
+                error: None,
+                errors: if market_errors.is_empty() {
+                    None
+                } else {
+                    Some(market_errors)
+                },
+                valid_tickers: None,
+                analytics: Some(analytics),
+                cache: None,
+            };
+
+            if let Some(out_path) = args.out {
+                let wr = write_json_out_with_meta(
+                    out_path,
+                    &resp,
+                    "finance.timeseries",
+                    &[
+                        format!("range={}", args.range),
+                        format!("granularity={}", args.granularity),
+                        format!("prediction_markets={}", prediction_markets.len()),
+                    ],
+                )?;
+                println!(
+                    "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
+                    serde_json::to_string(&wr.out_path.display().to_string())
+                        .unwrap_or_else(|_| "\"\"".to_string()),
+                    serde_json::to_string(&wr.meta_path.display().to_string())
+                        .unwrap_or_else(|_| "\"\"".to_string()),
+                );
+                return Ok(());
+            }
+
+            let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
+            println!("{json}");
+            return Ok(());
+        }
+    }
+
     let provider_str = args.provider.trim().to_ascii_lowercase();
     let is_auto = provider_str == "auto";
+
+    // Split tickers by provider. Known-FRED presets stay FRED only in auto mode;
+    // explicit tickers continue through the normal provider heuristics.
+    let fred_preset = is_auto
+        && matches!(
+            preset_name.as_deref(),
+            Some("macro") | Some("liquidity") | Some("yield_curve")
+        );
+    let mut pyth_tickers = Vec::new();
+    let mut fred_tickers = Vec::new();
+    let mut stooq_tickers = Vec::new();
+    let mut binance_tickers = Vec::new();
+    let mut yahoo_tickers = Vec::new();
+    for t in &preset_stock_tickers {
+        match classify_timeseries_ticker(t, &provider_str, fred_preset) {
+            TimeseriesTickerBucket::Pyth => pyth_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Fred => fred_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Stooq => stooq_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Binance => binance_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Main => yahoo_tickers.push(t.clone()),
+        }
+    }
+    for t in &tickers {
+        match classify_timeseries_ticker(t, &provider_str, false) {
+            TimeseriesTickerBucket::Pyth => pyth_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Fred => fred_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Stooq => stooq_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Binance => binance_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Main => yahoo_tickers.push(t.clone()),
+        }
+    }
+    let has_pyth = !pyth_tickers.is_empty();
+    let has_fred = !fred_tickers.is_empty();
+    let has_stooq = !stooq_tickers.is_empty();
+    let has_binance = !binance_tickers.is_empty();
+
     let provider = match provider_str.as_str() {
         "auto" | "yahoo" => eli_core::finance::ProviderKind::Yahoo,
         "mock" => eli_core::finance::ProviderKind::Mock,
         "fred" => eli_core::finance::ProviderKind::Fred,
+        "ibkr" => eli_core::finance::ProviderKind::Ibkr,
+        "pyth" => eli_core::finance::ProviderKind::Pyth,
+        "stooq" => eli_core::finance::ProviderKind::Stooq,
+        "binance" => eli_core::finance::ProviderKind::Binance,
         other => {
-            anyhow::bail!("unsupported --provider '{other}' (supported: auto, mock, yahoo, fred)")
+            anyhow::bail!(
+                "unsupported --provider '{other}' (supported: auto, mock, yahoo, fred, ibkr, pyth, stooq, binance)"
+            )
         }
     };
+    let use_ibkr = matches!(provider, eli_core::finance::ProviderKind::Ibkr);
 
     let cache_dir = if let Some(path) = args.cache_dir {
         path
@@ -88,13 +234,43 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         paths.cache_dir
     };
 
+    // Route to the right provider based on ticker types.
+    // Priority: FRED tickers are the "main" request when present (most common preset case).
+    // Pyth and Yahoo are merged in separately.
+    let (main_tickers, main_provider) = if has_fred {
+        // FRED as main, Pyth and Yahoo merged separately
+        (fred_tickers.clone(), eli_core::finance::ProviderKind::Fred)
+    } else if has_stooq && yahoo_tickers.is_empty() && !has_pyth && !has_binance {
+        // All Stooq
+        (stooq_tickers.clone(), eli_core::finance::ProviderKind::Stooq)
+    } else if has_binance && yahoo_tickers.is_empty() && !has_pyth && !has_stooq {
+        // All Binance
+        (binance_tickers.clone(), eli_core::finance::ProviderKind::Binance)
+    } else if has_pyth && yahoo_tickers.is_empty() && !has_stooq && !has_binance {
+        // All Pyth
+        (pyth_tickers.clone(), eli_core::finance::ProviderKind::Pyth)
+    } else {
+        // Yahoo (default) — other providers merge in separately
+        (yahoo_tickers.clone(), provider.clone())
+    };
+
     let req = eli_core::finance::TimeseriesRequest {
-        tickers: tickers.clone(),
+        tickers: main_tickers.clone(),
         range,
         granularity,
         as_of,
-        provider,
+        provider: main_provider,
         max_points_per_ticker: args.max_points_per_ticker,
+        ibkr: use_ibkr.then(|| {
+            build_ibkr_connection_config(
+                args.ibkr_account.clone(),
+                args.ibkr_host.clone(),
+                args.ibkr_port,
+                args.ibkr_client_id,
+                args.ibkr_market_data_type,
+                None,
+            )
+        }),
     };
 
     let mut resp = eli_core::finance::fetch_timeseries(req, &cache_dir)
@@ -102,10 +278,155 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!(e))
         .context("fetch timeseries")?;
 
+    // If FRED is main and there are Yahoo tickers, fetch Yahoo separately and merge.
+    if has_fred && !yahoo_tickers.is_empty() {
+        let yahoo_req = eli_core::finance::TimeseriesRequest {
+            tickers: yahoo_tickers.clone(),
+            range,
+            granularity,
+            as_of,
+            provider: eli_core::finance::ProviderKind::Yahoo,
+            max_points_per_ticker: args.max_points_per_ticker,
+            ibkr: None,
+        };
+        match eli_core::finance::fetch_timeseries(yahoo_req, &cache_dir).await {
+            Ok(yahoo_resp) => {
+                resp.series.extend(yahoo_resp.series);
+                resp.tickers.extend(yahoo_tickers.clone());
+                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+                    &resp.series,
+                    resp.granularity,
+                ));
+            }
+            Err(e) => {
+                eprintln!("warning: Yahoo fetch failed for mixed request: {e}");
+            }
+        }
+    }
+
+    // (FRED merge into Yahoo is not needed — when has_fred, FRED IS the main provider.
+    //  Yahoo tickers merge into FRED above.)
+
+    // If mixed tickers: fetch Pyth tickers separately and merge into the response.
+    if has_pyth && (has_fred || !yahoo_tickers.is_empty()) {
+        let pyth_req = eli_core::finance::TimeseriesRequest {
+            tickers: pyth_tickers.clone(),
+            range,
+            granularity,
+            as_of,
+            provider: eli_core::finance::ProviderKind::Pyth,
+            max_points_per_ticker: args.max_points_per_ticker,
+            ibkr: None,
+        };
+        match eli_core::finance::fetch_timeseries(pyth_req, &cache_dir).await {
+            Ok(pyth_resp) => {
+                resp.series.extend(pyth_resp.series);
+                resp.tickers.extend(pyth_tickers.clone());
+                if let Some(ref pyth_errors) = pyth_resp.errors {
+                    resp.errors
+                        .get_or_insert_with(Vec::new)
+                        .extend(pyth_errors.clone());
+                }
+                // Recompute analytics with all series (Yahoo/FRED + Pyth).
+                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+                    &resp.series,
+                    resp.granularity,
+                ));
+            }
+            Err(e) => {
+                eprintln!("warning: Pyth fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: pyth_tickers.join(","),
+                        stage: Some("pyth".to_string()),
+                        message: format!("Pyth provider failed: {e}"),
+                    });
+            }
+        }
+    }
+
+    // If mixed tickers: fetch Stooq tickers separately and merge.
+    if has_stooq && !stooq_tickers.iter().all(|t| main_tickers.contains(t)) {
+        let stooq_req = eli_core::finance::TimeseriesRequest {
+            tickers: stooq_tickers.clone(),
+            range,
+            granularity,
+            as_of,
+            provider: eli_core::finance::ProviderKind::Stooq,
+            max_points_per_ticker: args.max_points_per_ticker,
+            ibkr: None,
+        };
+        match eli_core::finance::fetch_timeseries(stooq_req, &cache_dir).await {
+            Ok(stooq_resp) => {
+                resp.series.extend(stooq_resp.series);
+                resp.tickers.extend(stooq_tickers.clone());
+                if let Some(ref stooq_errors) = stooq_resp.errors {
+                    resp.errors
+                        .get_or_insert_with(Vec::new)
+                        .extend(stooq_errors.clone());
+                }
+                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+                    &resp.series,
+                    resp.granularity,
+                ));
+            }
+            Err(e) => {
+                eprintln!("warning: Stooq fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: stooq_tickers.join(","),
+                        stage: Some("stooq".to_string()),
+                        message: format!("Stooq provider failed: {e}"),
+                    });
+            }
+        }
+    }
+
+    // If mixed tickers: fetch Binance tickers separately and merge.
+    if has_binance && !binance_tickers.iter().all(|t| main_tickers.contains(t)) {
+        let binance_req = eli_core::finance::TimeseriesRequest {
+            tickers: binance_tickers.clone(),
+            range,
+            granularity,
+            as_of,
+            provider: eli_core::finance::ProviderKind::Binance,
+            max_points_per_ticker: args.max_points_per_ticker,
+            ibkr: None,
+        };
+        match eli_core::finance::fetch_timeseries(binance_req, &cache_dir).await {
+            Ok(binance_resp) => {
+                resp.series.extend(binance_resp.series);
+                resp.tickers.extend(binance_tickers.clone());
+                if let Some(ref binance_errors) = binance_resp.errors {
+                    resp.errors
+                        .get_or_insert_with(Vec::new)
+                        .extend(binance_errors.clone());
+                }
+                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+                    &resp.series,
+                    resp.granularity,
+                ));
+            }
+            Err(e) => {
+                eprintln!("warning: Binance fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: binance_tickers.join(","),
+                        stage: Some("binance".to_string()),
+                        message: format!("Binance provider failed: {e}"),
+                    });
+            }
+        }
+    }
+
     // Auto-fallback: if in auto mode and Yahoo returned errors, retry failed tickers with FRED.
     // Also re-fetch valid Yahoo tickers individually so their data isn't lost (the core drops
     // all series when any ticker fails).
     let auto_fallback_needed = is_auto
+        && matches!(resp.provider, eli_core::finance::ProviderKind::Yahoo)
         && (resp.series.is_empty()
             || resp.status.as_deref() == Some("error")
             || resp.errors.as_ref().map(|e| !e.is_empty()).unwrap_or(false));
@@ -129,6 +450,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 as_of,
                 provider: eli_core::finance::ProviderKind::Yahoo,
                 max_points_per_ticker: args.max_points_per_ticker,
+                ibkr: None,
             };
             if let Ok(re_resp) = eli_core::finance::fetch_timeseries(re_req, &cache_dir).await {
                 merged_series.extend(re_resp.series);
@@ -144,6 +466,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 as_of,
                 provider: eli_core::finance::ProviderKind::Fred,
                 max_points_per_ticker: args.max_points_per_ticker,
+                ibkr: None,
             };
             match eli_core::finance::fetch_timeseries(fred_req, &cache_dir).await {
                 Ok(fred_resp) => {
@@ -176,6 +499,13 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             if valid_tickers.is_empty() {
                 resp.provider = eli_core::finance::ProviderKind::Fred;
             }
+            // Preserve any Pyth series that were already merged before auto-fallback.
+            let pyth_series: Vec<_> = resp
+                .series
+                .drain(..)
+                .filter(|s| eli_core::finance::is_pyth_ticker(&s.ticker))
+                .collect();
+            merged_series.extend(pyth_series);
             resp.series = merged_series;
             resp.status = if remaining_errors.is_empty() {
                 None
@@ -189,41 +519,43 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 Some(remaining_errors)
             };
             resp.valid_tickers = None;
+            // Recompute analytics with the merged series.
+            resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+                &resp.series,
+                resp.granularity,
+            ));
         }
     }
 
-    if let Some(pair_req) = odds_pair {
-        let odds_series =
-            fetch_prediction_market_series(&pair_req, resp.start, resp.end, granularity).await?;
-        let paired = build_paired_timeseries_response(resp, odds_series, granularity);
-
-        if let Some(out_path) = args.out {
-            let wr = write_json_out_with_meta(
-                out_path,
-                &paired,
-                "finance.timeseries",
-                &[
-                    format!("range={}", args.range),
-                    format!("granularity={}", args.granularity),
-                    format!("odds_provider={}", pair_req.provider.as_str()),
-                    format!("odds_market={}", pair_req.market),
-                    format!("odds_side={}", pair_req.side.as_str()),
-                ],
-            )?;
-            println!(
-                "{{\"ok\":true,\"path\":{},\"meta_path\":{},\"cache\":{}}}",
-                serde_json::to_string(&wr.out_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-                serde_json::to_string(&wr.meta_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-                serde_json::to_string(&paired.base.cache).unwrap_or_else(|_| "null".to_string())
-            );
-            return Ok(());
+    if !prediction_markets.is_empty() {
+        let (market_series, market_errors) =
+            fetch_prediction_market_series_batch(&prediction_markets, resp.start, resp.end, granularity)
+                .await;
+        let mut existing_series: HashSet<String> =
+            resp.series.iter().map(|s| s.ticker.clone()).collect();
+        for series in market_series {
+            if existing_series.insert(series.ticker.clone()) {
+                resp.tickers.push(series.ticker.clone());
+                resp.series.push(series);
+            }
         }
-
-        let json = serde_json::to_string_pretty(&paired).context("serialize paired response")?;
-        println!("{json}");
-        return Ok(());
+        if !market_errors.is_empty() {
+            resp.errors
+                .get_or_insert_with(Vec::new)
+                .extend(market_errors);
+        }
+        if !resp.series.is_empty() {
+            resp.error = None;
+            resp.valid_tickers = None;
+            resp.status = match resp.errors.as_ref() {
+                Some(errors) if !errors.is_empty() => Some("partial".to_string()),
+                _ => None,
+            };
+            resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+                &resp.series,
+                resp.granularity,
+            ));
+        }
     }
 
     if let Some(out_path) = args.out {
@@ -271,13 +603,42 @@ fn parse_window_start(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimeseriesTickerBucket {
+    Pyth,
+    Fred,
+    Stooq,
+    Binance,
+    Main,
+}
+
+fn classify_timeseries_ticker(
+    ticker: &str,
+    provider_str: &str,
+    auto_prefers_fred: bool,
+) -> TimeseriesTickerBucket {
+    if eli_core::finance::is_pyth_ticker(ticker) || provider_str == "pyth" {
+        return TimeseriesTickerBucket::Pyth;
+    }
+    if eli_core::finance::is_stooq_ticker(ticker) || provider_str == "stooq" {
+        return TimeseriesTickerBucket::Stooq;
+    }
+    if eli_core::finance::is_binance_ticker(ticker) || provider_str == "binance" {
+        return TimeseriesTickerBucket::Binance;
+    }
+    if provider_str == "fred" || (provider_str == "auto" && (auto_prefers_fred || is_fred_ticker(ticker))) {
+        return TimeseriesTickerBucket::Fred;
+    }
+    TimeseriesTickerBucket::Main
+}
+
 #[derive(Clone, Copy, Debug)]
-enum OddsPairProvider {
+enum PredictionMarketProvider {
     Kalshi,
     Polymarket,
 }
 
-impl OddsPairProvider {
+impl PredictionMarketProvider {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Kalshi => "kalshi",
@@ -287,12 +648,12 @@ impl OddsPairProvider {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum OddsPairSide {
+enum PredictionMarketSide {
     Yes,
     No,
 }
 
-impl OddsPairSide {
+impl PredictionMarketSide {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Yes => "yes",
@@ -310,17 +671,17 @@ impl OddsPairSide {
 }
 
 #[derive(Clone, Debug)]
-struct OddsPairRequest {
-    provider: OddsPairProvider,
+struct PredictionMarketRequest {
+    provider: PredictionMarketProvider,
     market: String,
-    side: OddsPairSide,
+    side: PredictionMarketSide,
 }
 
-fn parse_optional_odds_pair_request(
+fn parse_optional_prediction_market_request(
     provider: Option<&str>,
     market: Option<&str>,
     side: &str,
-) -> Result<Option<OddsPairRequest>> {
+) -> Result<Option<PredictionMarketRequest>> {
     let provider = provider.map(str::trim).filter(|v| !v.is_empty());
     let market = market.map(str::trim).filter(|v| !v.is_empty());
 
@@ -332,47 +693,206 @@ fn parse_optional_odds_pair_request(
     }
 
     let provider = match provider.unwrap_or_default().to_ascii_lowercase().as_str() {
-        "kalshi" => OddsPairProvider::Kalshi,
-        "polymarket" => OddsPairProvider::Polymarket,
+        "kalshi" => PredictionMarketProvider::Kalshi,
+        "polymarket" => PredictionMarketProvider::Polymarket,
         other => {
             anyhow::bail!("unsupported --odds-provider '{other}' (supported: kalshi, polymarket)")
         }
     };
 
     let side = match side.trim().to_ascii_lowercase().as_str() {
-        "yes" | "y" => OddsPairSide::Yes,
-        "no" | "n" => OddsPairSide::No,
+        "yes" | "y" => PredictionMarketSide::Yes,
+        "no" | "n" => PredictionMarketSide::No,
         other => anyhow::bail!("unsupported --odds-side '{other}' (supported: yes, no)"),
     };
 
-    Ok(Some(OddsPairRequest {
+    Ok(Some(PredictionMarketRequest {
         provider,
         market: market.unwrap_or_default().to_string(),
         side,
     }))
 }
 
-#[derive(Clone, Debug)]
-struct OddsMarketSeries {
-    provider: String,
-    market: String,
-    side: String,
-    side_label: Option<String>,
-    token_id: Option<String>,
-    series: eli_core::finance::TickerSeries,
+fn push_timeseries_input(
+    raw: &str,
+    prediction_markets: &mut Vec<PredictionMarketRequest>,
+    plain_tickers: &mut Vec<String>,
+) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Some(req) = parse_prediction_market_ticker(trimmed) {
+        push_prediction_market_request(prediction_markets, req);
+    } else {
+        plain_tickers.push(trimmed.to_string());
+    }
+}
+
+fn push_prediction_market_request(
+    prediction_markets: &mut Vec<PredictionMarketRequest>,
+    req: PredictionMarketRequest,
+) {
+    if prediction_markets
+        .iter()
+        .any(|existing| {
+            existing.provider.as_str() == req.provider.as_str()
+                && existing.market == req.market
+                && existing.side.as_str() == req.side.as_str()
+        })
+    {
+        return;
+    }
+    prediction_markets.push(req);
+}
+
+fn parse_prediction_market_ticker(raw: &str) -> Option<PredictionMarketRequest> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("KALSHI:") {
+        let (market, side) = split_prediction_market_side(rest)?;
+        return Some(PredictionMarketRequest {
+            provider: PredictionMarketProvider::Kalshi,
+            market: market.to_string(),
+            side,
+        });
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("POLYMARKET:") {
+        let (market, side) = split_prediction_market_side(rest)?;
+        return Some(PredictionMarketRequest {
+            provider: PredictionMarketProvider::Polymarket,
+            market: market.to_string(),
+            side,
+        });
+    }
+
+    if let Some((market, side)) = trimmed.rsplit_once(':') {
+        let side = parse_prediction_market_side(side)?;
+        if market.starts_with("KX") && market.contains('-') {
+            return Some(PredictionMarketRequest {
+                provider: PredictionMarketProvider::Kalshi,
+                market: market.to_string(),
+                side,
+            });
+        }
+        if market.len() >= 6 && market.chars().all(|c| c.is_ascii_digit()) {
+            return Some(PredictionMarketRequest {
+                provider: PredictionMarketProvider::Polymarket,
+                market: market.to_string(),
+                side,
+            });
+        }
+    }
+
+    if trimmed.starts_with("KX") && trimmed.contains('-') {
+        return Some(PredictionMarketRequest {
+            provider: PredictionMarketProvider::Kalshi,
+            market: trimmed.to_string(),
+            side: PredictionMarketSide::Yes,
+        });
+    }
+
+    if trimmed.len() >= 6 && trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Some(PredictionMarketRequest {
+            provider: PredictionMarketProvider::Polymarket,
+            market: trimmed.to_string(),
+            side: PredictionMarketSide::Yes,
+        });
+    }
+
+    None
+}
+
+fn split_prediction_market_side(raw: &str) -> Option<(&str, PredictionMarketSide)> {
+    match raw.rsplit_once(':') {
+        Some((market, side)) if !market.is_empty() => {
+            parse_prediction_market_side(side).map(|parsed| (market, parsed))
+        }
+        _ => Some((raw, PredictionMarketSide::Yes)),
+    }
+}
+
+fn parse_prediction_market_side(raw: &str) -> Option<PredictionMarketSide> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "yes" | "y" => Some(PredictionMarketSide::Yes),
+        "no" | "n" => Some(PredictionMarketSide::No),
+        _ => None,
+    }
+}
+
+fn prediction_market_response_provider(
+    prediction_markets: &[PredictionMarketRequest],
+) -> eli_core::finance::ProviderKind {
+    match prediction_markets.first().map(|req| req.provider) {
+        Some(PredictionMarketProvider::Kalshi) => eli_core::finance::ProviderKind::Kalshi,
+        Some(PredictionMarketProvider::Polymarket) => eli_core::finance::ProviderKind::Polymarket,
+        None => eli_core::finance::ProviderKind::Yahoo,
+    }
 }
 
 async fn fetch_prediction_market_series(
-    req: &OddsPairRequest,
+    req: &PredictionMarketRequest,
     start: chrono::DateTime<chrono::Utc>,
     end: chrono::DateTime<chrono::Utc>,
     granularity: eli_core::finance::Span,
-) -> Result<OddsMarketSeries> {
+) -> Result<eli_core::finance::TickerSeries> {
     match req.provider {
-        OddsPairProvider::Kalshi => fetch_kalshi_market_series(req, start, end, granularity).await,
-        OddsPairProvider::Polymarket => {
+        PredictionMarketProvider::Kalshi => {
+            fetch_kalshi_market_series(req, start, end, granularity).await
+        }
+        PredictionMarketProvider::Polymarket => {
             fetch_polymarket_market_series(req, start, end, granularity).await
         }
+    }
+}
+
+async fn fetch_prediction_market_series_batch(
+    requests: &[PredictionMarketRequest],
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    granularity: eli_core::finance::Span,
+) -> (
+    Vec<eli_core::finance::TickerSeries>,
+    Vec<eli_core::finance::TimeseriesError>,
+) {
+    let results = join_all(
+        requests
+            .iter()
+            .map(|req| fetch_prediction_market_series(req, start, end, granularity)),
+    )
+    .await;
+
+    let mut series = Vec::new();
+    let mut errors = Vec::new();
+
+    for (req, result) in requests.iter().zip(results) {
+        match result {
+            Ok(market_series) => series.push(market_series),
+            Err(err) => errors.push(eli_core::finance::TimeseriesError {
+                ticker: prediction_market_request_label(req),
+                stage: Some(req.provider.as_str().to_string()),
+                message: err.to_string(),
+            }),
+        }
+    }
+
+    (series, errors)
+}
+
+fn prediction_market_request_label(req: &PredictionMarketRequest) -> String {
+    match req.provider {
+        PredictionMarketProvider::Kalshi => {
+            format!("KALSHI:{}:{}", req.market, req.side.as_str().to_ascii_uppercase())
+        }
+        PredictionMarketProvider::Polymarket => format!(
+            "POLYMARKET:{}:{}",
+            req.market,
+            req.side.as_str().to_ascii_uppercase()
+        ),
     }
 }
 
@@ -385,11 +905,11 @@ fn granularity_minutes(span: eli_core::finance::Span) -> i64 {
 }
 
 async fn fetch_kalshi_market_series(
-    req: &OddsPairRequest,
+    req: &PredictionMarketRequest,
     start: chrono::DateTime<chrono::Utc>,
     end: chrono::DateTime<chrono::Utc>,
     granularity: eli_core::finance::Span,
-) -> Result<OddsMarketSeries> {
+) -> Result<eli_core::finance::TickerSeries> {
     #[derive(serde::Deserialize)]
     struct KalshiResp {
         #[serde(default)]
@@ -436,7 +956,31 @@ async fn fetch_kalshi_market_series(
         volume: Option<i64>,
     }
 
-    let interval_minutes = granularity_minutes(granularity);
+    let requested_seconds = granularity_seconds(granularity);
+
+    // Kalshi's candlestick API only truly supports period_interval=60 (1h) and
+    // 1440 (daily).  All other values silently degrade to daily bars.
+    // Strategy: fetch at the finest supported native interval, then resample
+    // locally to the target granularity.
+    let (api_interval_minutes, needs_resample) = if requested_seconds >= 86400 {
+        // Daily or coarser: use native daily.
+        (1440_i64, false)
+    } else if requested_seconds < 3600 {
+        // Sub-hour: Kalshi doesn't support it.  Fail explicitly rather than
+        // inventing fake bars.
+        anyhow::bail!(
+            "kalshi candlesticks do not support sub-hourly granularity (requested {}s); \
+             use --granularity 1h or coarser",
+            requested_seconds
+        );
+    } else if requested_seconds == 3600 {
+        // Exact 1h: native.
+        (60_i64, false)
+    } else {
+        // 2h, 3h, 4h, 6h, etc.: fetch 1h, resample locally.
+        (60_i64, true)
+    };
+
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(std::time::Duration::from_secs(20))
@@ -448,7 +992,7 @@ async fn fetch_kalshi_market_series(
     let end_ts = end.timestamp();
     let start_ts_s = start_ts.to_string();
     let end_ts_s = end_ts.to_string();
-    let interval_s = interval_minutes.to_string();
+    let interval_s = api_interval_minutes.to_string();
 
     let resp = client
         .get(KALSHI_CANDLESTICKS_URL)
@@ -556,29 +1100,36 @@ async fn fetch_kalshi_market_series(
 
     candles.sort_by_key(|c| c.t);
 
-    Ok(OddsMarketSeries {
-        provider: "kalshi".to_string(),
-        market: market.market_ticker.clone(),
-        side: req.side.as_str().to_string(),
-        side_label: Some(req.side.as_str().to_ascii_uppercase()),
-        token_id: None,
-        series: eli_core::finance::TickerSeries {
-            ticker: format!(
-                "KALSHI:{}:{}",
-                market.market_ticker,
-                req.side.as_str().to_ascii_uppercase()
-            ),
-            candles,
-        },
+    // Resample 1h bars → target granularity if needed.
+    if needs_resample {
+        // Kalshi timestamps are end-of-bar (the API field is `end_period_ts`).
+        // Convert to start-of-bar ONLY for resampling so that the absolute-clock
+        // resampler places each bar in the correct bucket.  We do NOT touch
+        // timestamps for native 1h or 1d output — those are correct as-is.
+        let native_step_secs = api_interval_minutes * 60;
+        for c in &mut candles {
+            c.t = c.t - chrono::Duration::seconds(native_step_secs);
+        }
+        let step = chrono::Duration::seconds(requested_seconds);
+        candles = eli_core::finance::resample_candles(&candles, start, step);
+    }
+
+    Ok(eli_core::finance::TickerSeries {
+        ticker: format!(
+            "KALSHI:{}:{}",
+            market.market_ticker,
+            req.side.as_str().to_ascii_uppercase()
+        ),
+        candles,
     })
 }
 
 async fn fetch_polymarket_market_series(
-    req: &OddsPairRequest,
+    req: &PredictionMarketRequest,
     start: chrono::DateTime<chrono::Utc>,
     end: chrono::DateTime<chrono::Utc>,
     granularity: eli_core::finance::Span,
-) -> Result<OddsMarketSeries> {
+) -> Result<eli_core::finance::TickerSeries> {
     #[derive(serde::Deserialize)]
     struct PolyHistoryPoint {
         t: serde_json::Value,
@@ -623,8 +1174,6 @@ async fn fetch_polymarket_market_series(
         .get(outcome_index)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("invalid polymarket outcome index for {}", req.market))?;
-    let side_label = outcomes.get(outcome_index).cloned();
-
     let fidelity = granularity_minutes(granularity).max(1);
     let fidelity_s = fidelity.to_string();
 
@@ -730,8 +1279,10 @@ async fn fetch_polymarket_market_series(
 
     let mut candles = Vec::with_capacity(buckets.len());
     for (bucket, ohlc) in buckets {
-        let end_bucket = bucket.saturating_add(step_seconds);
-        let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(end_bucket, 0)
+        // Use bucket START as the candle timestamp, not bucket + step (end).
+        // The old code stamped bucket + step, which made March 23 data appear
+        // as a March 24 candle at daily granularity.
+        let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(bucket, 0)
             .ok_or_else(|| anyhow::anyhow!("invalid polymarket bucket timestamp"))?;
         candles.push(eli_core::finance::Candle {
             t: ts,
@@ -743,19 +1294,12 @@ async fn fetch_polymarket_market_series(
         });
     }
 
-    Ok(OddsMarketSeries {
-        provider: "polymarket".to_string(),
-        market: market_id.clone(),
-        side: req.side.as_str().to_string(),
-        side_label,
-        token_id: Some(token_id),
-        series: eli_core::finance::TickerSeries {
-            ticker: format!(
-                "POLYMARKET:{market_id}:{}",
-                req.side.as_str().to_ascii_uppercase()
-            ),
-            candles,
-        },
+    Ok(eli_core::finance::TickerSeries {
+        ticker: format!(
+            "POLYMARKET:{market_id}:{}",
+            req.side.as_str().to_ascii_uppercase()
+        ),
+        candles,
     })
 }
 
@@ -892,7 +1436,7 @@ fn parse_json_number_f64(value: &serde_json::Value) -> Option<f64> {
 
 fn pick_polymarket_outcome_index(
     outcomes: &[String],
-    side: OddsPairSide,
+    side: PredictionMarketSide,
     token_count: usize,
 ) -> usize {
     if token_count <= 1 {
@@ -900,8 +1444,8 @@ fn pick_polymarket_outcome_index(
     }
 
     let target = match side {
-        OddsPairSide::Yes => "yes",
-        OddsPairSide::No => "no",
+        PredictionMarketSide::Yes => "yes",
+        PredictionMarketSide::No => "no",
     };
 
     if let Some(idx) = outcomes
@@ -912,246 +1456,101 @@ fn pick_polymarket_outcome_index(
     }
 
     match side {
-        OddsPairSide::Yes => 0,
-        OddsPairSide::No => 1.min(token_count - 1),
+        PredictionMarketSide::Yes => 0,
+        PredictionMarketSide::No => 1.min(token_count - 1),
     }
 }
 
-#[derive(serde::Serialize)]
-struct PairedTimeseriesResponse {
-    mode: &'static str,
-    generated_at: chrono::DateTime<chrono::Utc>,
-    base: eli_core::finance::TimeseriesResponse,
-    odds: PairedOddsLeg,
-    analytics: PairedTimeseriesAnalytics,
+fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
+    let tickers: Vec<&str> = match preset {
+        "macro" => vec![
+            // Inflation
+            "CPIAUCSL", "CPILFESL", "PCEPILFE", "PPIACO", "T10YIE",
+            // Employment
+            "UNRATE", "PAYEMS", "ICSA", "JTSJOL",
+            // GDP
+            "GDPC1", "INDPRO",
+            // Rates
+            "FEDFUNDS", "DGS2", "DGS10", "DGS30", "T10Y2Y", "DFII10", "MORTGAGE30US",
+            // Debt
+            "GFDEGDQ188S", "FYGFGDQ188S", "GFDEBTN",
+            // Money
+            "M2SL", "WALCL",
+            // Consumer
+            "UMCSENT", "RSAFS", "PSAVERT", "CSUSHPISA", "HOUST", "TOTALSA",
+            // Credit
+            "BAMLH0A0HYM2",
+            // Commodities
+            "DCOILWTICO", "DTWEXBGS",
+            // Live 24/7 via Pyth
+            "PYTH:OIL", "PYTH:GOLD", "PYTH:BTC",
+        ],
+        "forex_majors" => vec![
+            "EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "USDCAD=X",
+            "AUDUSD=X", "NZDUSD=X", "USDSEK=X", "USDNOK=X",
+        ],
+        "yield_curve" => vec![
+            "DGS1MO", "DGS3MO", "DGS6MO", "DGS1", "DGS2", "DGS3",
+            "DGS5", "DGS7", "DGS10", "DGS20", "DGS30",
+        ],
+        "liquidity" => vec![
+            "WALCL", "WTREGEN", "RRPONTSYD",
+        ],
+        "crypto" => vec![
+            "PYTH:BTC", "PYTH:ETH", "PYTH:SOL",
+        ],
+        other => anyhow::bail!(
+            "unknown --preset '{other}' (supported: macro, forex_majors, yield_curve, liquidity, crypto)"
+        ),
+    };
+    Ok(tickers.into_iter().map(String::from).collect())
 }
 
-#[derive(serde::Serialize)]
-struct PairedOddsLeg {
-    provider: String,
-    market: String,
-    side: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    side_label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    token_id: Option<String>,
-    points: usize,
-    series: eli_core::finance::TickerSeries,
-}
-
-#[derive(serde::Serialize)]
-struct PairedTimeseriesAnalytics {
-    granularity: String,
-    ticker_pairs: Vec<PairedTickerAnalytics>,
-}
-
-#[derive(serde::Serialize)]
-struct PairedTickerAnalytics {
-    ticker: String,
-    overlap_points: usize,
-    overlap_returns: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    close_correlation: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    return_correlation: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    odds_leads_1_bar_return_correlation: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    base_leads_1_bar_return_correlation: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    base_total_return: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    odds_total_return: Option<f64>,
-}
-
-fn build_paired_timeseries_response(
-    base: eli_core::finance::TimeseriesResponse,
-    odds: OddsMarketSeries,
-    granularity: eli_core::finance::Span,
-) -> PairedTimeseriesResponse {
-    let analytics = build_paired_analytics(&base.series, &odds.series, granularity);
-    let points = odds.series.candles.len();
-
-    PairedTimeseriesResponse {
-        mode: "paired_prediction_market",
-        generated_at: chrono::Utc::now(),
-        base,
-        odds: PairedOddsLeg {
-            provider: odds.provider,
-            market: odds.market,
-            side: odds.side,
-            side_label: odds.side_label,
-            token_id: odds.token_id,
-            points,
-            series: odds.series,
-        },
-        analytics,
+/// Heuristic: FRED series IDs are ALL-CAPS alphanumeric (plus underscore),
+/// typically 3-20 chars, no dots/dashes/equals/carets that Yahoo tickers use.
+/// Known FRED prefixes: DGS, BAML, FRED indicators like UNRATE, CPIAUCSL, etc.
+fn is_fred_ticker(ticker: &str) -> bool {
+    let t = ticker.trim();
+    if t.is_empty() || t.len() < 2 {
+        return false;
     }
-}
-
-fn build_paired_analytics(
-    base_series: &[eli_core::finance::TickerSeries],
-    odds_series: &eli_core::finance::TickerSeries,
-    granularity: eli_core::finance::Span,
-) -> PairedTimeseriesAnalytics {
-    let step_seconds = granularity_seconds(granularity).max(1);
-
-    let odds_bucketed = bucketed_closes(&odds_series.candles, step_seconds);
-    let mut pairs = Vec::new();
-
-    for series in base_series {
-        let base_bucketed = bucketed_closes(&series.candles, step_seconds);
-        let mut keys: Vec<i64> = base_bucketed
-            .keys()
-            .filter(|k| odds_bucketed.contains_key(k))
-            .copied()
-            .collect();
-        keys.sort_unstable();
-
-        let mut base_closes = Vec::with_capacity(keys.len());
-        let mut odds_closes = Vec::with_capacity(keys.len());
-
-        for key in &keys {
-            if let (Some(b), Some(o)) = (base_bucketed.get(key), odds_bucketed.get(key)) {
-                base_closes.push(*b);
-                odds_closes.push(*o);
-            }
+    // Pyth tickers handled separately
+    if t.starts_with("PYTH:") {
+        return false;
+    }
+    // Yahoo tickers contain special chars: = (futures), ^ (indices), - (crypto/classes), . (exchanges)
+    if t.contains('=') || t.contains('^') || t.contains('.') {
+        return false;
+    }
+    // BTC-USD, BRK-B etc are Yahoo — but BAMLH0A0HYM2 has no dash
+    // Simple heuristic: if it contains a dash AND the part after dash is ≤3 chars, it's Yahoo
+    if let Some(dash_pos) = t.find('-') {
+        let suffix = &t[dash_pos + 1..];
+        if suffix.len() <= 4 {
+            return false; // BTC-USD, BRK-B, CL-F style
         }
-
-        let base_returns = simple_returns(&base_closes);
-        let odds_returns = simple_returns(&odds_closes);
-
-        let return_corr = pearson(&base_returns, &odds_returns);
-        let close_corr = pearson(&base_closes, &odds_closes);
-
-        let (odds_leads, base_leads) = lagged_return_corrs(&base_returns, &odds_returns);
-
-        pairs.push(PairedTickerAnalytics {
-            ticker: series.ticker.clone(),
-            overlap_points: base_closes.len(),
-            overlap_returns: base_returns.len().min(odds_returns.len()),
-            close_correlation: close_corr,
-            return_correlation: return_corr,
-            odds_leads_1_bar_return_correlation: odds_leads,
-            base_leads_1_bar_return_correlation: base_leads,
-            base_total_return: total_return(&base_closes),
-            odds_total_return: total_return(&odds_closes),
-        });
     }
-
-    PairedTimeseriesAnalytics {
-        granularity: granularity.to_string_compact(),
-        ticker_pairs: pairs,
+    // Known FRED patterns: all uppercase, alphanumeric + underscore, length 2-20
+    let looks_fred = t.len() <= 25
+        && t.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    // Exclude common short Yahoo tickers (SPY, QQQ, AAPL, etc.)
+    // FRED tickers tend to be longer or have digits mixed in (DGS10, M2SL, WALCL)
+    if looks_fred && t.len() <= 4 && t.chars().all(|c| c.is_ascii_uppercase()) {
+        // Short all-alpha tickers (SPY, QQQ, AAPL, GLD, XLE) are almost certainly Yahoo
+        return false;
     }
-}
-
-fn bucketed_closes(candles: &[eli_core::finance::Candle], step_seconds: i64) -> HashMap<i64, f64> {
-    let mut sorted = candles.to_vec();
-    sorted.sort_by_key(|c| c.t);
-
-    let mut out = HashMap::new();
-    for c in sorted {
-        let ts = c.t.timestamp();
-        let bucket = ts.div_euclid(step_seconds) * step_seconds;
-        out.insert(bucket, c.c);
-    }
-    out
-}
-
-fn simple_returns(closes: &[f64]) -> Vec<f64> {
-    if closes.len() < 2 {
-        return Vec::new();
-    }
-
-    let mut out = Vec::with_capacity(closes.len() - 1);
-    for w in closes.windows(2) {
-        let prev = w[0];
-        let curr = w[1];
-        if prev == 0.0 {
-            continue;
-        }
-        out.push((curr / prev) - 1.0);
-    }
-    out
-}
-
-fn total_return(closes: &[f64]) -> Option<f64> {
-    if closes.len() < 2 {
-        return None;
-    }
-    let first = closes.first().copied()?;
-    let last = closes.last().copied()?;
-    if first == 0.0 {
-        return None;
-    }
-    Some((last / first) - 1.0)
-}
-
-fn lagged_return_corrs(base_returns: &[f64], odds_returns: &[f64]) -> (Option<f64>, Option<f64>) {
-    if base_returns.len() < 2 || odds_returns.len() < 2 {
-        return (None, None);
-    }
-
-    // Odds leads by 1 bar: corr(base[t], odds[t-1]).
-    let lag_n = base_returns.len().min(odds_returns.len());
-    if lag_n < 2 {
-        return (None, None);
-    }
-
-    let mut base_now = Vec::new();
-    let mut odds_prev = Vec::new();
-    for idx in 1..lag_n {
-        base_now.push(base_returns[idx]);
-        odds_prev.push(odds_returns[idx - 1]);
-    }
-
-    let mut base_prev = Vec::new();
-    let mut odds_now = Vec::new();
-    for idx in 1..lag_n {
-        base_prev.push(base_returns[idx - 1]);
-        odds_now.push(odds_returns[idx]);
-    }
-
-    (
-        pearson(&base_now, &odds_prev),
-        pearson(&base_prev, &odds_now),
-    )
-}
-
-fn pearson(xs: &[f64], ys: &[f64]) -> Option<f64> {
-    if xs.len() < 2 || ys.len() < 2 || xs.len() != ys.len() {
-        return None;
-    }
-
-    let mean_x = xs.iter().sum::<f64>() / xs.len() as f64;
-    let mean_y = ys.iter().sum::<f64>() / ys.len() as f64;
-
-    let mut cov = 0.0;
-    let mut var_x = 0.0;
-    let mut var_y = 0.0;
-
-    for (x, y) in xs.iter().zip(ys.iter()) {
-        let dx = *x - mean_x;
-        let dy = *y - mean_y;
-        cov += dx * dy;
-        var_x += dx * dx;
-        var_y += dy * dy;
-    }
-
-    if var_x <= f64::EPSILON || var_y <= f64::EPSILON {
-        return None;
-    }
-
-    Some(cov / (var_x.sqrt() * var_y.sqrt()))
+    looks_fred
 }
 
 #[cfg(test)]
 mod timeseries_tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
-    fn odds_pair_requires_provider_and_market_together() {
-        let err = parse_optional_odds_pair_request(Some("kalshi"), None, "yes")
+    fn explicit_prediction_market_requires_provider_and_market_together() {
+        let err = parse_optional_prediction_market_request(Some("kalshi"), None, "yes")
             .expect_err("provider without market should fail");
         assert!(err.to_string().contains("must be provided together"));
     }
@@ -1159,17 +1558,24 @@ mod timeseries_tests {
     #[test]
     fn picks_yes_no_outcome_index_when_available() {
         let outcomes = vec!["No".to_string(), "Yes".to_string()];
-        let yes_idx = pick_polymarket_outcome_index(&outcomes, OddsPairSide::Yes, 2);
-        let no_idx = pick_polymarket_outcome_index(&outcomes, OddsPairSide::No, 2);
+        let yes_idx =
+            pick_polymarket_outcome_index(&outcomes, PredictionMarketSide::Yes, 2);
+        let no_idx =
+            pick_polymarket_outcome_index(&outcomes, PredictionMarketSide::No, 2);
         assert_eq!(yes_idx, 1);
         assert_eq!(no_idx, 0);
     }
 
     #[test]
-    fn return_corr_is_positive_for_parallel_series() {
-        let xs = vec![0.01, 0.02, 0.03, 0.04];
-        let ys = vec![0.02, 0.03, 0.04, 0.05];
-        let corr = pearson(&xs, &ys).expect("corr should exist");
-        assert!(corr > 0.9);
+    fn classify_timeseries_ticker_keeps_explicit_yahoo_out_of_fred_preset() {
+        assert_eq!(
+            classify_timeseries_ticker("DGS10", "auto", true),
+            TimeseriesTickerBucket::Fred
+        );
+        assert_eq!(
+            classify_timeseries_ticker("SPY", "auto", false),
+            TimeseriesTickerBucket::Main
+        );
     }
+
 }

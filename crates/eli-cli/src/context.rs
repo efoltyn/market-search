@@ -22,7 +22,7 @@ use eli_core::orchestrator::{
     compact_memory_now, maybe_compact_memory, run_subagents, SubagentResult,
 };
 use eli_core::persistence::{EventKind, SessionEvent, SessionStore};
-use eli_core::types::{ChatMessage, ChatRequest, ProviderKind};
+use eli_core::types::{ChatMessage, ChatRequest, ProviderKind, ResponseFormat};
 use eli_core::LlmAdapter;
 use futures::StreamExt;
 use itertools::Itertools;

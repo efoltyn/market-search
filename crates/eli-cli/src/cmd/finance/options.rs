@@ -1,3 +1,20 @@
+fn build_options_ibkr_connection_config(
+    account: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    client_id: Option<i32>,
+    market_data_type: Option<i32>,
+) -> eli_core::finance::IbkrConnectionConfig {
+    eli_core::finance::IbkrConnectionConfig {
+        account,
+        host,
+        port,
+        client_id,
+        market_data_type,
+        timeout_secs: None,
+    }
+}
+
 async fn cmd_finance_options(args: FinanceOptionsArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
@@ -5,6 +22,9 @@ async fn cmd_finance_options(args: FinanceOptionsArgs) -> Result<()> {
 
     if args.summary && args.expirations {
         anyhow::bail!("use only one of --summary or --expirations");
+    }
+    if args.all && args.expirations {
+        anyhow::bail!("use only one of --all or --expirations");
     }
 
     let option_type = match args
@@ -19,15 +39,32 @@ async fn cmd_finance_options(args: FinanceOptionsArgs) -> Result<()> {
     };
 
     let ticker_for_meta = args.ticker.clone();
+    let provider = match args.provider.trim().to_ascii_lowercase().as_str() {
+        "yahoo" => eli_core::finance::ProviderKind::Yahoo,
+        "ibkr" => eli_core::finance::ProviderKind::Ibkr,
+        other => anyhow::bail!("unsupported --provider '{other}' (supported: yahoo, ibkr)"),
+    };
+    let use_ibkr = matches!(provider, eli_core::finance::ProviderKind::Ibkr);
     let req = eli_core::finance::OptionsRequest {
         ticker: args.ticker,
+        provider,
+        ibkr: use_ibkr.then(|| {
+            build_options_ibkr_connection_config(
+                args.ibkr_account.clone(),
+                args.ibkr_host.clone(),
+                args.ibkr_port,
+                args.ibkr_client_id,
+                args.ibkr_market_data_type,
+            )
+        }),
         expiry: args.expiry,
+        target_dte_days: args.target_dte,
         option_type,
         near_money_pct: args.near_money,
         summary_only: args.summary,
         list_expirations: args.expirations,
-        multi_expiry: false,
-        num_expiries: None,
+        multi_expiry: args.all,
+        num_expiries: if args.all { Some(100) } else { None },
     };
 
     let resp = eli_core::finance::fetch_options(req)
@@ -61,6 +98,11 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
     }
+    if let Some(max_pages) = args.max_pages {
+        eprintln!(
+            "[sync] debug frontier sample enabled via --max-pages={max_pages}; use plain `eli finance sync` for exhaustive provider coverage"
+        );
+    }
 
     let sources = if args.sources.is_empty() {
         None
@@ -71,12 +113,10 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
     let policy_mode = eli_core::finance::policy::parse_policy_mode(Some(&args.policy_mode))
         .map_err(|e| anyhow::anyhow!(e))
         .context("parse --policy-mode")?;
-    let resolved_policy = eli_core::finance::policy::load_policy(
-        args.policy_file.as_deref(),
-        policy_mode,
-    )
-    .map_err(|e| anyhow::anyhow!(e))
-    .context("load policy")?;
+    let resolved_policy =
+        eli_core::finance::policy::load_policy(args.policy_file.as_deref(), policy_mode)
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("load policy")?;
 
     let req = eli_core::finance::OddsSyncRequest {
         sources,
@@ -101,13 +141,35 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
     };
     resp.decision_trace
         .push("policy_driven_compaction=true".to_string());
+    let sync_mode_trace = match resp.sync_mode {
+        eli_core::finance::OddsSyncMode::Exhaustive => "sync_mode=exhaustive",
+        eli_core::finance::OddsSyncMode::FrontierSample => "sync_mode=frontier_sample",
+        eli_core::finance::OddsSyncMode::StreamRefresh => "sync_mode=stream_refresh",
+    };
+    if !resp
+        .decision_trace
+        .iter()
+        .any(|item| item == sync_mode_trace)
+    {
+        resp.decision_trace.push(sync_mode_trace.to_string());
+    }
+    if args.max_pages.is_some()
+        && !resp
+            .decision_trace
+            .iter()
+            .any(|item| item == "max_pages_is_debug_only=true")
+    {
+        resp.decision_trace
+            .push("max_pages_is_debug_only=true".to_string());
+    }
 
     if let Some(out_path) = args.out {
         let mut meta_bits: Vec<String> = Vec::new();
         if let Some(max_pages) = args.max_pages {
-            meta_bits.push(format!("max_pages={max_pages}"));
+            meta_bits.push(format!("sync_mode=frontier_sample"));
+            meta_bits.push(format!("debug_max_pages={max_pages}"));
         } else {
-            meta_bits.push("max_pages=unbounded".to_string());
+            meta_bits.push("sync_mode=exhaustive".to_string());
         }
         let wr = write_json_out_with_meta(out_path, &resp, "finance.sync", &meta_bits)?;
         println!(
@@ -228,6 +290,7 @@ async fn cmd_finance_news(args: FinanceNewsArgs) -> Result<()> {
     let req = eli_core::finance::NewsRequest {
         ticker: args.ticker,
         date: args.date,
+        as_of: None,
         policy_file: args
             .policy_file
             .as_ref()

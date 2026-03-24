@@ -17,9 +17,19 @@ pub(crate) struct PolymarketCredentials {
 #[derive(Clone, Debug, Deserialize, Default)]
 struct InventoryFile {
     #[serde(default)]
+    fred: Option<FredInventory>,
+    #[serde(default)]
     kalshi: Option<KalshiInventory>,
     #[serde(default)]
     polymarket: Option<PolymarketInventory>,
+    #[serde(default)]
+    ibkr: Option<IbkrInventory>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+struct FredInventory {
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -44,6 +54,22 @@ struct PolymarketInventory {
     secret: Option<String>,
     #[serde(default)]
     passphrase: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+struct IbkrInventory {
+    #[serde(default)]
+    account: Option<String>,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    client_id: Option<i32>,
+    #[serde(default)]
+    market_data_type: Option<i32>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 pub(crate) fn resolve_kalshi_ws_credentials() -> std::result::Result<KalshiWsCredentials, String> {
@@ -193,6 +219,162 @@ pub(crate) fn resolve_polymarket_credentials() -> std::result::Result<Polymarket
         secret,
         passphrase,
     })
+}
+
+pub(crate) fn resolve_fred_api_key() -> std::result::Result<String, String> {
+    let api_key_env = std::env::var("FRED_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+
+    if let Some(api_key) = api_key_env.clone() {
+        return Ok(api_key);
+    }
+
+    let inv = read_inventory_file()?;
+    let fred = inv.as_ref().and_then(|v| v.fred.as_ref());
+
+    let api_key = api_key_env
+        .or_else(|| fred.and_then(|f| normalized(f.api_key.as_deref())))
+        .or_else(|| {
+            // Legacy fallback for users who still have the key in config.toml.
+            crate::config::Paths::discover()
+                .ok()
+                .and_then(|paths| crate::config::load_or_default(&paths).ok())
+                .and_then(|cfg| cfg.finance.fred_api_key)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .ok_or_else(|| {
+            format!(
+                "fred api key missing; set FRED_API_KEY or configure [fred].api_key in {}",
+                inventory_path().display()
+            )
+        })?;
+
+    Ok(api_key)
+}
+
+pub(crate) fn has_fred_api_configuration_hint() -> bool {
+    let env_present = std::env::var("FRED_API_KEY")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if env_present {
+        return true;
+    }
+
+    if let Ok(Some(inv)) = read_inventory_file() {
+        if inv
+            .fred
+            .as_ref()
+            .and_then(|fred| normalized(fred.api_key.as_deref()))
+            .is_some()
+        {
+            return true;
+        }
+    }
+
+    crate::config::Paths::discover()
+        .ok()
+        .and_then(|paths| crate::config::load_or_default(&paths).ok())
+        .and_then(|cfg| cfg.finance.fred_api_key)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+pub(crate) fn resolve_ibkr_connection(
+    overrides: Option<&eli_finance_types::IbkrConnectionConfig>,
+) -> std::result::Result<eli_finance_types::IbkrConnectionConfig, String> {
+    let inv = read_inventory_file()?;
+    let ibkr = inv.and_then(|v| v.ibkr);
+
+    let config = eli_finance_types::IbkrConnectionConfig {
+        account: overrides
+            .and_then(|v| normalized(v.account.as_deref()))
+            .or_else(|| {
+                std::env::var("IBKR_ACCOUNT")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+            })
+            .or_else(|| ibkr.as_ref().and_then(|v| normalized(v.account.as_deref()))),
+        host: overrides
+            .and_then(|v| normalized(v.host.as_deref()))
+            .or_else(|| {
+                std::env::var("IBKR_HOST")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+            })
+            .or_else(|| ibkr.as_ref().and_then(|v| normalized(v.host.as_deref()))),
+        port: overrides
+            .and_then(|v| v.port)
+            .or_else(|| {
+                std::env::var("IBKR_PORT")
+                    .ok()
+                    .and_then(|v| v.parse::<u16>().ok())
+            })
+            .or_else(|| ibkr.as_ref().and_then(|v| v.port)),
+        client_id: overrides
+            .and_then(|v| v.client_id)
+            .or_else(|| {
+                std::env::var("IBKR_CLIENT_ID")
+                    .ok()
+                    .and_then(|v| v.parse::<i32>().ok())
+            })
+            .or_else(|| ibkr.as_ref().and_then(|v| v.client_id)),
+        market_data_type: overrides
+            .and_then(|v| v.market_data_type)
+            .or_else(|| {
+                std::env::var("IBKR_MARKET_DATA_TYPE")
+                    .ok()
+                    .and_then(|v| v.parse::<i32>().ok())
+            })
+            .or_else(|| ibkr.as_ref().and_then(|v| v.market_data_type)),
+        timeout_secs: overrides
+            .and_then(|v| v.timeout_secs)
+            .or_else(|| {
+                std::env::var("IBKR_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+            })
+            .or_else(|| ibkr.as_ref().and_then(|v| v.timeout_secs)),
+    };
+
+    Ok(config)
+}
+
+pub(crate) fn has_ibkr_configuration_hint() -> bool {
+    let env_present = [
+        "IBKR_ACCOUNT",
+        "IBKR_HOST",
+        "IBKR_PORT",
+        "IBKR_CLIENT_ID",
+        "IBKR_MARKET_DATA_TYPE",
+        "IBKR_TIMEOUT_SECS",
+    ]
+    .iter()
+    .any(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    });
+    if env_present {
+        return true;
+    }
+
+    match read_inventory_file() {
+        Ok(Some(inv)) => inv
+            .ibkr
+            .map(|ibkr| {
+                normalized(ibkr.account.as_deref()).is_some()
+                    || normalized(ibkr.host.as_deref()).is_some()
+                    || ibkr.port.is_some()
+                    || ibkr.client_id.is_some()
+                    || ibkr.market_data_type.is_some()
+                    || ibkr.timeout_secs.is_some()
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn normalized(value: Option<&str>) -> Option<String> {
