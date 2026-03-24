@@ -11,7 +11,10 @@ fn infer_geo_targets(text: &str) -> Vec<GeoTarget> {
     let lower = text.to_ascii_lowercase();
     let mut targets = Vec::new();
     fn push_unique(targets: &mut Vec<GeoTarget>, country_id: &str, intensity: f64) {
-        if targets.iter().any(|t: &GeoTarget| t.country_id == country_id) {
+        if targets
+            .iter()
+            .any(|t: &GeoTarget| t.country_id == country_id)
+        {
             return;
         }
         targets.push(GeoTarget {
@@ -116,6 +119,7 @@ pub fn build_alert_packet(
     sub: &SubscriptionSpec,
     eval: &Evaluation,
     latency_ms: u64,
+    prediction_result: Option<String>,
 ) -> Result<AlertPacket> {
     let now = Utc::now();
     let packet_id = format!("pkt_{}", uuid::Uuid::new_v4().simple());
@@ -143,6 +147,9 @@ pub fn build_alert_packet(
         sub.prompt_template.clone()
     };
     let dedupe_key = format!("{}::{}", sub.id, sub.expr.trim());
+    // Prediction fields: actual value of target_var at fire time.
+    let prediction_actual = sub.target_var.as_deref()
+        .and_then(|v| eval.observed_vars.get(v).copied());
     let packet = AlertPacket {
         schema_version: "sentinel.packet.v1".to_string(),
         packet_kind: "alert".to_string(),
@@ -177,11 +184,16 @@ pub fn build_alert_packet(
         },
         geo_targets: infer_geo_targets(&format!("{} {}", sub.name, sub.expr)),
         ui_hints: pulse_for_severity(&sub.severity),
+        prediction_result,
+        prediction_text: sub.prediction.clone(),
+        prediction_target: sub.target_value,
+        prediction_actual,
     };
 
-    let playbook_path = paths
-        .playbooks_dir
-        .join(format!("{}_{}.md", now.format("%Y%m%dT%H%M%SZ"), sub.id));
+    let playbook_path =
+        paths
+            .playbooks_dir
+            .join(format!("{}_{}.md", now.format("%Y%m%dT%H%M%SZ"), sub.id));
     std::fs::create_dir_all(&paths.playbooks_dir)?;
     std::fs::write(
         &playbook_path,
@@ -210,7 +222,9 @@ pub fn build_error_packet(
         instrument: connector.to_string(),
         expr: "connector_failure_count >= 3".to_string(),
         observed_vars: BTreeMap::from([("failure_count".to_string(), failure_count as f64)]),
-        why_this_matters: format!("Connector `{connector}` failed {failure_count} consecutive times."),
+        why_this_matters: format!(
+            "Connector `{connector}` failed {failure_count} consecutive times."
+        ),
         follow_up_prompt: suggested_fix_prompt.clone(),
         playbook_path: String::new(),
         freshness: PacketFreshness {
@@ -238,6 +252,10 @@ pub fn build_error_packet(
             pulse_color: Some("#f97316".to_string()),
             pulse_seconds: Some(2.0),
         },
+        prediction_result: None,
+        prediction_text: None,
+        prediction_target: None,
+        prediction_actual: None,
     };
     let playbook_path = paths.playbooks_dir.join(format!(
         "{}_error_{}.md",

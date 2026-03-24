@@ -32,7 +32,7 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
             return WebReadResponse {
                 url: url.to_string(),
                 final_url: None,
-                title: String::new(),
+                title: derive_fallback_title(url, None),
                 text: String::new(),
                 fetch_status: WebReadFetchStatus::Error,
                 blocked_reason: Some("invalid_url".to_string()),
@@ -63,7 +63,7 @@ pub async fn read_url_with_diagnostics(url: &str) -> WebReadResponse {
             return WebReadResponse {
                 url: url.to_string(),
                 final_url: None,
-                title: String::new(),
+                title: derive_fallback_title(url, None),
                 text: String::new(),
                 fetch_status: WebReadFetchStatus::Error,
                 blocked_reason: Some("network_error".to_string()),
@@ -419,8 +419,8 @@ fn failed_web_read_response(
 ) -> WebReadResponse {
     WebReadResponse {
         url: url.to_string(),
+        title: derive_fallback_title(url, final_url.as_deref()),
         final_url,
-        title: String::new(),
         text: String::new(),
         fetch_status,
         blocked_reason: Some(reason),
@@ -429,6 +429,50 @@ fn failed_web_read_response(
         quality_notes: vec!["fetch_failed".to_string()],
         fetched_at,
     }
+}
+
+fn derive_fallback_title(url: &str, final_url: Option<&str>) -> String {
+    let raw = final_url.unwrap_or(url);
+    if let Ok(parsed) = reqwest::Url::parse(raw) {
+        let host = parsed.host_str().unwrap_or_default();
+        let segments = parsed
+            .path_segments()
+            .map(|segs| {
+                segs.filter(|s| !s.trim().is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut slug = segments
+            .iter()
+            .rev()
+            .find(|segment| {
+                let trimmed = segment.trim();
+                !trimmed.is_empty() && !trimmed.chars().all(|ch| ch.is_ascii_digit())
+            })
+            .cloned()
+            .unwrap_or_default();
+        if !slug.is_empty() {
+            if let Some(stripped) = slug.strip_suffix(".html") {
+                slug = stripped.to_string();
+            }
+            if let Ok(decoded) = urlencoding::decode(&slug) {
+                slug = decoded.to_string();
+            }
+            let pretty = slug
+                .replace(['-', '_'], " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !pretty.is_empty() {
+                return format!("{host} / {pretty}");
+            }
+        }
+        if !host.is_empty() {
+            return host.to_string();
+        }
+    }
+    raw.to_string()
 }
 
 fn classify_reqwest_error(err: &reqwest::Error) -> &'static str {

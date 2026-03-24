@@ -1,0 +1,1726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>eli terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0c1118;
+  --bg2: #141c26;
+  --bg3: #1b2734;
+  --bg4: #223244;
+  --border: #263646;
+  --border2: #37516a;
+  --text: #f4f7fb;
+  --text2: #c9d3df;
+  --text3: #97a8ba;
+  --text4: #65778b;
+  --accent: #7cc4ff;
+  --accent2: #9be7c2;
+  --up: #7cd5a3;
+  --down: #ff9282;
+  --warn: #ffcb7f;
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, rgba(124, 196, 255, 0.08), transparent 28%),
+    linear-gradient(180deg, #0c1118 0%, #0a0f15 100%);
+  color: var(--text);
+  font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+header {
+  height: 60px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(20, 28, 38, 0.94);
+  backdrop-filter: blur(16px);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 18px;
+  flex-shrink: 0;
+}
+
+.header-brand {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.header-brand span { color: var(--accent); }
+
+#sentinel-state {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+#sentinel-state.live {
+  color: var(--accent2);
+  border-color: rgba(155, 231, 194, 0.35);
+  background: rgba(155, 231, 194, 0.08);
+}
+
+#header-report-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-select {
+  border: 1px solid var(--border2);
+  background: var(--bg3);
+  color: var(--text2);
+  padding: 8px 10px;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.btn {
+  border: 1px solid var(--border2);
+  background: var(--bg3);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.btn:hover {
+  background: var(--bg4);
+  border-color: #47657f;
+}
+
+.btn.primary {
+  color: var(--accent);
+  border-color: rgba(124, 196, 255, 0.45);
+}
+
+main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+#sidebar {
+  width: 350px;
+  min-width: 290px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+#report-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.section-header {
+  padding: 16px 18px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.section-label {
+  color: var(--text3);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.section-count {
+  margin-left: auto;
+  color: var(--text4);
+  font-size: 12px;
+}
+
+#report-filter {
+  margin: 0 18px 12px;
+  width: calc(100% - 36px);
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text2);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+#report-filter::placeholder { color: var(--text4); }
+
+#report-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.report-subsection {
+  padding-bottom: 6px;
+}
+
+.report-subsection + .report-subsection {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.report-subheader {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 18px 10px;
+  background: rgba(12, 17, 24, 0.94);
+  backdrop-filter: blur(8px);
+}
+
+.report-subheader-label {
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.report-subheader-count {
+  color: var(--text4);
+  font-size: 11px;
+}
+
+.report-item {
+  padding: 14px 18px;
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.report-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.report-item.active {
+  background: rgba(124, 196, 255, 0.08);
+  border-left-color: var(--accent);
+}
+
+
+.r-name {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.r-prefix {
+  display: none;
+  margin-bottom: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+
+.r-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.r-date-iso,
+.r-date-rel,
+.r-author {
+  font-size: 12px;
+}
+
+.r-date-iso {
+  color: var(--accent);
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.r-date-rel { color: var(--text3); }
+.r-author { color: var(--text4); }
+
+.r-formats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text4);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+#daemon-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#settings-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  align-items: center;
+  justify-content: center;
+}
+
+#settings-modal.open {
+  display: flex;
+}
+
+#settings-dialog {
+  background: linear-gradient(180deg, var(--bg3), var(--bg2));
+  border: 1px solid var(--border2);
+  border-radius: 18px;
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.5);
+  width: 420px;
+  max-width: calc(100vw - 40px);
+  overflow: hidden;
+}
+
+#settings-dialog .section-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+}
+
+#settings-dialog .section-header .btn-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text3);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: color 0.15s;
+}
+
+#settings-dialog .section-header .btn-close:hover { color: var(--text); }
+
+.spawn-card {
+  padding: 20px;
+}
+
+.spawn-agent-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.spawn-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.spawn-agent-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  min-width: 90px;
+}
+
+.spawn-agent-toggle input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent2);
+}
+
+.spawn-agent-name {
+  font-size: 13px;
+  color: var(--text2);
+}
+
+.spawn-rate-input {
+  width: 52px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text2);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  text-align: center;
+}
+
+.spawn-rate-label {
+  font-size: 11px;
+  color: var(--text4);
+}
+
+.spawn-budget-inline {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--accent2);
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.spawn-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.spawn-status {
+  color: var(--text3);
+  font-size: 11px;
+}
+
+.spawn-budget-bar {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.spawn-budget-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text2);
+  font-size: 12px;
+}
+
+.spawn-budget-line span:last-child {
+  color: var(--accent2);
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.daemon-item {
+  padding: 12px 18px;
+  border-left: 3px solid rgba(124, 196, 255, 0.25);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.daemon-item:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.daemon-item.expanded {
+  background: rgba(124, 196, 255, 0.035);
+}
+
+.daemon-item.daemon-paused {
+  opacity: 0.5;
+  border-left-color: var(--border);
+}
+
+.daemon-item.daemon-hit {
+  border-left-color: #50c878;
+  background: rgba(80, 200, 120, 0.02);
+}
+
+.daemon-item.daemon-miss {
+  border-left-color: var(--down);
+  background: rgba(255, 95, 95, 0.02);
+}
+
+.daemon-item.daemon-hit:hover { background: rgba(80, 200, 120, 0.04); }
+.daemon-item.daemon-miss:hover { background: rgba(255, 95, 95, 0.04); }
+
+.d-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.d-name {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  line-height: 1.35;
+}
+
+.d-resolve-row {
+  margin-bottom: 5px;
+}
+
+.d-meta {
+  font-size: 10px;
+  color: var(--text4);
+  font-family: "IBM Plex Mono", monospace;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.d-meta.soon { color: var(--warn); font-weight: 600; }
+.d-meta.hit-label { color: #50c878; font-weight: 700; letter-spacing: 0.06em; }
+.d-meta.miss-label { color: var(--down); font-weight: 700; letter-spacing: 0.06em; }
+
+/* Compact single-line metric row */
+.d-metric {
+  font-size: 11px;
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--text3);
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.d-metric .d-val-current {
+  color: #e8d5a3;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.d-metric .d-val-target {
+  color: var(--text4);
+}
+
+.d-metric .d-val-gap {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+.d-metric .d-val-gap.close { color: #50c878; background: rgba(80, 200, 120, 0.1); }
+.d-metric .d-val-gap.far   { color: var(--text4); }
+.d-metric .d-val-gap.hit   { color: #50c878; }
+.d-metric .d-val-gap.miss  { color: var(--down); }
+
+/* Legacy gap row kept for compat but hidden */
+.d-gap-row { display: none; }
+.d-current, .d-arrow, .d-target, .d-gap { display: none; }
+
+.d-badges {
+  display: none;
+}
+
+.d-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border2);
+  background: var(--bg3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.d-badge.pending { color: var(--accent); }
+.d-badge.paused { color: var(--text3); }
+.d-badge.hit {
+  background: rgba(80, 200, 120, 0.12);
+  color: #50c878;
+  border-color: rgba(80, 200, 120, 0.25);
+}
+.d-badge.miss {
+  background: rgba(255, 95, 95, 0.1);
+  color: var(--down);
+  border-color: rgba(255, 95, 95, 0.2);
+}
+.d-badge.resolved { color: var(--text3); }
+.d-badge.scheduled {
+  background: color-mix(in srgb, var(--accent2) 15%, transparent);
+  color: var(--accent2);
+}
+.d-badge.breakthrough {
+  background: rgba(124, 196, 255, 0.08);
+  color: var(--accent);
+}
+
+.d-cond {
+  color: var(--text2);
+  font-size: 11px;
+  font-family: "IBM Plex Mono", monospace;
+  line-height: 1.45;
+  word-break: break-word;
+  opacity: 0.84;
+}
+
+.d-watch {
+  color: var(--text3);
+  font-size: 11px;
+  font-family: "IBM Plex Mono", monospace;
+  line-height: 1.45;
+  margin-top: 8px;
+  word-break: break-word;
+}
+
+.d-now {
+  color: var(--accent);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 8px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.d-now.up { color: var(--up); }
+.d-now.down { color: var(--down); }
+.d-now.flat { color: var(--text2); }
+
+.d-now .d-symbol {
+  color: var(--text2);
+  margin-right: 8px;
+}
+
+.d-now .d-move {
+  margin-left: 8px;
+}
+
+.d-why {
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 8px;
+}
+
+.d-mini {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 10px;
+}
+
+.d-mini-line {
+  color: var(--text3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.d-mini-line strong {
+  color: var(--text4);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-right: 5px;
+}
+
+.d-spawn-inline {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text4);
+  font-size: 10px;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.d-thesis {
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: none;
+}
+
+.daemon-item.expanded .d-thesis {
+  display: block;
+}
+
+.d-source {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.d-evidence {
+  color: var(--text3);
+  font-size: 11px;
+  font-style: italic;
+  line-height: 1.5;
+}
+
+.d-source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  font-size: 10px;
+  font-family: "IBM Plex Mono", monospace;
+  cursor: pointer;
+  text-decoration: none;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+}
+
+.d-source-link:hover {
+  color: var(--text);
+}
+
+.d-resolve-row {
+  display: none; /* merged into d-attr */
+}
+
+/* Attribution/meta line below the metric */
+.d-attr {
+  font-size: 10px;
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--text4);
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.d-attr .d-attr-sep {
+  color: var(--border2);
+}
+
+.d-resolve-time {
+  font-size: 10px;
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--text4);
+}
+
+.d-resolve-time.soon { color: var(--warn); }
+
+.d-resolve-outcome {
+  font-size: 10px;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.d-resolve-outcome.hit { color: #50c878; }
+.d-resolve-outcome.miss { color: var(--down); }
+
+.daemon-item.daemon-hit {
+  border-left: 3px solid #50c878;
+  background: rgba(80, 200, 120, 0.04);
+}
+
+.daemon-item.daemon-miss {
+  border-left: 3px solid var(--down);
+  background: rgba(255, 95, 95, 0.04);
+}
+
+#center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0a1016;
+}
+
+#report-frame {
+  flex: 1;
+  border: none;
+  background: #ffffff;
+}
+
+#empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  color: var(--text2);
+}
+
+#empty-state .em-label {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+#empty-state .em-hint {
+  font-size: 14px;
+  color: var(--text3);
+}
+
+#picks-panel {
+  width: 320px;
+  min-width: 260px;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(124, 196, 255, 0.08), transparent 24%),
+    rgba(255, 255, 255, 0.02);
+}
+
+#daemon-section {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(27, 39, 52, 0.96), rgba(20, 28, 38, 0.96));
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+#daemon-section .section-header {
+  margin: 0;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+#daemons-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 0 10px;
+}
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+
+@media (max-width: 1280px) {
+  #sidebar { width: 300px; min-width: 260px; }
+  #picks-panel { width: 280px; min-width: 240px; }
+}
+
+@media (max-width: 980px) {
+  main { flex-direction: column; }
+  #sidebar, #picks-panel {
+    width: 100%;
+    min-width: 0;
+    border-right: none;
+    border-left: none;
+  }
+  #sidebar { max-height: 42vh; border-bottom: 1px solid var(--border); }
+  #picks-panel { max-height: 42vh; border-top: 1px solid var(--border); }
+  .header-actions { flex-wrap: wrap; justify-content: flex-end; }
+}
+
+/* ── Mobile: single-panel tab layout ── */
+#mobile-tabs {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  body { height: 100dvh; }
+
+  header {
+    height: auto;
+    min-height: 52px;
+    padding: 10px 14px;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .header-brand { font-size: 11px; }
+  #header-report-title { font-size: 12px; order: 3; width: 100%; }
+  #sentinel-state { font-size: 10px; padding: 4px 8px; }
+  /* Hide desktop-only header actions on phone */
+  #open-report-btn, #fullscreen-report-btn, .header-select { display: none !important; }
+  .header-actions { gap: 6px; }
+  .btn { padding: 6px 10px; font-size: 11px; }
+
+  main {
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* All three panels fill full height, only active one shown */
+  #sidebar {
+    display: none;
+    width: 100%;
+    min-width: 0;
+    max-height: none;
+    flex: 1;
+    border: none;
+  }
+  #center {
+    display: none;
+    flex: 1;
+  }
+  #picks-panel {
+    display: none;
+    width: 100%;
+    min-width: 0;
+    max-height: none;
+    flex: 1;
+    border: none;
+    padding: 12px;
+    gap: 10px;
+  }
+
+  /* Active panel */
+  #sidebar.mobile-active,
+  #center.mobile-active,
+  #picks-panel.mobile-active {
+    display: flex;
+  }
+
+  /* Bottom tab bar */
+  #mobile-tabs {
+    display: flex;
+    height: 52px;
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    background: rgba(14, 20, 28, 0.97);
+    backdrop-filter: blur(12px);
+  }
+  .mob-tab {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--text3);
+    text-transform: uppercase;
+    cursor: pointer;
+    border: none;
+    background: none;
+    transition: color 0.15s;
+  }
+  .mob-tab.active { color: var(--accent); }
+  .mob-tab-icon { font-size: 16px; line-height: 1; }
+
+  /* Touch-friendly list items */
+  .report-item { padding: 12px 16px; }
+  .r-name { font-size: 14px; }
+  .daemon-item { padding: 14px 16px; }
+  .d-name { font-size: 14px; }
+  .d-metric { font-size: 12px; }
+  .d-metric .d-val-current { font-size: 17px; }
+}
+</style>
+</head>
+<body>
+<div id="settings-modal" onclick="handleModalBackdropClick(event)">
+  <div id="settings-dialog">
+    <div class="section-header">
+      <span class="section-label">Spawn Settings</span>
+      <button class="btn-close" onclick="closeSettings()">✕</button>
+    </div>
+    <div class="spawn-card">
+      <div class="spawn-agent-rows">
+        <div class="spawn-agent-row">
+          <label class="spawn-agent-toggle">
+            <input type="checkbox" id="claude-enabled" checked>
+            <span class="spawn-agent-name">Claude</span>
+          </label>
+          <input id="claude-max-per-hour" type="number" min="1" max="60" step="1" value="2" class="spawn-rate-input">
+          <span class="spawn-rate-label">/ hr</span>
+          <span class="spawn-budget-inline" id="claude-budget-line">—</span>
+        </div>
+        <div class="spawn-agent-row">
+          <label class="spawn-agent-toggle">
+            <input type="checkbox" id="codex-enabled" checked>
+            <span class="spawn-agent-name">Codex</span>
+          </label>
+          <input id="codex-max-per-hour" type="number" min="1" max="60" step="1" value="2" class="spawn-rate-input">
+          <span class="spawn-rate-label">/ hr</span>
+          <span class="spawn-budget-inline" id="codex-budget-line">—</span>
+        </div>
+        <div class="spawn-agent-row">
+          <label class="spawn-agent-toggle">
+            <input type="checkbox" id="gemini-enabled" checked>
+            <span class="spawn-agent-name">Gemini</span>
+          </label>
+          <input id="gemini-max-per-hour" type="number" min="1" max="60" step="1" value="2" class="spawn-rate-input">
+          <span class="spawn-rate-label">/ hr</span>
+          <span class="spawn-budget-inline" id="gemini-budget-line">—</span>
+        </div>
+      </div>
+      <div class="spawn-actions">
+        <div class="spawn-status" id="spawn-settings-status">Rolling per-hour budget.</div>
+        <button class="btn" onclick="saveSpawnSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<header>
+  <div class="header-brand">eli<span>.</span>terminal</div>
+  <div id="sentinel-state">sentinel status unknown</div>
+  <div id="header-report-title"></div>
+  <div class="header-actions">
+    <select class="header-select" id="timezone-select" onchange="setTimezone(this.value)">
+      <option value="America/New_York">EST</option>
+      <option value="local">Local</option>
+      <option value="UTC">UTC</option>
+    </select>
+    <button class="btn" onclick="openCurrentReport()" id="open-report-btn" style="display:none">Open Report</button>
+    <button class="btn primary" onclick="toggleReportFullscreen()" id="fullscreen-report-btn" style="display:none">Fullscreen</button>
+    <button class="btn" onclick="openSettings()">Settings</button>
+    <button class="btn" onclick="hardRefresh()">Reload</button>
+  </div>
+</header>
+
+<main>
+  <div id="sidebar">
+    <div id="report-section">
+      <div class="section-header">
+        <span class="section-label">Research</span>
+        <span class="section-count" id="report-count"></span>
+      </div>
+      <input type="text" id="report-filter" placeholder="Filter…" oninput="filterReports()">
+      <div id="report-list"></div>
+    </div>
+  </div>
+
+  <div id="center">
+    <div id="empty-state">
+      <div class="em-label">Select a report</div>
+      <div class="em-hint">New research will appear here as HTML or Markdown.</div>
+    </div>
+    <iframe id="report-frame" style="display:none"></iframe>
+  </div>
+
+  <div id="picks-panel">
+    <div id="daemon-section">
+      <div class="section-header">
+        <span class="section-label">Watching</span>
+      </div>
+      <div id="daemons-container"></div>
+    </div>
+  </div>
+</main>
+<nav id="mobile-tabs">
+  <button class="mob-tab active" data-panel="sidebar" onclick="switchMobileTab(this,'sidebar')">
+    <span class="mob-tab-icon">≡</span>Research
+  </button>
+  <button class="mob-tab" data-panel="center" onclick="switchMobileTab(this,'center')">
+    <span class="mob-tab-icon">◻</span>Report
+  </button>
+  <button class="mob-tab" data-panel="picks-panel" onclick="switchMobileTab(this,'picks-panel')">
+    <span class="mob-tab-icon">◈</span>Watching
+  </button>
+</nav>
+
+<script>/* v3 */
+let currentReport = null;
+let allReports = [];
+let wsReconnectDelay = 1000;
+let spawnSettingsCache = null;
+let monitorApiAvailable = true;
+let watchValuesCache = {};
+const DEFAULT_TIMEZONE = 'America/New_York';
+
+function humanize(name) {
+  return name
+    .replace(/-(\d{4}-\d{2}-\d{2})$/, '')
+    .replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .trim() || name;
+}
+
+function cleanTitle(title) {
+  return title
+    .replace(/\s*—\s*(eli\s+)?macro research.*$/i, '')
+    .replace(/\s*—\s*(march|february|feb|january|jan) \d{4}$/i, '')
+    .trim() || title;
+}
+
+function buildAuthorLine(r) {
+  const parts = [];
+  if (r.author) parts.push(r.author);
+  if (r.researcher) parts.push(r.researcher);
+  return parts.join(' · ');
+}
+
+function extractDate(fname, dateIso) {
+  const match = fname.match(/(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : (dateIso || '');
+}
+
+function getTimezone() {
+  return localStorage.getItem('eli-monitor-timezone') || DEFAULT_TIMEZONE;
+}
+
+function setTimezone(value) {
+  localStorage.setItem('eli-monitor-timezone', value || DEFAULT_TIMEZONE);
+  const select = document.getElementById('timezone-select');
+  if (select) select.value = getTimezone();
+  renderReports(allReports);
+}
+
+function initTimezone() {
+  const select = document.getElementById('timezone-select');
+  if (select) select.value = getTimezone();
+}
+
+function formatDateIso(report) {
+  const modified = Number(report.modified || 0) * 1000;
+  if (!modified) return extractDate(report.file, report.date_iso);
+  const timezone = getTimezone();
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone === 'local' ? undefined : timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  const parts = formatter.formatToParts(new Date(modified));
+  const year = parts.find(part => part.type === 'year')?.value || '0000';
+  const month = parts.find(part => part.type === 'month')?.value || '00';
+  const day = parts.find(part => part.type === 'day')?.value || '00';
+  return `${year}-${month}-${day}`;
+}
+
+function formatRelativeDate(report) {
+  const modifiedMs = Number(report.modified || 0) * 1000;
+  if (!modifiedMs) return report.date || '';
+  const deltaMinutes = Math.floor((Date.now() - modifiedMs) / 60000);
+  if (deltaMinutes < 60) return `${Math.max(deltaMinutes, 0)}m ago`;
+  const deltaHours = Math.floor(deltaMinutes / 60);
+  if (deltaHours < 24) return `${Math.max(deltaHours, 0)}h ago`;
+  const timezone = getTimezone();
+  if (deltaHours < 24 * 7) {
+    return new Intl.DateTimeFormat('en-US', {
+      weekday: 'short',
+      timeZone: timezone === 'local' ? undefined : timezone
+    }).format(new Date(modifiedMs));
+  }
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'numeric',
+    day: 'numeric',
+    year: new Date(modifiedMs).getFullYear() === new Date().getFullYear() ? undefined : '2-digit',
+    timeZone: timezone === 'local' ? undefined : timezone
+  }).format(new Date(modifiedMs));
+}
+
+function formatTimestampShort(value) {
+  if (!value) return 'never';
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return value;
+  const deltaMinutes = Math.floor((Date.now() - ts) / 60000);
+  if (deltaMinutes < 60) return `${Math.max(deltaMinutes, 0)}m ago`;
+  const deltaHours = Math.floor(deltaMinutes / 60);
+  if (deltaHours < 24) return `${deltaHours}h ago`;
+  const deltaDays = Math.floor(deltaHours / 24);
+  if (deltaDays < 7) {
+    return new Intl.DateTimeFormat('en-US', {
+      weekday: 'short',
+      timeZone: getTimezone() === 'local' ? undefined : getTimezone()
+    }).format(new Date(ts));
+  }
+  return formatDateIso({ modified: Math.floor(ts / 1000) });
+}
+
+function summarizeCondition(condition) {
+  if (!condition) return '';
+  return condition
+    .replace(/&&/g, ' and ')
+    .replace(/\|\|/g, ' or ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 84);
+}
+
+function formatDaemonVars(vars) {
+  if (!vars || typeof vars !== 'object') return '';
+  const entries = Object.entries(vars)
+    .filter(([, spec]) => !!spec)
+    .slice(0, 3)
+    .map(([name, spec]) => `${name} → ${spec}`);
+  return entries.join(' · ');
+}
+
+function resolutionTimeLabel(daemon) {
+  // Returns the time label for when this prediction resolves
+  const resolvesAt = daemon.fireAt || daemon.deadline;
+  if (!resolvesAt) return null;
+  const ts = new Date(resolvesAt);
+  const ms = ts - Date.now();
+  if (daemon.predictionResolved && daemon.resolvedAt) {
+    const ago = Math.round((Date.now() - new Date(daemon.resolvedAt)) / 60000);
+    return { label: ago < 60 ? `resolved ${ago}m ago` : `resolved ${Math.round(ago/60)}h ago`, soon: false };
+  }
+  if (ms <= 0) return { label: 'resolving now', soon: true };
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const d = Math.floor(ms / 86400000);
+  let label;
+  if (d > 0) label = `resolves in ${d}d ${h % 24}h`;
+  else if (h > 0) label = `resolves in ${h}h ${m}m`;
+  else label = `resolves in ${m}m`;
+  return { label, soon: ms < 3600000 }; // soon = within 1 hour
+}
+
+function agentTargetsLabel(daemon) {
+  if (!daemon.spawnAgent) return '';
+  const t = (daemon.spawnTarget || 'claude').toLowerCase();
+  if (t === 'all') return 'claude · codex · gemini';
+  if (t === 'both') return 'claude · codex';
+  return t;
+}
+
+function formatWatchValue(daemon) {
+  const key = daemon.id || daemon.name;
+  const value = watchValuesCache[key];
+  if (!value) return null;
+  if (value.kind === 'ticker') {
+    const move = Number(value.delta_pct || 0);
+    const moveCls = move > 0 ? 'up' : move < 0 ? 'down' : 'flat';
+    const moveSign = move > 0 ? '+' : '';
+    return {
+      cls: moveCls,
+      html: `<span class="d-symbol">${daemon.symbol || value.symbol}</span>${Number(value.value).toFixed(2)}<span class="d-move">${moveSign}${move.toFixed(1)}%</span>`
+    };
+  }
+  if (value.kind === 'odds') {
+    const thresholdRaw = Number(daemon.threshold);
+    const thresholdPct = thresholdRaw <= 1 ? thresholdRaw * 100 : thresholdRaw;
+    const diff = Number(value.value) - thresholdPct;
+    const moveSign = diff > 0 ? '+' : '';
+    return {
+      cls: 'flat',
+      html: `<span class="d-symbol">${daemon.symbol || value.symbol}</span>${Number(value.value).toFixed(1)}%<span class="d-move">${moveSign}${diff.toFixed(1)}pp</span>`
+    };
+  }
+  return null;
+}
+
+const REPORT_TYPES = {
+  report:   { label: null,             sectionLabel: 'Reports'       },
+  research: { label: 'Research',       sectionLabel: 'Research'      },
+  alert:    { label: 'Market Alert',   sectionLabel: 'Market Alerts' },
+  tool:     { label: 'Tool Report',    sectionLabel: 'Tool Reports'  },
+  error:    { label: 'Error',          sectionLabel: 'Errors'        },
+};
+
+function classifyReport(report) {
+  const name = (report.name || report.file || '').toLowerCase();
+  const formats = Array.isArray(report.formats) ? report.formats : [];
+  const isMdOnly = report.kind === 'md' && !formats.includes('html');
+  if (/\berror\b/.test(name)) return 'error';
+  if (/\btool\b|\bfriction\b|\baudit\b|\bstate.?map\b/.test(name)) return 'tool';
+  if (/\balert\b/.test(name)) return 'alert';
+  if (isMdOnly) return 'research';
+  return 'report';
+}
+
+function preferredSelection(reports) {
+  if (currentReport) {
+    const existing = reports.find(r => r.file === currentReport.file);
+    if (existing) return existing;
+  }
+  return reports[0] || null;
+}
+
+function renderReportRow(container, report) {
+  const title = report.title ? cleanTitle(report.title) : humanize(report.name);
+  const authorLine = buildAuthorLine(report);
+  const relativeDate = formatRelativeDate(report);
+  const displayDate = formatDateIso(report);
+  const item = document.createElement('div');
+  item.className = 'report-item';
+  item.dataset.file = report.file;
+  item.innerHTML = `
+    <div class="r-name">${title}</div>
+    <div class="r-meta">
+      <span class="r-date-iso">${displayDate}</span>
+      <span class="r-date-rel">${relativeDate}</span>
+      ${authorLine ? `<span class="r-author">${authorLine}</span>` : ''}
+    </div>
+  `;
+  item.onclick = () => selectReport(report, item);
+  container.appendChild(item);
+}
+
+async function loadReports() {
+  const res = await fetch('/api/reports').catch(() => null);
+  if (!res || !res.ok) return;
+  allReports = await res.json();
+  renderReports(allReports);
+}
+
+function renderReports(reports) {
+  const count = document.getElementById('report-count');
+  const container = document.getElementById('report-list');
+  const detail = document.getElementById('report-count-detail');
+  container.innerHTML = '';
+
+  if (reports.length === 0) {
+    if (detail) detail.style.display = 'none';
+    container.innerHTML = '<div style="padding:16px 18px;color:var(--text3);font-size:13px;">No reports found.</div>';
+    return;
+  }
+
+  if (detail) detail.style.display = 'none';
+  count.textContent = `${reports.length}`;
+
+  // One unified feed — newest first, no categories
+  const sorted = [...reports].sort((a, b) => (b.modified || 0) - (a.modified || 0));
+  sorted.forEach(r => renderReportRow(container, r));
+
+  const nextSelection = preferredSelection(reports);
+  if (!nextSelection) return;
+  const activeNode = container.querySelector(`[data-file="${CSS.escape(nextSelection.file)}"]`);
+  if (activeNode) selectReport(nextSelection, activeNode);
+}
+
+function filterReports() {
+  const query = document.getElementById('report-filter').value.trim().toLowerCase();
+  if (!query) {
+    renderReports(allReports);
+    return;
+  }
+  const filtered = allReports.filter(report => {
+    const haystack = [
+      report.file,
+      report.name,
+      report.title || '',
+      report.author || '',
+      report.researcher || '',
+      Array.isArray(report.formats) ? report.formats.join(' ') : ''
+    ].join(' ').toLowerCase();
+    return haystack.includes(query);
+  });
+  renderReports(filtered);
+}
+
+function setSentinelState(message) {
+  const el = document.getElementById('sentinel-state');
+  if (!el) return;
+  if (message && message.daemon_running) {
+    const heartbeat = message.heartbeat_at
+      ? message.heartbeat_at.replace('T', ' ').replace('Z', ' UTC')
+      : 'heartbeat unavailable';
+    el.textContent = `sentinel live · ${heartbeat}`;
+    el.classList.add('live');
+  } else if (message && message.daemon_running == null && Array.isArray(message.daemons) && message.daemons.length > 0) {
+    el.textContent = 'sentinel live';
+    el.classList.add('live');
+  } else {
+    el.textContent = 'sentinel not running';
+    el.classList.remove('live');
+  }
+}
+
+async function openSettings() {
+  document.getElementById('settings-modal').classList.add('open');
+  // Always fetch fresh settings when panel opens
+  const res = await fetch('/api/spawn-settings').catch(() => null);
+  if (res && res.ok) {
+    const settings = await res.json().catch(() => null);
+    if (settings) renderSpawnSettings(settings, null);
+  }
+}
+
+function closeSettings() {
+  document.getElementById('settings-modal').classList.remove('open');
+}
+
+function handleModalBackdropClick(e) {
+  if (e.target === document.getElementById('settings-modal')) closeSettings();
+}
+
+function renderSpawnSettings(settings, budget) {
+  if (settings) {
+    spawnSettingsCache = settings;
+    const codexMax = settings.codexMaxSpawnsPerHour ?? 2;
+    const claudeMax = settings.claudeMaxSpawnsPerHour ?? 2;
+    const geminiMax = settings.geminiMaxSpawnsPerHour ?? 2;
+    const codexCheck = document.getElementById('codex-enabled');
+    const claudeCheck = document.getElementById('claude-enabled');
+    const geminiCheck = document.getElementById('gemini-enabled');
+    const codexInput = document.getElementById('codex-max-per-hour');
+    const claudeInput = document.getElementById('claude-max-per-hour');
+    const geminiInput = document.getElementById('gemini-max-per-hour');
+    if (codexCheck) codexCheck.checked = codexMax > 0;
+    if (claudeCheck) claudeCheck.checked = claudeMax > 0;
+    if (geminiCheck) geminiCheck.checked = geminiMax > 0;
+    if (codexInput) codexInput.value = codexMax > 0 ? codexMax : 2;
+    if (claudeInput) claudeInput.value = claudeMax > 0 ? claudeMax : 2;
+    if (geminiInput) geminiInput.value = geminiMax > 0 ? geminiMax : 2;
+  }
+  if (budget) {
+    const codexLine = document.getElementById('codex-budget-line');
+    const claudeLine = document.getElementById('claude-budget-line');
+    const geminiLine = document.getElementById('gemini-budget-line');
+    if (codexLine) codexLine.textContent = `${budget.codexRemaining ?? 0} left · ${budget.codexUsedLastHour ?? 0} used`;
+    if (claudeLine) claudeLine.textContent = `${budget.claudeRemaining ?? 0} left · ${budget.claudeUsedLastHour ?? 0} used`;
+    if (geminiLine) geminiLine.textContent = `${budget.geminiRemaining ?? 0} left · ${budget.geminiUsedLastHour ?? 0} used`;
+  }
+}
+
+async function loadMonitorSnapshot() {
+  monitorApiAvailable = false;
+  const legacy = await fetch('/api/daemons').catch(() => null);
+  if (!legacy || !legacy.ok) return null;
+  return {
+    type: 'daemon_update',
+    daemons: await legacy.json(),
+    daemon_running: null,
+    spawnSettings: null,
+    spawnBudget: null,
+    heartbeat_at: null
+  };
+}
+
+function renderDaemons(daemons) {
+  const container = document.getElementById('daemons-container');
+  container.innerHTML = '';
+
+  if (!Array.isArray(daemons) || daemons.length === 0) {
+    container.innerHTML = '<div style="padding:16px 18px;color:var(--text3);font-size:13px;">No sentinel subscriptions configured.</div>';
+    return;
+  }
+
+  // Sort: pending first (soonest deadline), then resolved (most recent)
+  const ordered = [...daemons].sort((a, b) => {
+    const aResolved = a.predictionResolved ? 1 : 0;
+    const bResolved = b.predictionResolved ? 1 : 0;
+    if (aResolved !== bResolved) return aResolved - bResolved;
+    // pending: sort by soonest resolution time
+    const aTime = a.fireAt || a.deadline;
+    const bTime = b.fireAt || b.deadline;
+    if (aTime && bTime) return new Date(aTime) - new Date(bTime);
+    return 0;
+  });
+
+  ordered.forEach(daemon => {
+    const status = daemon.status || 'pending';
+    const resolveInfo = resolutionTimeLabel(daemon);
+    const agents = agentTargetsLabel(daemon);
+    const obs = daemon.observedValues || {};
+
+    const fmtVal = n => {
+      if (n == null) return '—';
+      if (n >= 1000) return n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+      if (n >= 1) return n.toFixed(2);
+      return (n * 100).toFixed(1) + '%';
+    };
+
+    // ── metric line: current → target  gap  ·  countdown ──
+    let metricParts = [];
+    const targetVar = daemon.targetVar;
+    const targetVal = daemon.targetValue;
+    const currentVal = targetVar ? obs[targetVar] : null;
+
+    if (currentVal != null && targetVal != null) {
+      const delta = currentVal - targetVal;
+      const deltaPct = targetVal !== 0 ? (delta / Math.abs(targetVal)) * 100 : 0;
+      const sign = delta >= 0 ? '+' : '';
+      const arrow = daemon.condition && daemon.condition.includes('<=') ? '≤' : '≥';
+      let gapClass = daemon.conditionMet ? 'close' : (Math.abs(deltaPct) < 5 ? 'close' : 'far');
+      if (daemon.predictionResolved) gapClass = status === 'hit' ? 'hit' : 'miss';
+
+      const currentStyle = daemon.conditionMet ? ' style="color:#50c878"' : '';
+      metricParts.push(
+        `<span class="d-val-current"${currentStyle}>${fmtVal(currentVal)}</span>`,
+        `<span>→ ${arrow}${fmtVal(targetVal)}</span>`,
+        `<span class="d-val-gap ${gapClass}">${sign}${fmtVal(Math.abs(delta))} (${sign}${deltaPct.toFixed(1)}%)</span>`
+      );
+    } else if (daemon.daemonKind === 'scheduled' && daemon.fireAt) {
+      // Scheduled checkpoint — show the fire time prominently
+      const fireDate = new Date(daemon.fireAt);
+      const fireStr = fireDate.toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'});
+      metricParts.push(`<span>fires ${fireStr}</span>`);
+    } else if (daemon.watchSummary) {
+      const watchStyle = daemon.conditionMet ? ' style="color:#50c878"' : '';
+      metricParts.push(`<span class="d-val-current"${watchStyle}>${daemon.watchSummary}</span>`);
+    } else if (daemon.predictionResolved && daemon.resolvedActual != null) {
+      metricParts.push(`<span>actual: ${fmtVal(daemon.resolvedActual)}</span>`);
+    }
+
+    // ── top-right: outcome or countdown ──
+    let metaHtml = '';
+    if (daemon.predictionResolved) {
+      const result = (daemon.predictionResult || 'RESOLVED').toUpperCase();
+      const cls = status === 'hit' ? 'hit-label' : status === 'miss' ? 'miss-label' : '';
+      metaHtml = `<span class="d-meta ${cls}">${result}</span>`;
+    } else if (resolveInfo) {
+      metaHtml = `<span class="d-meta${resolveInfo.soon ? ' soon' : ''}">${resolveInfo.label}</span>`;
+    }
+
+    // ── attr line: source report (agent targets intentionally hidden) ──
+    const attrParts = [];
+
+    // Look up author from allReports if sourceReportFile is set
+    if (daemon.sourceReportFile && typeof allReports !== 'undefined') {
+      const srcReport = allReports.find(r => r.file === daemon.sourceReportFile);
+      if (srcReport) {
+        const authorText = srcReport.researcher || srcReport.author || '';
+        const titleText = srcReport.title || daemon.sourceReportTitle || '';
+        if (attrParts.length && (authorText || titleText)) {
+          attrParts.push(`<span class="d-attr-sep">·</span>`);
+        }
+        if (authorText) attrParts.push(`<span>${authorText}</span>`);
+        if (titleText) attrParts.push(`<span class="d-attr-sep">·</span><span>${titleText}</span>`);
+      } else if (daemon.sourceReportTitle) {
+        if (attrParts.length) attrParts.push(`<span class="d-attr-sep">·</span>`);
+        attrParts.push(`<span>${daemon.sourceReportTitle}${daemon.sourceReportDate ? ' · ' + daemon.sourceReportDate : ''}</span>`);
+      }
+    } else if (daemon.sourceReportTitle) {
+      if (attrParts.length) attrParts.push(`<span class="d-attr-sep">·</span>`);
+      attrParts.push(`<span>${daemon.sourceReportTitle}${daemon.sourceReportDate ? ' · ' + daemon.sourceReportDate : ''}</span>`);
+    }
+
+    // ── thesis expand section ──
+    let sourceHtml = '';
+    if (daemon.sourceEvidence || daemon.sourceReportFile) {
+      const evidenceHtml = daemon.sourceEvidence
+        ? `<span class="d-evidence">"${daemon.sourceEvidence}"</span>` : '';
+      const reportLabel = daemon.sourceReportTitle
+        ? `${daemon.sourceReportTitle}${daemon.sourceReportDate ? ' · ' + daemon.sourceReportDate : ''}`
+        : daemon.sourceReportFile || '';
+      const linkHtml = daemon.sourceReportFile
+        ? `<button class="d-source-link" data-report-file="${daemon.sourceReportFile}">↗ open source report${reportLabel ? ': ' + reportLabel : ''}</button>` : '';
+      sourceHtml = `<div class="d-source">${evidenceHtml}${linkHtml}</div>`;
+    }
+
+    const hasExpand = !!(daemon.predictionText || daemon.sourceEvidence || daemon.sourceReportFile);
+    const displayName = daemon.title || daemon.name;
+    const metricHtml = metricParts.length
+      ? `<div class="d-metric">${metricParts.join('')}</div>` : '';
+    const attrHtml = attrParts.length
+      ? `<div class="d-attr">${attrParts.join('')}</div>` : '';
+    const thesisHtml = hasExpand
+      ? `<div class="d-thesis">${daemon.predictionText ? `<div style="margin-bottom:6px">${daemon.predictionText}</div>` : ''}${sourceHtml}</div>` : '';
+
+    const item = document.createElement('div');
+    item.className = `daemon-item daemon-${status}`;
+    const resolveRowHtml = metaHtml ? `<div class="d-resolve-row">${metaHtml}</div>` : '';
+    item.innerHTML = `
+      <div class="d-top">
+        <span class="d-name">${displayName}</span>
+      </div>
+      ${resolveRowHtml}
+      ${metricHtml}
+      ${attrHtml}
+      ${thesisHtml}
+    `;
+
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.d-source-link')) return;
+      if (hasExpand) item.classList.toggle('expanded');
+      // If there's a source file and the item is a resolved prediction, open it in center frame
+      if (daemon.sourceReportFile && daemon.predictionResolved && !item.classList.contains('expanded')) {
+        openReportFile(daemon.sourceReportFile);
+      }
+    });
+    item.querySelectorAll('.d-source-link').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openReportFile(btn.dataset.reportFile);
+      });
+    });
+    container.appendChild(item);
+  });
+}
+
+async function loadWatchValues() {
+  const res = await fetch(`/reports/watch_values.json?ts=${Date.now()}`).catch(() => null);
+  if (!res || !res.ok) return;
+  const data = await res.json().catch(() => null);
+  if (!data || typeof data !== 'object' || !data.values) return;
+  watchValuesCache = data.values || {};
+}
+
+function connectWS() {
+  const ws = new WebSocket(`ws://localhost:${location.port}/ws`);
+
+  ws.onopen = () => {
+    wsReconnectDelay = 1000;
+  };
+
+  ws.onclose = () => {
+    setTimeout(connectWS, wsReconnectDelay);
+    wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30000);
+  };
+
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = event => {
+    try {
+      const message = JSON.parse(event.data);
+      if (message.type === 'daemon_update') {
+        renderDaemons(message.daemons);
+        setSentinelState(message);
+        renderSpawnSettings(message.spawnSettings, message.spawnBudget);
+      }
+    } catch (_) {}
+  };
+}
+
+async function loadDaemons() {
+  const snapshot = await loadMonitorSnapshot();
+  if (!snapshot) return;
+  renderDaemons(snapshot.daemons || []);
+  setSentinelState(snapshot);
+  renderSpawnSettings(snapshot.spawnSettings || null, snapshot.spawnBudget || null);
+}
+
+async function saveSpawnSettings() {
+  const codexOn = document.getElementById('codex-enabled').checked;
+  const claudeOn = document.getElementById('claude-enabled').checked;
+  const geminiOn = document.getElementById('gemini-enabled').checked;
+  const codex = codexOn ? Math.max(1, Number(document.getElementById('codex-max-per-hour').value || 2)) : 0;
+  const claude = claudeOn ? Math.max(1, Number(document.getElementById('claude-max-per-hour').value || 2)) : 0;
+  const gemini = geminiOn ? Math.max(1, Number(document.getElementById('gemini-max-per-hour').value || 2)) : 0;
+  const status = document.getElementById('spawn-settings-status');
+  status.textContent = 'Saving…';
+  const res = await fetch('/api/spawn-settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      default_spawn_target: 'all',
+      codex_max_spawns_per_hour: codex,
+      claude_max_spawns_per_hour: claude,
+      gemini_max_spawns_per_hour: gemini
+    })
+  }).catch(() => null);
+  if (!res || !res.ok) {
+    status.textContent = 'Save failed';
+    return;
+  }
+  status.textContent = 'Saved.';
+  await loadDaemons();
+}
+
+function selectReport(report, element) {
+  document.querySelectorAll('.report-item').forEach(node => node.classList.remove('active'));
+  element.classList.add('active');
+  currentReport = report;
+
+  const displayDate = formatDateIso(report);
+  const title = report.title ? cleanTitle(report.title) : humanize(report.name);
+  document.getElementById('header-report-title').textContent = displayDate
+    ? `${title} · ${displayDate}`
+    : title;
+
+  document.getElementById('empty-state').style.display = 'none';
+  const frame = document.getElementById('report-frame');
+  frame.style.display = 'block';
+  frame.src = report.url || `/reports/${encodeURIComponent(report.file)}`;
+
+  document.getElementById('open-report-btn').style.display = 'inline-flex';
+  document.getElementById('fullscreen-report-btn').style.display = 'inline-flex';
+}
+
+function openReportFile(filename) {
+  const url = `/reports/${encodeURIComponent(filename)}`;
+  document.getElementById('empty-state').style.display = 'none';
+  const frame = document.getElementById('report-frame');
+  frame.style.display = 'block';
+  frame.src = url;
+  document.getElementById('open-report-btn').style.display = 'inline-flex';
+  document.getElementById('fullscreen-report-btn').style.display = 'inline-flex';
+  const label = filename.replace(/\.(html|md)$/i, '').replace(/[-_]/g, ' ');
+  document.getElementById('header-report-title').textContent = label;
+}
+
+function openCurrentReport() {
+  if (!currentReport) return;
+  const url = currentReport.url || `/reports/${encodeURIComponent(currentReport.file)}`;
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+async function toggleReportFullscreen() {
+  const frame = document.getElementById('report-frame');
+  if (!frame || frame.style.display === 'none') return;
+  if (document.fullscreenElement) {
+    await document.exitFullscreen().catch(() => {});
+    return;
+  }
+  await frame.requestFullscreen?.().catch(() => {});
+}
+
+async function hardRefresh() {
+  await Promise.all([loadReports(), loadWatchValues(), loadDaemons()]);
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSettings(); });
+
+function switchMobileTab(btn, panelId) {
+  if (window.innerWidth > 640) return;
+  document.querySelectorAll('.mob-tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  ['sidebar','center','picks-panel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('mobile-active', id === panelId);
+  });
+}
+
+function initMobileTabs() {
+  if (window.innerWidth <= 640) {
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar && !sidebar.classList.contains('mobile-active')) {
+      sidebar.classList.add('mobile-active');
+    }
+  }
+}
+
+// When a report is selected on mobile, auto-switch to Report tab
+const _origSelectReport = window.selectReport;
+window.selectReport = function(report, node) {
+  if (_origSelectReport) _origSelectReport(report, node);
+  if (window.innerWidth <= 640) {
+    const btn = document.querySelector('.mob-tab[data-panel="center"]');
+    if (btn) switchMobileTab(btn, 'center');
+  }
+};
+
+initTimezone();
+initMobileTabs();
+hardRefresh();
+setInterval(loadReports, 60000);
+setInterval(loadWatchValues, 60000);
+connectWS();
+</script>
+</body>
+</html>

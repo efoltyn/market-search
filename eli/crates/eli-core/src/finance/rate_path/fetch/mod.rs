@@ -1,4 +1,3 @@
-use super::super::macro_data::fetch_macro;
 use super::super::timeseries::fetch::fetch_fred_series;
 use super::super::*;
 use chrono::Datelike;
@@ -9,4 +8,5 @@ include!("model.rs");
 include!("parse.rs");
 include!("current_rate.rs");
 include!("cache.rs");
+include!("live_api.rs");
 include!("service.rs");

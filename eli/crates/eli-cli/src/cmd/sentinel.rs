@@ -1,4 +1,6 @@
-fn sentinel_paths_tuple(args: &SentinelPathArgs) -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
+fn sentinel_paths_tuple(
+    args: &SentinelPathArgs,
+) -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
     (
         args.sentinel_dir.clone(),
         args.queue_file.clone(),
@@ -15,6 +17,16 @@ fn sentinel_severity_from_arg(arg: SentinelSeverityArg) -> eli_core::sentinel::S
     }
 }
 
+fn sentinel_spawn_target_from_arg(arg: SentinelSpawnTargetArg) -> eli_core::sentinel::SpawnTarget {
+    match arg {
+        SentinelSpawnTargetArg::Default => eli_core::sentinel::SpawnTarget::Default,
+        SentinelSpawnTargetArg::Codex => eli_core::sentinel::SpawnTarget::Codex,
+        SentinelSpawnTargetArg::Claude => eli_core::sentinel::SpawnTarget::Claude,
+        SentinelSpawnTargetArg::Gemini => eli_core::sentinel::SpawnTarget::Gemini,
+        SentinelSpawnTargetArg::Both => eli_core::sentinel::SpawnTarget::Both,
+    }
+}
+
 fn parse_vars(raw: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
     let mut vars = std::collections::BTreeMap::new();
     for item in raw {
@@ -26,6 +38,9 @@ fn parse_vars(raw: &[String]) -> Result<std::collections::BTreeMap<String, Strin
         let spec = spec.trim();
         if name.is_empty() || spec.is_empty() {
             anyhow::bail!("invalid --var '{trimmed}' (name/spec must be non-empty)");
+        }
+        if name.chars().any(|ch| ch.is_control()) || spec.chars().any(|ch| ch.is_control()) {
+            anyhow::bail!("invalid --var '{trimmed}' (control characters are not allowed)");
         }
         vars.insert(name.to_string(), spec.to_string());
     }
@@ -88,9 +103,15 @@ async fn cmd_sentinel_start(args: SentinelStartArgs) -> Result<()> {
         .arg(args.interval_secs.max(1).to_string())
         .stdin(std::process::Stdio::null());
 
-    command.arg("--sentinel-dir").arg(paths.root_dir.as_os_str());
-    command.arg("--queue-file").arg(paths.queue_file.as_os_str());
-    command.arg("--packets-file").arg(paths.packets_file.as_os_str());
+    command
+        .arg("--sentinel-dir")
+        .arg(paths.root_dir.as_os_str());
+    command
+        .arg("--queue-file")
+        .arg(paths.queue_file.as_os_str());
+    command
+        .arg("--packets-file")
+        .arg(paths.packets_file.as_os_str());
 
     let log = eli_core::sentinel::io::open_log(&paths).map_err(|e| anyhow::anyhow!(e))?;
     let log_err = log.try_clone().context("clone sentinel log fd")?;
@@ -181,6 +202,22 @@ fn cmd_sentinel_status(args: SentinelStatusArgs) -> Result<()> {
 
 fn cmd_sentinel_subscribe(args: SentinelSubscribeArgs) -> Result<()> {
     let vars = parse_vars(&args.vars)?;
+    let deadline = args.deadline.as_deref()
+        .map(|s| chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .map_err(|e| anyhow::anyhow!("invalid --deadline '{}': {}", s, e)))
+        .transpose()?;
+    let fire_at = args
+        .fire_at
+        .as_deref()
+        .map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| eli_core::Error::InvalidInput(format!("invalid --fire-at: {e}")))
+        })
+        .transpose()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let expr = args.expr.clone().unwrap_or_else(|| "true".to_string());
     let (sentinel_dir, queue_file, packets_file) = sentinel_paths_tuple(&args.paths);
     let spec = eli_core::sentinel::subscriptions::add_subscription(
         sentinel_dir,
@@ -188,7 +225,12 @@ fn cmd_sentinel_subscribe(args: SentinelSubscribeArgs) -> Result<()> {
         packets_file,
         eli_core::sentinel::subscriptions::AddSubscriptionInput {
             name: args.name,
-            expr: args.expr,
+            title: args.title,
+            source_report_title: args.source_report_title,
+            source_report_date: args.source_report_date,
+            source_report_file: args.source_report_file,
+            source_evidence: args.source_evidence,
+            expr,
             vars,
             source_set: Vec::new(),
             cooldown_secs: Some(args.cooldown_secs.max(1)),
@@ -196,6 +238,14 @@ fn cmd_sentinel_subscribe(args: SentinelSubscribeArgs) -> Result<()> {
             why_template: args.why,
             prompt_template: args.prompt_template,
             enabled: Some(args.enabled),
+            spawn_agent: args.spawn_agent,
+            spawn_target: Some(sentinel_spawn_target_from_arg(args.spawn_target)),
+            spawn_cooldown_secs: Some(args.spawn_cooldown_secs),
+            prediction: args.prediction,
+            target_var: args.target_var,
+            target_value: args.target_value,
+            deadline,
+            fire_at,
         },
     )
     .map_err(|e| anyhow::anyhow!(e))
@@ -272,7 +322,10 @@ fn cmd_sentinel_test(args: SentinelTestArgs) -> Result<()> {
         triggered: true,
         observed_vars: vars.clone(),
         observations: std::collections::BTreeMap::from([(
-            vars.keys().next().cloned().unwrap_or_else(|| "sentinel_test_value".to_string()),
+            vars.keys()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| "sentinel_test_value".to_string()),
             eli_core::sentinel::evaluator::VariableObservation {
                 value: *vars.values().next().unwrap_or(&1.0),
                 source: "test".to_string(),
@@ -285,6 +338,11 @@ fn cmd_sentinel_test(args: SentinelTestArgs) -> Result<()> {
     let sub = eli_core::sentinel::SubscriptionSpec {
         id: "test_subscription".to_string(),
         name: format!("test-{}", args.scenario),
+        title: None,
+        source_report_title: None,
+        source_report_date: None,
+        source_report_file: None,
+        source_evidence: None,
         expr,
         vars: std::collections::BTreeMap::new(),
         source_set: Vec::new(),
@@ -296,8 +354,22 @@ fn cmd_sentinel_test(args: SentinelTestArgs) -> Result<()> {
                 .to_string(),
         enabled: true,
         last_triggered_at: None,
+        spawn_agent: false,
+        spawn_target: Default::default(),
+        spawn_cooldown_secs: 14_400,
+        last_spawned_at: None,
+        prediction: None,
+        target_var: None,
+        target_value: None,
+        deadline: None,
+        fire_at: None,
+        created_at: None,
+        prediction_resolved: false,
+        prediction_result: None,
+        resolved_actual: None,
+        resolved_at: None,
     };
-    let packet = eli_core::sentinel::packets::build_alert_packet(&paths, &sub, &eval, 0)
+    let packet = eli_core::sentinel::packets::build_alert_packet(&paths, &sub, &eval, 0, None)
         .map_err(|e| anyhow::anyhow!(e))
         .context("build test packet")?;
     eli_core::sentinel::io::append_alert_packet(&paths, &packet).map_err(|e| anyhow::anyhow!(e))?;

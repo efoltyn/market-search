@@ -80,3 +80,9 @@ scripts/
 eli_research/
 eli website/
 eli-swift/
+conflict-watch/
+landing-pages/
+tools/
+
+# Security
+*.pem

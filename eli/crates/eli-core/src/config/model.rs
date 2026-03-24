@@ -2,6 +2,8 @@ impl Default for ConfigFile {
     fn default() -> Self {
         Self {
             chat: ChatConfig::default(),
+            finance: FinanceConfig::default(),
+            sentinel: SentinelConfig::default(),
         }
     }
 }
@@ -315,4 +317,3 @@ pub struct Paths {
     pub data_dir: PathBuf,
     pub cache_dir: PathBuf,
 }
-

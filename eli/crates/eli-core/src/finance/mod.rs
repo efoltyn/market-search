@@ -11,11 +11,45 @@ use tokio::time::{sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tracing::{info, warn};
 
+/// Shared HTTP clients with connection pooling. Reused across tool calls
+/// to avoid per-request TLS handshake overhead (~100ms saved per call).
+pub(crate) mod shared_client {
+    use std::sync::LazyLock;
+
+    /// General-purpose client (rustls TLS, no proxy, tcp_nodelay).
+    /// Used by auctions, options, news, search, COT, odds, filings, etc.
+    pub(crate) static GENERAL: LazyLock<reqwest::Client> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .tcp_nodelay(true)
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .pool_max_idle_per_host(4)
+            .no_proxy()
+            .build()
+            .expect("failed to build shared general HTTP client")
+    });
+
+    /// Native-TLS client for FRED/Akamai CDN (fingerprints rustls).
+    /// Used only by schedule/FRED endpoints.
+    pub(crate) static NATIVE_TLS: LazyLock<reqwest::Client> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .use_native_tls()
+            .http1_only()
+            .tcp_nodelay(true)
+            .timeout(std::time::Duration::from_secs(20))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .pool_max_idle_per_host(2)
+            .build()
+            .expect("failed to build shared native-TLS HTTP client")
+    });
+}
+
 const SEC_COMPANY_TICKERS_TTL_SECS: u64 = 60 * 60 * 24 * 7; // 7 days
 const SEC_SUBMISSIONS_TTL_SECS: u64 = 60 * 60 * 24; // 1 day
 const SEC_DEFAULT_TEXT_MAX_CHARS: usize = 10_000;
-const SCHEDULE_HTTP_TIMEOUT_SECS: u64 = 12;
-const SCHEDULE_PER_DAY_TIMEOUT_SECS: u64 = 10;
+const SCHEDULE_HTTP_TIMEOUT_SECS: u64 = 6;
+const SCHEDULE_PER_DAY_TIMEOUT_SECS: u64 = 5;
 const YAHOO_SEARCH_URL: &str = "https://query2.finance.yahoo.com/v1/finance/search";
 const KALSHI_BASE_URL: &str = "https://api.elections.kalshi.com/trade-api/v2";
 const POLYMARKET_GAMMA_URL: &str = "https://gamma-api.polymarket.com";
@@ -39,34 +73,26 @@ pub use filings::fetch_filings;
 pub use filings::fetch_insider;
 
 mod timeseries;
+pub use timeseries::build_snapshot_analytics;
+pub use timeseries::build_timeseries_analytics;
 pub use timeseries::fetch_timeseries;
+pub use timeseries::is_binance_ticker;
+pub use timeseries::is_pyth_ticker;
+pub use timeseries::is_stooq_pe_ticker;
+pub use timeseries::is_stooq_ticker;
+pub use timeseries::resample_candles;
 
 mod options;
 pub use options::fetch_options;
 
-mod prices;
-pub use prices::fetch_prices;
-
 mod news;
 pub use news::fetch_news;
-
-mod macro_data;
-pub use macro_data::fetch_macro;
-
-mod forex;
-pub use forex::fetch_forex;
 
 mod schedule;
 pub use schedule::fetch_schedule;
 
 mod rate_path;
 pub use rate_path::fetch_rate_path;
-
-mod yield_curve;
-pub use yield_curve::fetch_yield_curve;
-
-mod dashboard;
-pub use dashboard::fetch_dashboard;
 
 mod fundamentals;
 pub use fundamentals::fetch_fundamentals;
@@ -77,21 +103,90 @@ pub use search::fetch_search;
 mod snapshot;
 pub use snapshot::fetch_snapshot;
 
+mod ibkr;
+pub use ibkr::{
+    fetch_ibkr_options, fetch_ibkr_search, fetch_ibkr_snapshot, fetch_ibkr_timeseries,
+    invoke_ibkr_bridge, resolve_ibkr_connection,
+};
+
 mod sync;
 pub use sync::sync_odds;
 
 mod paper;
 pub use paper::run_paper;
 
+mod auctions;
+pub use auctions::fetch_auctions;
+
+mod cot;
+pub use cot::fetch_cot;
+
+mod volsurface;
+pub use volsurface::fetch_volsurface;
+
+mod nyfed;
+pub use nyfed::fetch_nyfed;
+
+mod stress;
+pub use stress::fetch_stress;
+
+mod fiscal;
+pub use fiscal::fetch_fiscal;
+
+pub mod ecb;
+pub use ecb::{fetch_ecb, EcbPreset, EcbRequest, EcbResponse, EcbSeries};
+
+pub mod eia;
+pub use eia::{fetch_eia, EiaPreset, EiaRequest, EiaResponse, EiaSeries};
+
+pub mod bis;
+pub use bis::{fetch_bis, BisPreset, BisRequest, BisResponse};
+
+pub mod boj;
+pub use boj::{fetch_boj, BojPreset, BojRequest, BojResponse};
+
+pub mod boe;
+pub use boe::{fetch_boe, BoePreset, BoeRequest, BoeResponse};
+
 pub(crate) mod credentials;
+
+pub fn has_fred_api_attachment_hint() -> bool {
+    credentials::has_fred_api_configuration_hint()
+}
+pub mod odds_db;
 pub mod policy;
+
+pub fn default_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("eli-finance-cache")
+}
+
+/// Well-known Yahoo Finance indices that require a `^` prefix.
+/// Users commonly type "VIX" or "GSPC" without the caret — Yahoo returns
+/// empty data for the bare ticker, so we auto-correct here.
+const YAHOO_INDEX_BARE_NAMES: &[&str] = &[
+    "VIX", "GSPC", "DJI", "IXIC", "RUT", "N225", "HSI", "AXJO",
+    "STOXX50E", "FTSE", "GDAXI", "FCHI", "BVSP", "MERV", "KS11",
+    "TWII", "JKSE", "KLSE", "STI", "NZ50", "OVX", "TNX", "TYX", "IRX",
+];
 
 pub fn normalize_tickers(tickers: &[String]) -> Vec<String> {
     let mut out: Vec<String> = tickers
         .iter()
         .map(|t| t.trim())
         .filter(|t| !t.is_empty())
-        .map(|t| t.to_ascii_uppercase())
+        .map(|t| {
+            let upper = t.to_ascii_uppercase();
+            // Auto-add ^ prefix for known indices when user omits it.
+            if !upper.starts_with('^')
+                && YAHOO_INDEX_BARE_NAMES
+                    .iter()
+                    .any(|idx| upper == *idx)
+            {
+                format!("^{upper}")
+            } else {
+                upper
+            }
+        })
         .collect();
 
     // Keep stable order but drop exact duplicates.
@@ -145,6 +240,7 @@ impl FinanceTool {
             as_of,
             provider: ProviderKind::Yahoo,
             max_points_per_ticker: None,
+            ibkr: None,
         };
 
         let cache_dir = std::env::temp_dir().join("eli-finance-cache");

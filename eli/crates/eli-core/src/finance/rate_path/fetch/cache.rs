@@ -20,7 +20,6 @@ fn cache_as_of(csv_path: &Path) -> DateTime<Utc> {
 
 fn build_fallback_meeting(
     annual_cuts: &BTreeMap<i32, HashMap<u32, f64>>,
-    current_rate: f64,
     warnings: &mut Vec<String>,
 ) -> Result<Option<RatePathMeeting>> {
     let current_year = Utc::now().year();
@@ -33,18 +32,21 @@ fn build_fallback_meeting(
 
     if let Some(year) = fallback_year {
         if let Some(dist) = annual_cuts.get(&year) {
-            let hold_prob = *dist.get(&0).unwrap_or(&0.0);
-            let cut_25bp_prob = *dist.get(&1).unwrap_or(&0.0);
-            let cut_50bp_plus_prob = dist
+            let raw_hold = dist.get(&0).copied().unwrap_or(0.0).max(0.0);
+            let raw_cut_25 = dist.get(&1).copied().unwrap_or(0.0).max(0.0);
+            let raw_cut_50p: f64 = dist
                 .iter()
                 .filter(|(cuts, _)| **cuts >= 2)
-                .map(|(_, p)| *p)
-                .sum::<f64>();
-            let expected_cuts = dist
-                .iter()
-                .map(|(cuts, p)| (*cuts as f64) * *p)
-                .sum::<f64>();
-            let implied_rate = current_rate - (0.25 * expected_cuts);
+                .map(|(_, p)| p.max(0.0))
+                .sum();
+            let raw_hike = 0.0_f64;
+            // Normalize so probabilities sum to 1.0
+            let sum = raw_hold + raw_cut_25 + raw_cut_50p + raw_hike;
+            let (hold_prob, cut_25bp_prob, cut_50bp_plus_prob, hike_prob) = if sum > 0.0 {
+                (raw_hold / sum, raw_cut_25 / sum, raw_cut_50p / sum, raw_hike / sum)
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            };
             let date = chrono::NaiveDate::from_ymd_opt(year, 12, 31)
                 .ok_or_else(|| Error::Provider(format!("invalid fallback year: {year}")))?;
             warnings.push(
@@ -53,16 +55,15 @@ fn build_fallback_meeting(
             );
             return Ok(Some(RatePathMeeting {
                 date: date.to_string(),
-                label: format!("December {year} Meeting"),
+                label: format!("December {year} (annual distribution fallback)"),
                 hold_prob,
+                cut_prob: cut_25bp_prob + cut_50bp_plus_prob,
                 cut_25bp_prob,
                 cut_50bp_plus_prob,
-                hike_prob: 0.0,
-                implied_rate,
-                source: "polymarket_csv_annual_cuts".to_string(),
+                hike_prob,
+                volume: 0,
             }));
         }
     }
     Ok(None)
 }
-

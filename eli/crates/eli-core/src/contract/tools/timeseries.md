@@ -6,6 +6,7 @@ OHLCV candles for one or more tickers.
 eli finance timeseries --tickers AAPL,MSFT --range 5d --granularity 1d
 eli finance timeseries --tickers NVDA --range 1y --granularity 1mo
 eli finance timeseries --tickers BTC-USD --range 30d --granularity 1h
+eli finance timeseries --tickers AAPL --range 1mo --granularity 1h --provider ibkr --ibkr-account U1234567
 ```
 
 **Range/granularity units:**

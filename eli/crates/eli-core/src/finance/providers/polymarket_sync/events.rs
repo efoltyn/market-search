@@ -28,6 +28,7 @@ pub(crate) async fn sync_polymarket_events(
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(StdDuration::from_secs(30))
+        .tcp_nodelay(true)
         .build()
         .map_err(|e| format!("Polymarket client init failed: {e}"))?;
 
@@ -56,11 +57,7 @@ pub(crate) async fn sync_polymarket_events(
 
         let count = result.rows.len();
         if page == 0 || (page + 1) % 10 == 0 || count == 0 {
-            eprintln!(
-                "[polymarket] events page {}: {} rows",
-                page + 1,
-                count
-            );
+            eprintln!("[polymarket] events page {}: {} rows", page + 1, count);
         }
 
         if count == 0 {
@@ -380,11 +377,7 @@ pub(crate) async fn sync_polymarket_events(
                 outcome_prices,
                 clob_token_ids: {
                     let ids = parse_json_value_strings(&m.clob_token_ids);
-                    if ids.is_empty() {
-                        None
-                    } else {
-                        Some(ids)
-                    }
+                    if ids.is_empty() { None } else { Some(ids) }
                 },
                 probability_yes,
                 category: market_category,
@@ -411,11 +404,16 @@ pub(crate) async fn sync_polymarket_events(
         }
     }
 
+    let coverage_warning = max_pages.map(|cap| {
+        format!(
+            "debug frontier sample requested via max_pages={cap}; results are not full-provider coverage"
+        )
+    });
     let mut strict_fail_reasons = Vec::new();
     if !events_exhausted {
         if let Some(cap) = max_pages {
             strict_fail_reasons.push(format!(
-                "events pagination not exhausted within max_pages={cap}"
+                "events frontier not exhausted within debug max_pages={cap}"
             ));
         } else {
             strict_fail_reasons.push("events pagination not exhausted".to_string());
@@ -424,7 +422,7 @@ pub(crate) async fn sync_polymarket_events(
     if !markets_exhausted {
         if let Some(cap) = max_pages {
             strict_fail_reasons.push(format!(
-                "markets pagination not exhausted within max_pages={cap}"
+                "markets frontier not exhausted within debug max_pages={cap}"
             ));
         } else {
             strict_fail_reasons.push("markets pagination not exhausted".to_string());
@@ -432,6 +430,11 @@ pub(crate) async fn sync_polymarket_events(
     }
 
     let coverage = OddsSyncCoverage {
+        sync_mode: if max_pages.is_some() {
+            OddsSyncMode::FrontierSample
+        } else {
+            OddsSyncMode::Exhaustive
+        },
         requested_max_pages: max_pages,
         events_pages_fetched,
         events_exhausted,
@@ -444,6 +447,7 @@ pub(crate) async fn sync_polymarket_events(
         series_backfill_calls: None,
         series_backfill_cap: None,
         series_backfill_truncated: None,
+        coverage_warning,
         strict_pass: strict_fail_reasons.is_empty(),
         strict_fail_reasons,
     };
@@ -738,7 +742,9 @@ async fn fetch_polymarket_market_page(
                     .chars()
                     .take(240)
                     .collect::<String>();
-                return Err(format!("markets parse failed: {e}; body_prefix={preview:?}"));
+                return Err(format!(
+                    "markets parse failed: {e}; body_prefix={preview:?}"
+                ));
             }
         };
 

@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "eli": {
-      "command": "/Users/elifoltyn/Desktop/eli-code/bin/eli",
+      "command": "/Users/elifoltyn/Downloads/eli-code/bin/eli",
       "args": ["mcp"]
     }
   }

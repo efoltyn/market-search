@@ -1,10 +1,5 @@
 pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsResponse> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(StdDuration::from_secs(30))
-        .connect_timeout(StdDuration::from_secs(10))
-        .build()
-        .map_err(|e| Error::Provider(format!("odds client init failed: {e}")))?;
+    let client = &*crate::finance::shared_client::GENERAL;
 
     #[derive(Deserialize, Clone)]
     struct PolyTag {
@@ -26,6 +21,16 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
         outcomes: serde_json::Value,
         #[serde(default, rename = "outcomePrices")]
         outcome_prices: serde_json::Value,
+        #[serde(default, rename = "volumeNum")]
+        volume_num: Option<f64>,
+        #[serde(default)]
+        volume: Option<serde_json::Value>,
+        #[serde(default, rename = "bestBid")]
+        best_bid: Option<f64>,
+        #[serde(default, rename = "bestAsk")]
+        best_ask: Option<f64>,
+        #[serde(default, rename = "lastTradePrice")]
+        last_trade_price: Option<f64>,
     }
 
     #[derive(Deserialize)]
@@ -58,6 +63,10 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
         outcome_prices: serde_json::Value,
         #[serde(default, rename = "clobTokenIds")]
         clob_token_ids: serde_json::Value,
+        #[serde(default, rename = "volumeNum")]
+        volume_num: Option<f64>,
+        #[serde(default)]
+        volume: Option<serde_json::Value>,
     }
 
     #[derive(Deserialize)]
@@ -93,6 +102,21 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
         events: Option<Vec<PolySearchEvent>>,
         #[serde(default)]
         pagination: Option<PolySearchPagination>,
+    }
+
+    /// Parse Polymarket volume to cents (i64). Prefers `volume_num` (f64 USD),
+    /// falls back to parsing `volume` JSON value as string/number.
+    fn poly_volume_cents(volume_num: Option<f64>, volume: &Option<serde_json::Value>) -> Option<i64> {
+        if let Some(v) = volume_num {
+            if v > 0.0 {
+                return Some((v * 100.0) as i64);
+            }
+        }
+        match volume {
+            Some(serde_json::Value::Number(n)) => n.as_f64().filter(|v| *v > 0.0).map(|v| (v * 100.0) as i64),
+            Some(serde_json::Value::String(s)) => s.trim().parse::<f64>().ok().filter(|v| *v > 0.0).map(|v| (v * 100.0) as i64),
+            _ => None,
+        }
     }
 
     let search_filter = req
@@ -342,7 +366,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
                                 event_ticker: event_id.clone(),
                                 freshness: odds_freshness(None),
                                 yes_price: None,
-                                volume: None,
+                                volume: poly_volume_cents(m.volume_num, &m.volume),
                                 status: status.clone(),
                                 source: Some("polymarket".to_string()),
                                 market_id: Some(market_id.clone()),
@@ -769,6 +793,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
 
         if let Some(markets) = event.markets {
             for m in markets {
+                let market_volume = poly_volume_cents(m.volume_num, &m.volume);
                 let market_id = json_value_to_string(m.id);
                 let title = m.question.unwrap_or_else(|| market_id.clone());
                 let outcomes_vec = parse_json_value_strings(&m.outcomes);
@@ -801,7 +826,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
                         event_ticker: event_id.clone(),
                         freshness: odds_freshness(None),
                         yes_price: None,
-                        volume: None,
+                        volume: market_volume,
                         status: status.clone(),
                         source: Some("polymarket".to_string()),
                         market_id: Some(market_id.clone()),
@@ -823,7 +848,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
                         yes_price: None,
                         yes_bid: None,
                         yes_ask: None,
-                        volume: None,
+                        volume: market_volume,
                         source: Some("polymarket".to_string()),
                         market_id: Some(market_id.clone()),
                         event_id: Some(event_id.clone()),

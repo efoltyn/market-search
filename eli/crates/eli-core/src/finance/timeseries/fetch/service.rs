@@ -70,7 +70,32 @@ pub async fn fetch_timeseries(
         ProviderKind::Yahoo => {
             fetch_yahoo_series(&tickers, start, end, req.granularity, max_points).await?
         }
+        ProviderKind::Fred if is_h15_yield_curve_request(&tickers) => {
+            // Route yield curve tickers to the Fed H.15 endpoint (federalreserve.gov)
+            // instead of FRED (fred.stlouisfed.org). Faster, no Akamai, primary source.
+            match fetch_h15_yield_curve(&tickers, start, end, req.granularity).await {
+                Ok(result) => result,
+                Err(_) => {
+                    // Fall back to FRED if H.15 is unavailable
+                    fetch_fred_series(&tickers, start, end, req.granularity).await?
+                }
+            }
+        }
         ProviderKind::Fred => fetch_fred_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::Ibkr => crate::finance::fetch_ibkr_timeseries(&req).await?,
+        ProviderKind::Pyth => fetch_pyth_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::Stooq => fetch_stooq_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::Binance => fetch_binance_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::Eia | ProviderKind::Ecb => {
+            return Err(Error::InvalidInput(
+                "EIA/ECB timeseries providers are not yet integrated into the core fetch path; use the dedicated CLI tools".to_string(),
+            ));
+        }
+        ProviderKind::Kalshi | ProviderKind::Polymarket => {
+            return Err(Error::InvalidInput(
+                "Kalshi/Polymarket timeseries is handled by the CLI layer (use --ticker KX* or --odds-provider)".to_string(),
+            ));
+        }
     };
 
     if !errors.is_empty() {
@@ -152,6 +177,8 @@ fn cache_key(
         start: DateTime<Utc>,
         end: DateTime<Utc>,
         max_points_per_ticker: Option<usize>,
+        ibkr_account: Option<&'a str>,
+        ibkr_market_data_type: Option<i32>,
     }
 
     let mut tickers_sorted: Vec<&str> = tickers.iter().map(|s| s.as_str()).collect();
@@ -166,6 +193,8 @@ fn cache_key(
         start,
         end,
         max_points_per_ticker: req.max_points_per_ticker.map(|v| v.max(2)),
+        ibkr_account: req.ibkr.as_ref().and_then(|v| v.account.as_deref()),
+        ibkr_market_data_type: req.ibkr.as_ref().and_then(|v| v.market_data_type),
     };
 
     let raw = serde_json::to_vec(&key)?;
@@ -173,4 +202,3 @@ fn cache_key(
     hasher.update(raw);
     Ok(format!("{:x}", hasher.finalize()))
 }
-

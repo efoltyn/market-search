@@ -27,12 +27,14 @@ async fn run_chat_tui(
         cfg.chat.auto_mode = AutoMode::Autonomous;
     };
 
-    let task_start = Instant::now();
-
     loop {
-        // Update spinner and elapsed time
+        // Update spinner and per-request elapsed time
         ui.tick_spinner();
-        ui.elapsed_secs = task_start.elapsed().as_secs();
+        if ui.is_processing {
+            if let Some(start) = ui.request_start {
+                ui.elapsed_secs = start.elapsed().as_secs();
+            }
+        }
 
         // Render
         terminal.draw(&mut ui)?;
@@ -107,50 +109,105 @@ async fn run_chat_tui(
                                 continue;
                             }
                             if trimmed == "/compact" || trimmed == "/memory compact" {
-                                match compact_memory_now(adapter.clone(), &cfg.chat, memory).await {
-                                    Ok(Some(compaction)) => {
-                                        let note = format!(
-                                            "memory_compaction: dropped {} messages\n{}",
-                                            compaction.dropped, compaction.summary
-                                        );
-                                        let brain_entry = format!(
-                                            "\n### {} (session {})\n{}\n",
-                                            chrono::Utc::now().to_rfc3339(),
-                                            session_id,
-                                            note
-                                        );
-                                        if let Err(e) = append_eli_brain(project_root, &brain_entry)
-                                        {
-                                            ui.add_message(
-                                                "System",
-                                                &format!(
-                                                    "(compacted, but failed to write brain: {e})"
-                                                ),
-                                            );
-                                        } else {
-                                            ui.add_message(
-                                                "System",
-                                                &format!(
-                                                    "memory: compacted ({} msgs)",
-                                                    compaction.dropped
-                                                ),
-                                            );
+                                // Streaming compact: show progress as the model summarizes.
+                                if let Some(plan) = eli_core::orchestrator::plan_compact(&cfg.chat, memory) {
+                                    // Show spinner immediately
+                                    ui.request_start = Some(Instant::now());
+                                    ui.elapsed_secs = 0;
+                                    ui.is_processing = true;
+                                    terminal.draw(&mut ui)?;
+
+                                    // Build compact request inline (streaming)
+                                    let mut content = String::new();
+                                    if let Some(s) = &plan.existing_summary {
+                                        content.push_str("Existing summary:\n");
+                                        content.push_str(s);
+                                        content.push_str("\n\n");
+                                    }
+                                    content.push_str("Transcript (most recent last):\n");
+                                    for msg in &plan.older {
+                                        let role = match msg.role {
+                                            eli_core::types::Role::System => "system",
+                                            eli_core::types::Role::User => "user",
+                                            eli_core::types::Role::Assistant => "assistant",
+                                            eli_core::types::Role::Tool => "tool",
+                                        };
+                                        content.push_str(&format!("{role}: {}\n", msg.content));
+                                    }
+                                    // Truncate to max input chars
+                                    let max = eli_core::orchestrator::SUMMARY_INPUT_MAX_CHARS;
+                                    if content.len() > max {
+                                        let start = content.char_indices()
+                                            .find(|(i, _)| *i >= content.len().saturating_sub(max))
+                                            .map(|(i, _)| i).unwrap_or(0);
+                                        content = content[start..].to_string();
+                                    }
+
+                                    let compact_req = ChatRequest {
+                                        model: cfg.chat.resolved_summary_model().to_string(),
+                                        messages: vec![
+                                            ChatMessage::system(eli_core::orchestrator::SUMMARY_SYSTEM_PROMPT),
+                                            ChatMessage::user(content),
+                                        ],
+                                        temperature: Some(0.2),
+                                        max_tokens: Some(eli_core::orchestrator::SUMMARY_MAX_TOKENS),
+                                        response_format: None,
+                                        stream: true,
+                                    };
+
+                                    let mut summary = String::new();
+                                    match adapter.chat_stream(compact_req).await {
+                                        Err(e) => {
+                                            ui.add_message("Error", &format!("compact failed: {e}"));
                                         }
-                                        store
-                                            .append(
-                                                session_id,
-                                                &SessionEvent {
+                                        Ok(mut stream) => {
+                                            use eli_core::types::ChatStreamEvent;
+                                            loop {
+                                                tokio::select! {
+                                                    ev = stream.next() => {
+                                                        match ev {
+                                                            Some(Ok(ChatStreamEvent::Delta(d))) => summary.push_str(&d),
+                                                            Some(Ok(ChatStreamEvent::Done)) | None => break,
+                                                            Some(Ok(ChatStreamEvent::Usage(_))) => {}
+                                                            Some(Err(e)) => {
+                                                                ui.add_message("Error", &format!("compact stream: {e}"));
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                                                }
+                                                ui.tick_spinner();
+                                                terminal.draw(&mut ui)?;
+                                            }
+
+                                            if !summary.trim().is_empty() {
+                                                eli_core::orchestrator::apply_compact(memory, &plan, summary.trim().to_string());
+                                                let note = format!(
+                                                    "memory_compaction: dropped {} messages\n{}",
+                                                    plan.dropped, summary.trim()
+                                                );
+                                                let brain_entry = format!(
+                                                    "\n### {} (session {})\n{}\n",
+                                                    chrono::Utc::now().to_rfc3339(),
+                                                    session_id,
+                                                    note
+                                                );
+                                                if let Err(e) = append_eli_brain(project_root, &brain_entry) {
+                                                    ui.add_message("System", &format!("(compacted, but brain write failed: {e})"));
+                                                } else {
+                                                    ui.add_message("System", &format!("memory: compacted ({} msgs)", plan.dropped));
+                                                }
+                                                store.append(session_id, &SessionEvent {
                                                     ts: chrono::Utc::now(),
                                                     kind: EventKind::Note { content: note },
-                                                },
-                                            )
-                                            .await
-                                            .ok();
+                                                }).await.ok();
+                                            }
+                                        }
                                     }
-                                    Ok(None) => ui.add_message("System", "(nothing to compact)"),
-                                    Err(e) => {
-                                        ui.add_message("Error", &format!("compact failed: {e}"))
-                                    }
+                                    ui.is_processing = false;
+                                } else {
+                                    ui.add_message("System", "(nothing to compact)");
                                 }
                                 continue;
                             }
@@ -209,6 +266,8 @@ async fn run_chat_tui(
                                 *memory = eli_core::memory::Memory::new(cfg.chat.mem_steps);
                                 memory.set_system(eli_core::contract::system_prompt());
                                 ui.total_tokens = 0;
+                                ui.last_request_tokens = 0;
+                                ui.elapsed_secs = 0;
                                 ui.clear_sources();
                                 continue;
                             }
@@ -231,6 +290,9 @@ async fn run_chat_tui(
                                 )
                                 .await
                                 .ok();
+                            ui.request_start = Some(Instant::now());
+                            ui.elapsed_secs = 0;
+                            ui.last_request_tokens = 0;
                             ui.is_processing = true;
                             ui.clear_sources();
 
@@ -295,6 +357,9 @@ async fn run_chat_tui(
                                     )
                                     .await
                                     .ok();
+                                ui.request_start = Some(Instant::now());
+                                ui.elapsed_secs = 0;
+                                ui.last_request_tokens = 0;
                                 ui.is_processing = true;
                                 ui.clear_sources();
                                 terminal.draw(&mut ui)?;
@@ -397,20 +462,43 @@ async fn run_agent_tui(
             memory.push(ChatMessage::user(current_message.clone()));
         }
 
-        // Build request
+        // Build request — enforce JSON schema on OpenRouter so models don't go rogue.
+        // context_compressed: last 20 messages verbatim, older ones get diffs/large
+        // fields stripped — eliminates megabytes of stale file content from old turns.
+        let response_format = if adapter.provider() == ProviderKind::OpenRouter {
+            Some(ResponseFormat::EliContractJsonSchema)
+        } else {
+            None
+        };
         let req = ChatRequest {
-            messages: memory.context(),
+            messages: memory.context_compressed(20),
             model: chat.model.clone(),
             max_tokens: chat.max_tokens,
             temperature: chat.temperature,
-            response_format: None,
+            response_format,
             stream: true,
         };
 
         // Stream response (spinner in title shows we're working)
         terminal.draw(ui)?;
 
-        let mut stream = adapter.chat_stream(req).await.context("start stream")?;
+        // Some OpenRouter providers (e.g. Google) don't support json_schema response_format.
+        // On 404, retry without it — system-prompt JSON enforcement is still in place.
+        let mut stream = match adapter.chat_stream(req).await {
+            Ok(s) => s,
+            Err(e) if e.to_string().contains("404") && adapter.provider() == ProviderKind::OpenRouter => {
+                let req_plain = ChatRequest {
+                    messages: memory.context_compressed(20),
+                    model: chat.model.clone(),
+                    max_tokens: chat.max_tokens,
+                    temperature: chat.temperature,
+                    response_format: None,
+                    stream: true,
+                };
+                adapter.chat_stream(req_plain).await.map_err(|e| anyhow::anyhow!("{}", e).context("start stream (no schema fallback)"))?
+            }
+            Err(e) => return Err(anyhow::anyhow!("{}", e).context("start stream")),
+        };
         let mut full_response = String::new();
         let mut interrupted = false;
 
@@ -476,6 +564,7 @@ async fn run_agent_tui(
                         }
                         Some(Ok(ChatStreamEvent::Usage(usage))) => {
                             ui.total_tokens = ui.total_tokens.saturating_add(usage.total_tokens);
+                            ui.last_request_tokens = ui.last_request_tokens.saturating_add(usage.total_tokens);
                         }
                         Some(Ok(ChatStreamEvent::Done)) => break,
                         Some(Err(e)) => {
@@ -533,6 +622,31 @@ async fn run_agent_tui(
                 m
             }
             Err(e) => {
+                // If there's no JSON object at all, the model responded in plain text.
+                // Show it directly rather than retrying — this happens for greetings,
+                // refusals, or models that ignore the schema.
+                if contract::extract_first_json_value(&full_response).is_none() {
+                    let text = full_response.trim();
+                    if !text.is_empty() {
+                        ui.add_message("Eli", text);
+                        let text = text.to_string();
+                        memory.push(ChatMessage::assistant(text.clone()));
+                        store
+                            .append(
+                                session_id,
+                                &SessionEvent {
+                                    ts: chrono::Utc::now(),
+                                    kind: EventKind::AssistantMessage {
+                                        content: text,
+                                    },
+                                },
+                            )
+                            .await
+                            .ok();
+                    }
+                    break;
+                }
+                // JSON found but failed schema validation — retry with correction.
                 let msg = format!("Invalid response: {}", e);
                 ui.add_message("Error", &msg);
                 store

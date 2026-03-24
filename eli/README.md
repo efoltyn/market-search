@@ -1,8 +1,14 @@
 # eli
 
-Agent-native market and web ingestion tools as one Rust binary.
+Agent-native market data tools as one Rust binary.
 
-Eli gives agents structured live data from public APIs (prices, macro, prediction markets, filings, calendars, web ingestion) so they can reason from state, not just narrative search output.
+Eli gives agents structured live market data from public APIs so they can reason from numbers, not just narrative search output.
+
+For launch, the two pillar tools are:
+- `eli finance timeseries`
+- `eli finance odds`
+
+The rest of the finance surface supports those two.
 
 ---
 
@@ -19,7 +25,7 @@ Installs `eli` to `~/.cargo/bin/eli`.
 Local dev install from source:
 
 ```bash
-# From /Users/elifoltyn/Desktop/eli-code/eli
+# From the repo's eli/ workspace
 cargo install --path .
 ```
 
@@ -46,11 +52,23 @@ Restart your agent. Eli tools become native MCP tools.
 
 ## Tool Surface
 
-MCP currently exposes **22 tools**:
+MCP currently exposes **15 finance tools**:
 
-- Finance: `finance_macro`, `finance_forex`, `finance_snapshot`, `finance_timeseries`, `finance_yield_curve`, `finance_rate_path`, `finance_odds`, `finance_options`, `finance_news`, `finance_prices`, `finance_fundamentals`, `finance_sync`, `finance_search`, `finance_filings`, `finance_schedule`, `finance_dashboard`
-- Web ingestion: `web_search`, `web_read`, `web_crawl`, `web_extract`
-- Code/agent: `code_analyze`, `agent_run`
+- `finance_snapshot`
+- `finance_timeseries`
+- `finance_rate_path`
+- `finance_odds`
+- `finance_options`
+- `finance_fundamentals`
+- `finance_search`
+- `finance_filings`
+- `finance_schedule`
+- `finance_auctions`
+- `finance_cot`
+- `finance_nyfed`
+- `finance_volsurface`
+- `finance_stress`
+- `finance_fiscal`
 
 ---
 
@@ -63,41 +81,45 @@ Eli complements built-in websearch in Claude/Codex/Gemini/Cursor/OpenClaw.
 
 ---
 
-## Data Access (No Paid Data Keys Required)
+## Zero-Key Core
 
-Finance/data tools use public endpoints including:
+Core finance tools use public endpoints including:
 - Yahoo Finance
 - FRED
 - Kalshi
 - Polymarket
+- US Treasury / FiscalData
+- New York Fed
+- OFR
+- CFTC
 - SEC EDGAR
-- Google News RSS
 - Pyth Hermes
 
-No paid market-data subscription is required for normal Eli usage.
+No paid market-data subscription is required for normal Eli usage. Optional attachments can add providers like IBKR or keyed FRED enhancements later.
 
 ---
 
 ## CLI Examples
 
 ```bash
-# Financial state
-eli finance snapshot --tickers NVDA,AAPL,SPY
+# Core movement/context tool
 eli finance timeseries --tickers SPY,UNRATE --range 1y --granularity 1d
-eli finance macro --range 1y
-eli finance forex --range 1y --horizons 1w,1mo,3mo,1y
 
-# Prediction markets
-eli finance sync --sources kalshi,polymarket --max-pages 10
+# Core expectations tool
 eli finance odds --search "recession" --live --top 10
+eli finance odds --event KXFEDDECISION-26APR29
 
-# Web ingestion
-eli web search --query "fed rate decision" --mode news --recency week
-eli web read --url https://example.com/article
-eli web extract --url https://example.com/article --bullets 8
-
-# Code analysis
-eli code src/ --pub-api
+# Supporting finance tools
+eli finance snapshot --tickers NVDA,AAPL,SPY
+eli finance options --ticker SPY --summary --near-money 5
+eli finance search --query "crude oil"
+eli finance schedule --kind macro --from 2026-03-23 --to 2026-04-03 --major
+eli finance filings --ticker NVDA --forms 10-K --limit 3
+eli finance cot --query "crude" --weeks 12
+eli finance nyfed --kind rates
+eli finance fiscal --kind debt
+eli finance stress --range 30
+eli finance volatility --symbols VIX,VVIX,SKEW --history 5
 ```
 
 ---
@@ -118,9 +140,8 @@ eli code src/ --pub-api
 
 ```bash
 cd eli
-CARGO_HOME=$(pwd)/.cargo_local_local \
-CARGO_TARGET_DIR=$(pwd)/target_local \
+cargo check -p eli --bin eli
 cargo build -p eli --bin eli
 
-ln -sf $(pwd)/target_local/debug/eli ../bin/eli
+ln -sf $(pwd)/target/debug/eli ../bin/eli
 ```

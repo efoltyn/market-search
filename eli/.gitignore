@@ -1,3 +1,4 @@
 /target
+/.venv-ibkr
 **/*.swp
 .DS_Store

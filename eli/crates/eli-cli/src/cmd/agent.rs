@@ -4,6 +4,7 @@ async fn cmd_agent(
     model: Option<String>,
 ) -> Result<()> {
     match cmd {
+        AgentCommand::Report(args) => cmd_agent_report(args, provider, model).await,
         AgentCommand::Run(args) => cmd_agent_run(args, provider, model).await,
         AgentCommand::Fanout(args) => cmd_agent_fanout(args, provider, model).await,
         AgentCommand::Swarm(args) => cmd_agent_swarm(args, provider, model).await,
@@ -56,6 +57,941 @@ async fn cmd_agent_mode(
         must_cite: args.must_cite,
     };
     cmd_agent_fanout(fanout_args, provider, model).await
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgentReportStep {
+    key: String,
+    command: String,
+    ok: bool,
+    status_code: Option<i32>,
+    latency_ms: u128,
+    stdout_chars: usize,
+    stderr_tail: String,
+    artifact_path: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgentReportResponse {
+    ok: bool,
+    usable: bool,
+    kind: String,
+    saved_result_path: String,
+    saved_manifest_path: String,
+    artifact_paths: Vec<String>,
+    html_path: String,
+    summary_report_path: Option<String>,
+    generated_at: String,
+    prompt: String,
+    research_clock: Option<AgentReportResearchClock>,
+    steps: Vec<AgentReportStep>,
+    worker: Option<AgentWorkerResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgentReportResearchClock {
+    started_at: String,
+    anchor_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lock_minutes: Option<u64>,
+}
+
+fn resolve_agent_report_research_clock(
+    args: &AgentReportArgs,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<AgentReportResearchClock>> {
+    let anchor_at = match (&args.as_of, args.lock_minutes) {
+        (Some(raw), None) => Some(
+            eli_core::finance::parse_as_of(raw)
+                .map_err(|e| anyhow::anyhow!(e))
+                .context("parse --as-of")?,
+        ),
+        (None, Some(minutes)) => {
+            let minutes_i64 = i64::try_from(minutes).context("--lock-minutes too large")?;
+            Some(started_at - chrono::Duration::minutes(minutes_i64))
+        }
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("clap enforces conflicts"),
+    };
+
+    Ok(anchor_at.map(|anchor_at| AgentReportResearchClock {
+        started_at: started_at.to_rfc3339(),
+        anchor_at: anchor_at.to_rfc3339(),
+        lock_minutes: args.lock_minutes,
+    }))
+}
+
+async fn cmd_agent_report(
+    args: AgentReportArgs,
+    provider: Option<String>,
+    model: Option<String>,
+) -> Result<()> {
+    let run_dir = resolve_agent_run_dir("report");
+    let saved_result_path = run_dir.join("result.json");
+    let saved_manifest_path = run_dir.join("manifest.json");
+    let artifacts_data_dir = run_dir.join("artifacts").join("data");
+    std::fs::create_dir_all(&artifacts_data_dir)
+        .with_context(|| format!("create report data dir {}", artifacts_data_dir.display()))?;
+
+    let default_prompt = default_agent_report_prompt();
+    let prompt = args
+        .prompt
+        .clone()
+        .unwrap_or(default_prompt)
+        .trim()
+        .to_string();
+    let exe = std::env::current_exe().context("resolve current executable")?;
+    let report_started_at = chrono::Utc::now();
+    let research_clock = resolve_agent_report_research_clock(&args, report_started_at)?;
+    let anchor_arg = research_clock.as_ref().map(|clock| clock.anchor_at.clone());
+
+    let tickers_csv = csv_join(&args.tickers);
+    let mut jobs: Vec<(String, Vec<String>)> = vec![
+        (
+            "snapshot".to_string(),
+            vec![
+                "finance".to_string(),
+                "snapshot".to_string(),
+                "--ticker".to_string(),
+                tickers_csv.clone(),
+            ],
+        ),
+        (
+            "timeseries".to_string(),
+            vec![
+                "finance".to_string(),
+                "timeseries".to_string(),
+                "--ticker".to_string(),
+                tickers_csv.clone(),
+                "--range".to_string(),
+                args.lookback.clone(),
+                "--granularity".to_string(),
+                args.granularity.clone(),
+            ],
+        ),
+        (
+            "macro".to_string(),
+            vec!["finance".to_string(), "macro".to_string()],
+        ),
+        (
+            "yield_curve".to_string(),
+            vec!["finance".to_string(), "yield-curve".to_string()],
+        ),
+        (
+            "prices".to_string(),
+            vec!["finance".to_string(), "prices".to_string()],
+        ),
+        (
+            "options_spy".to_string(),
+            vec![
+                "finance".to_string(),
+                "options".to_string(),
+                "--ticker".to_string(),
+                "SPY".to_string(),
+                "--summary".to_string(),
+                "--near-money".to_string(),
+                "7".to_string(),
+            ],
+        ),
+        (
+            "options_qqq".to_string(),
+            vec![
+                "finance".to_string(),
+                "options".to_string(),
+                "--ticker".to_string(),
+                "QQQ".to_string(),
+                "--summary".to_string(),
+                "--near-money".to_string(),
+                "7".to_string(),
+            ],
+        ),
+    ];
+    if let Some(anchor_arg) = &anchor_arg {
+        if let Some((_, snapshot_args)) = jobs.iter_mut().find(|(key, _)| key == "snapshot") {
+            snapshot_args.push("--as-of".to_string());
+            snapshot_args.push(anchor_arg.clone());
+        }
+        if let Some((_, timeseries_args)) = jobs.iter_mut().find(|(key, _)| key == "timeseries") {
+            timeseries_args.push("--as-of".to_string());
+            timeseries_args.push(anchor_arg.clone());
+        }
+    }
+    for query in &args.odds_queries {
+        let key = format!("odds_{}", sanitize_report_key(query));
+        jobs.push((
+            key,
+            vec![
+                "finance".to_string(),
+                "odds".to_string(),
+                "--search".to_string(),
+                query.clone(),
+                "--live".to_string(),
+                "--top".to_string(),
+                args.top.max(1).to_string(),
+            ],
+        ));
+    }
+    for query in &args.web_queries {
+        let key = format!("web_{}", sanitize_report_key(query));
+        jobs.push((
+            key,
+            vec![
+                "web".to_string(),
+                "search".to_string(),
+                "--query".to_string(),
+                query.clone(),
+                "--mode".to_string(),
+                "news".to_string(),
+            ],
+        ));
+    }
+
+    let mut artifact_paths: Vec<String> = Vec::new();
+    let mut steps: Vec<AgentReportStep> = Vec::new();
+    let mut values_by_key: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    let max_ms = args.max_ms.max(1000);
+
+    for (key, cmd_args) in jobs {
+        let command_label = format!("eli {}", cmd_args.join(" "));
+        let outcome = run_agent_report_json_command(&exe, &cmd_args, max_ms).await;
+        match outcome {
+            Ok(result) => {
+                let (artifact_path, err) = if let Some(value) = result.json.clone() {
+                    let path = artifacts_data_dir.join(format!("{key}.json"));
+                    std::fs::write(&path, serde_json::to_string_pretty(&value)?)
+                        .with_context(|| format!("write artifact {}", path.display()))?;
+                    write_shadow_meta_for_value(
+                        &path,
+                        &value,
+                        "agent.report",
+                        &format!("agent_report:{key}"),
+                    )
+                    .with_context(|| format!("write sidecar {}", path.display()))?;
+                    let path_str = path.display().to_string();
+                    values_by_key.insert(key.clone(), value);
+                    artifact_paths.push(path_str.clone());
+                    (Some(path_str), None)
+                } else {
+                    let log_path = artifacts_data_dir.join(format!("{key}.log"));
+                    let log = format!(
+                        "command={}\nstatus_code={:?}\nstdout_chars={}\nstdout:\n{}\n\nstderr:\n{}\n",
+                        command_label, result.status_code, result.stdout_chars, result.stdout, result.stderr
+                    );
+                    std::fs::write(&log_path, log)
+                        .with_context(|| format!("write command log {}", log_path.display()))?;
+                    let path_str = log_path.display().to_string();
+                    artifact_paths.push(path_str.clone());
+                    (
+                        Some(path_str),
+                        Some("command returned non-json output".to_string()),
+                    )
+                };
+                steps.push(AgentReportStep {
+                    key,
+                    command: command_label,
+                    ok: result.ok && err.is_none(),
+                    status_code: result.status_code,
+                    latency_ms: result.latency_ms,
+                    stdout_chars: result.stdout_chars,
+                    stderr_tail: tail_chars(&result.stderr, 600),
+                    artifact_path,
+                    error: err,
+                });
+            }
+            Err(e) => {
+                steps.push(AgentReportStep {
+                    key,
+                    command: command_label,
+                    ok: false,
+                    status_code: None,
+                    latency_ms: 0,
+                    stdout_chars: 0,
+                    stderr_tail: String::new(),
+                    artifact_path: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    let manifest_path = run_dir.join("artifacts").join("market_manifest.json");
+    let manifest = json!({
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "prompt": prompt,
+        "research_clock": research_clock.clone(),
+        "artifact_paths": artifact_paths,
+        "steps": steps,
+    });
+    std::fs::create_dir_all(manifest_path.parent().unwrap_or(&run_dir)).ok();
+    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
+        .with_context(|| format!("write report manifest {}", manifest_path.display()))?;
+    write_shadow_meta_for_value(
+        &manifest_path,
+        &manifest,
+        "agent.report",
+        "agent_report:manifest",
+    )
+    .ok();
+    artifact_paths.push(manifest_path.display().to_string());
+
+    let skip_synthesis = env_truthy("ELI_AGENT_REPORT_SKIP_SYNTHESIS");
+    let mut worker_opt: Option<AgentWorkerResult> = None;
+    let summary_report_path = if skip_synthesis {
+        None
+    } else {
+        let synthesis_task = build_agent_report_synthesis_task(&prompt, &manifest_path);
+        let fallback_models = if args.fallback_models.is_empty() {
+            default_agent_fallback_models()
+        } else {
+            args.fallback_models.clone()
+        };
+        let worker = run_agent_worker(
+            "report_synthesis".to_string(),
+            synthesis_task,
+            provider,
+            model,
+            fallback_models,
+            args.max_ms.min(45_000).max(15_000),
+            1,
+            run_dir.join("artifacts").join("worker_report"),
+            Vec::new(),
+        )
+        .await;
+        let path = worker.report_path.clone();
+        if let Some(report_path) = &path {
+            artifact_paths.push(report_path.clone());
+        }
+        worker_opt = Some(worker);
+        path
+    };
+
+    let report_html =
+        render_agent_market_report_html(&prompt, &values_by_key, summary_report_path.as_deref());
+    let default_html_path = run_dir.join("artifacts").join("market_report.html");
+    std::fs::write(&default_html_path, report_html)
+        .with_context(|| format!("write html report artifact {}", default_html_path.display()))?;
+    artifact_paths.push(default_html_path.display().to_string());
+
+    if let Some(explicit_html_path) = args.html_out.clone() {
+        let redirected = redirect_finance_output(explicit_html_path);
+        if let Some(parent) = redirected.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::copy(&default_html_path, &redirected)
+            .with_context(|| format!("write --html-out copy {}", redirected.display()))?;
+        artifact_paths.push(redirected.display().to_string());
+    }
+    let library_html_path = archive_html_report(&default_html_path, &prompt, &run_dir)?;
+    artifact_paths.push(library_html_path.display().to_string());
+
+    artifact_paths.sort();
+    artifact_paths.dedup();
+
+    let ok_steps = steps.iter().filter(|s| s.ok).count();
+    let usable = ok_steps >= 4;
+    let resp = AgentReportResponse {
+        ok: usable
+            && worker_opt
+                .as_ref()
+                .map(|w| w.status == "done")
+                .unwrap_or(true),
+        usable,
+        kind: "agent_report".to_string(),
+        saved_result_path: saved_result_path.display().to_string(),
+        saved_manifest_path: saved_manifest_path.display().to_string(),
+        artifact_paths: artifact_paths.clone(),
+        html_path: library_html_path.display().to_string(),
+        summary_report_path,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        prompt,
+        research_clock,
+        steps,
+        worker: worker_opt,
+    };
+    persist_agent_response(&resp, "agent_report", &run_dir, &artifact_paths, args.out)?;
+    fail_if_unusable_response(resp.usable, &resp.saved_result_path, "agent_report")
+}
+
+#[derive(Debug, Clone)]
+struct AgentReportCommandResult {
+    ok: bool,
+    status_code: Option<i32>,
+    latency_ms: u128,
+    stdout_chars: usize,
+    stdout: String,
+    stderr: String,
+    json: Option<serde_json::Value>,
+}
+
+async fn run_agent_report_json_command(
+    exe: &Path,
+    command_args: &[String],
+    timeout_ms: u64,
+) -> Result<AgentReportCommandResult> {
+    let t0 = Instant::now();
+    let mut cmd = TokioCommand::new(exe);
+    for arg in command_args {
+        cmd.arg(arg);
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = tokio_timeout(
+        TokioDuration::from_millis(timeout_ms.max(500)),
+        cmd.output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("tool command timed out after {}ms", timeout_ms.max(500)))?
+    .context("spawn report tool command")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout_trim = stdout.trim();
+    let json = extract_json_from_stdout(stdout_trim).or_else(|| extract_json_from_stdout(&stderr));
+    Ok(AgentReportCommandResult {
+        ok: output.status.success(),
+        status_code: output.status.code(),
+        latency_ms: t0.elapsed().as_millis(),
+        stdout_chars: stdout_trim.chars().count(),
+        stdout,
+        stderr,
+        json,
+    })
+}
+
+fn csv_join(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn sanitize_report_key(raw: &str) -> String {
+    let lowered = raw.to_ascii_lowercase();
+    let mut out = String::with_capacity(lowered.len());
+    let mut last_underscore = false;
+    for ch in lowered.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_underscore = false;
+        } else if !last_underscore {
+            out.push('_');
+            last_underscore = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+fn build_agent_report_synthesis_task(prompt: &str, manifest_path: &Path) -> String {
+    format!(
+        "Generate a concise institutional market intelligence memo from Eli artifacts.\n\nObjective:\n{prompt}\n\nStrict requirements:\n- Read this manifest first: {manifest}\n- Ground every major claim in artifact evidence.\n- Separate observations from inference.\n- Include: Today nowcast, 2-week retrospective, and 1-3 week scenario map.\n- Keep it compact and decision-oriented.\n- Cite artifact file paths inline when making claims.\n",
+        prompt = prompt.trim(),
+        manifest = manifest_path.display()
+    )
+}
+
+#[derive(Debug, Clone)]
+struct ReportWatchRow {
+    ticker: String,
+    name: String,
+    price: Option<f64>,
+    change_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct ReportOddsRow {
+    title: String,
+    probability_yes: Option<f64>,
+    volume_usd: Option<f64>,
+    source: String,
+}
+
+#[derive(Debug, Clone)]
+struct ReportHeadline {
+    title: String,
+    domain: Option<String>,
+    url: Option<String>,
+}
+
+fn render_agent_market_report_html(
+    prompt: &str,
+    values_by_key: &std::collections::BTreeMap<String, serde_json::Value>,
+    summary_report_path: Option<&str>,
+) -> String {
+    let watch_rows = extract_watch_rows(values_by_key.get("snapshot"));
+    let odds_rows = extract_odds_rows(values_by_key);
+    let headlines = extract_headlines(values_by_key);
+    let summary_markdown = summary_report_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_else(|| {
+            "No model synthesis was generated for this run. Use artifact JSON files for direct analysis."
+                .to_string()
+        });
+    let generated_at = chrono::Utc::now().to_rfc3339();
+
+    let watch_html = if watch_rows.is_empty() {
+        "<div class=\"empty\">No watchlist data</div>".to_string()
+    } else {
+        watch_rows
+            .iter()
+            .take(16)
+            .map(|row| {
+                let change = row
+                    .change_pct
+                    .map(|v| format!("{:+.2}%", v))
+                    .unwrap_or_else(|| "n/a".to_string());
+                let change_class = if row.change_pct.unwrap_or(0.0) >= 0.0 {
+                    "pill up"
+                } else {
+                    "pill down"
+                };
+                let price = row
+                    .price
+                    .map(|v| format!("{:.2}", v))
+                    .unwrap_or_else(|| "--".to_string());
+                format!(
+                    "<div class=\"watch-row\"><div class=\"left\"><div class=\"ticker\">{ticker}</div><div class=\"name\">{name}</div></div><div class=\"mid\">{price}</div><div class=\"{change_class}\">{change}</div></div>",
+                    ticker = html_escape(&row.ticker),
+                    name = html_escape(&row.name),
+                    price = price,
+                    change_class = change_class,
+                    change = html_escape(&change),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let odds_html = if odds_rows.is_empty() {
+        "<div class=\"empty\">No odds data</div>".to_string()
+    } else {
+        odds_rows
+            .iter()
+            .take(12)
+            .map(|row| {
+                let p = row
+                    .probability_yes
+                    .map(|v| format!("{:.1}%", v * 100.0))
+                    .unwrap_or_else(|| "n/a".to_string());
+                let vol = row
+                    .volume_usd
+                    .map(|v| format!("${:.0}", v))
+                    .unwrap_or_else(|| "n/a".to_string());
+                format!(
+                    "<div class=\"odds-row\"><div class=\"odds-title\">{title}</div><div class=\"odds-meta\">{src} • YES {p} • Vol {vol}</div></div>",
+                    title = html_escape(&row.title),
+                    src = html_escape(&row.source),
+                    p = html_escape(&p),
+                    vol = html_escape(&vol),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let news_html = if headlines.is_empty() {
+        "<div class=\"empty\">No headlines</div>".to_string()
+    } else {
+        headlines
+            .iter()
+            .take(15)
+            .map(|row| {
+                let title = html_escape(&row.title);
+                let domain = html_escape(row.domain.as_deref().unwrap_or("source"));
+                if let Some(url) = &row.url {
+                    format!(
+                        "<a class=\"headline\" href=\"{url}\" target=\"_blank\" rel=\"noreferrer\"><span>{title}</span><span class=\"domain\">{domain}</span></a>",
+                        url = html_escape(url),
+                        title = title,
+                        domain = domain,
+                    )
+                } else {
+                    format!(
+                        "<div class=\"headline\"><span>{title}</span><span class=\"domain\">{domain}</span></div>",
+                        title = title,
+                        domain = domain,
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Eli Terminal Market Report</title>
+  <style>
+    :root {{
+      --bg:#05070a;
+      --panel:#0c111d;
+      --panel-2:#111827;
+      --text:#f1f5f9;
+      --muted:#94a3b8;
+      --line:rgba(255,255,255,.08);
+      --up:#16a34a;
+      --down:#ef4444;
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{
+      margin:0;
+      background:radial-gradient(1200px 600px at 15% -10%, rgba(30,64,175,.25), transparent), var(--bg);
+      color:var(--text);
+      font:14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    }}
+    .top {{
+      display:flex;
+      justify-content:space-between;
+      align-items:flex-start;
+      padding:18px 22px;
+      border-bottom:1px solid var(--line);
+      background:rgba(9,12,18,.8);
+      backdrop-filter:blur(8px);
+      position:sticky; top:0;
+      z-index:20;
+    }}
+    .title {{
+      font-size:24px;
+      font-weight:800;
+      letter-spacing:.2px;
+    }}
+    .meta {{ color:var(--muted); font-size:12px; margin-top:4px; }}
+    .grid {{
+      display:grid;
+      grid-template-columns: 350px 1fr 380px;
+      gap:14px;
+      padding:14px;
+      min-height:calc(100vh - 80px);
+    }}
+    .panel {{
+      background:linear-gradient(180deg, rgba(17,24,39,.94), rgba(12,17,29,.92));
+      border:1px solid var(--line);
+      border-radius:14px;
+      overflow:hidden;
+      display:flex;
+      flex-direction:column;
+      min-height:240px;
+    }}
+    .panel h2 {{
+      margin:0;
+      padding:12px 14px;
+      border-bottom:1px solid var(--line);
+      font-size:13px;
+      letter-spacing:.06em;
+      text-transform:uppercase;
+      color:#cbd5e1;
+      background:rgba(148,163,184,.06);
+    }}
+    .watch-row {{
+      display:grid;
+      grid-template-columns: 1fr auto auto;
+      gap:10px;
+      padding:10px 14px;
+      border-bottom:1px solid rgba(255,255,255,.05);
+      align-items:center;
+    }}
+    .ticker {{ font-weight:700; font-size:16px; }}
+    .name {{ color:var(--muted); font-size:12px; max-width:200px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .mid {{ font-variant-numeric:tabular-nums; color:#e2e8f0; }}
+    .pill {{
+      font-variant-numeric:tabular-nums;
+      border-radius:8px;
+      padding:2px 8px;
+      min-width:70px;
+      text-align:right;
+      font-weight:700;
+    }}
+    .up {{ background:rgba(22,163,74,.18); color:#86efac; }}
+    .down {{ background:rgba(239,68,68,.18); color:#fca5a5; }}
+    .center-wrap {{ padding:14px; display:grid; gap:12px; }}
+    .card {{
+      border:1px solid var(--line);
+      border-radius:12px;
+      background:rgba(2,6,23,.35);
+      padding:12px;
+    }}
+    .card h3 {{ margin:0 0 8px 0; font-size:13px; color:#cbd5e1; text-transform:uppercase; letter-spacing:.05em; }}
+    .memo {{
+      white-space:pre-wrap;
+      font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size:12px;
+      color:#dbeafe;
+      max-height:52vh;
+      overflow:auto;
+    }}
+    .odds-row {{
+      padding:10px 14px;
+      border-bottom:1px solid rgba(255,255,255,.05);
+    }}
+    .odds-title {{ font-size:13px; font-weight:600; }}
+    .odds-meta {{ margin-top:4px; color:var(--muted); font-size:12px; }}
+    .headline {{
+      display:flex;
+      justify-content:space-between;
+      gap:10px;
+      padding:10px 14px;
+      border-bottom:1px solid rgba(255,255,255,.05);
+      color:#f8fafc;
+      text-decoration:none;
+    }}
+    .headline:hover {{ background:rgba(148,163,184,.08); }}
+    .domain {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
+    .empty {{ color:var(--muted); padding:16px; font-size:13px; }}
+    @media (max-width: 1280px) {{
+      .grid {{ grid-template-columns: 320px 1fr; }}
+      .panel.right-col {{ grid-column: span 2; }}
+    }}
+    @media (max-width: 900px) {{
+      .grid {{ grid-template-columns: 1fr; }}
+      .panel.right-col {{ grid-column: span 1; }}
+    }}
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div>
+      <div class="title">Eli Terminal Market Intelligence</div>
+      <div class="meta">Generated {generated_at}</div>
+    </div>
+  </header>
+  <main class="grid">
+    <section class="panel">
+      <h2>Watchlist</h2>
+      {watch_html}
+    </section>
+    <section class="panel">
+      <h2>Synthesis Memo</h2>
+      <div class="center-wrap">
+        <div class="card">
+          <div class="memo">{summary}</div>
+        </div>
+      </div>
+    </section>
+    <section class="panel right-col">
+      <h2>Prediction Markets</h2>
+      {odds_html}
+      <h2>Headline Feed</h2>
+      {news_html}
+    </section>
+  </main>
+</body>
+</html>"#,
+        generated_at = html_escape(&generated_at),
+        watch_html = watch_html,
+        summary = html_escape(&summary_markdown),
+        odds_html = odds_html,
+        news_html = news_html
+    )
+}
+
+fn extract_watch_rows(snapshot_value: Option<&serde_json::Value>) -> Vec<ReportWatchRow> {
+    let mut out = Vec::new();
+    let Some(value) = snapshot_value else {
+        return out;
+    };
+    let Some(rows) = value.get("snapshots").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for row in rows {
+        let ticker = row
+            .get("ticker")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if ticker.is_empty() {
+            continue;
+        }
+        let name = row
+            .get("short_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| row.get("long_name").and_then(|v| v.as_str()))
+            .unwrap_or(&ticker)
+            .to_string();
+        let price = row.get("current_price").and_then(|v| v.as_f64());
+        let change_pct = match (
+            row.get("current_price").and_then(|v| v.as_f64()),
+            row.get("previous_close").and_then(|v| v.as_f64()),
+        ) {
+            (Some(curr), Some(prev)) if prev > 0.0 => Some((curr / prev - 1.0) * 100.0),
+            _ => None,
+        };
+        out.push(ReportWatchRow {
+            ticker,
+            name,
+            price,
+            change_pct,
+        });
+    }
+    out.sort_by(|a, b| {
+        let av = a.change_pct.unwrap_or(0.0).abs();
+        let bv = b.change_pct.unwrap_or(0.0).abs();
+        bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
+}
+
+fn extract_odds_rows(
+    values_by_key: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Vec<ReportOddsRow> {
+    let mut out = Vec::new();
+    for (key, value) in values_by_key {
+        if !key.starts_with("odds_") {
+            continue;
+        }
+        let source = value
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("odds")
+            .to_string();
+        let Some(rows) = value.get("markets").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for row in rows.iter().take(6) {
+            let title = row
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Untitled market")
+                .to_string();
+            let probability_yes = row.get("probability_yes").and_then(|v| v.as_f64());
+            let volume_usd = row.get("volume_usd").and_then(|v| v.as_f64());
+            out.push(ReportOddsRow {
+                title,
+                probability_yes,
+                volume_usd,
+                source: source.clone(),
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        b.volume_usd
+            .unwrap_or(0.0)
+            .partial_cmp(&a.volume_usd.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
+}
+
+fn extract_headlines(
+    values_by_key: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Vec<ReportHeadline> {
+    let mut out = Vec::new();
+    for (key, value) in values_by_key {
+        if !key.starts_with("web_") {
+            continue;
+        }
+        let Some(items) = value.get("items").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for item in items.iter().take(6) {
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if title.is_empty() {
+                continue;
+            }
+            let domain = item
+                .get("domain")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let url = item
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            out.push(ReportHeadline { title, domain, url });
+        }
+    }
+    out
+}
+
+fn html_escape(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn archive_html_report(source_html: &Path, prompt: &str, run_dir: &Path) -> Result<PathBuf> {
+    let library_dir = resolve_abs_path(Path::new("eli_research/reports/html"));
+    std::fs::create_dir_all(&library_dir)
+        .with_context(|| format!("create report library dir {}", library_dir.display()))?;
+
+    let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let id = uuid::Uuid::new_v4().to_string();
+    let short_id = &id[..8];
+    let file_name = format!("report_{}_{}.html", stamp, short_id);
+    let archived_path = library_dir.join(file_name);
+    std::fs::copy(source_html, &archived_path).with_context(|| {
+        format!(
+            "archive html report {} -> {}",
+            source_html.display(),
+            archived_path.display()
+        )
+    })?;
+
+    let latest_path = library_dir.join("latest.html");
+    std::fs::copy(source_html, &latest_path).ok();
+
+    let index_path = resolve_abs_path(Path::new("eli_research/reports/index.json"));
+    if let Some(parent) = index_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut entries = std::fs::read_to_string(&index_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(&raw).ok())
+        .unwrap_or_default();
+    entries.push(json!({
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "prompt": prompt,
+        "html_path": archived_path.display().to_string(),
+        "run_dir": run_dir.display().to_string(),
+    }));
+    if entries.len() > 500 {
+        let start = entries.len().saturating_sub(500);
+        entries = entries[start..].to_vec();
+    }
+    std::fs::write(&index_path, serde_json::to_string_pretty(&entries)?)
+        .with_context(|| format!("write report index {}", index_path.display()))?;
+    write_shadow_meta_for_value(
+        &index_path,
+        &json!({ "entries": entries.len() }),
+        "agent.report",
+        "agent_report:index",
+    )
+    .ok();
+
+    Ok(archived_path)
+}
+
+fn default_agent_report_prompt() -> String {
+    if let Ok(env_prompt) = std::env::var("ELI_AGENT_REPORT_PROMPT") {
+        let trimmed = env_prompt.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let prompt_path = resolve_abs_path(Path::new("eli_research/reports/default_prompt.txt"));
+    if let Ok(raw) = std::fs::read_to_string(&prompt_path) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "RESEARCH FREELY, REALLY USE THE 3 PILLARS (WEBSEARCH, PREDICTION-MARKET ODDS, AND MARKET/OPTIONS DATA). FIND RELATIVE MISPRICING, STATE UNCERTAINTY, AND OUTPUT DECISION-USEFUL SCENARIOS."
+        .to_string()
 }
 
 async fn cmd_agent_run(
@@ -813,9 +1749,7 @@ fn missing_required_citations(report_path: &str, must_cite: &[String]) -> Option
         if required.is_empty() {
             continue;
         }
-        let required_abs = resolve_abs_path(Path::new(required))
-            .display()
-            .to_string();
+        let required_abs = resolve_abs_path(Path::new(required)).display().to_string();
         let matched = report_raw.contains(required) || report_raw.contains(&required_abs);
         if !matched {
             missing.push(required_abs);
@@ -835,11 +1769,7 @@ fn fail_if_unusable_response(usable: bool, result_path: &str, kind: &str) -> Res
     if usable {
         return Ok(());
     }
-    anyhow::bail!(
-        "{} completed with usable=false (see {})",
-        kind,
-        result_path
-    );
+    anyhow::bail!("{} completed with usable=false (see {})", kind, result_path);
 }
 
 fn default_agent_fallback_models() -> Vec<String> {
@@ -905,7 +1835,9 @@ fn model_disable_minutes(consecutive_failures: u32) -> i64 {
     let over = consecutive_failures.saturating_sub(MODEL_DISABLE_CONSECUTIVE_FAILURES);
     let exp = over.min(6); // 10m, 20m, 40m ... capped below.
     let cooldown = MODEL_DISABLE_BASE_MINUTES.saturating_mul(1i64 << exp);
-    cooldown.min(MODEL_DISABLE_MAX_MINUTES).max(MODEL_DISABLE_BASE_MINUTES)
+    cooldown
+        .min(MODEL_DISABLE_MAX_MINUTES)
+        .max(MODEL_DISABLE_BASE_MINUTES)
 }
 
 fn pick_probe_candidates(candidates: &[Option<String>], max_count: usize) -> Vec<Option<String>> {
@@ -1010,15 +1942,26 @@ async fn try_agent_direct_route(
     std::fs::create_dir_all(&artifacts_dir).ok();
 
     if lower.contains("recession") {
-        let macro_resp = eli_core::finance::fetch_macro(eli_core::finance::MacroRequest {
-            range: Some(eli_core::finance::Span::parse("1y").map_err(|e| anyhow::anyhow!(e))?),
-            compare_to: None,
-            policy_file: None,
-            policy_mode: None,
-        })
+        let cache_dir = eli_core::finance::default_cache_dir();
+        let ts_resp = eli_core::finance::fetch_timeseries(
+            eli_core::finance::TimeseriesRequest {
+                tickers: vec![
+                    "UNRATE".to_string(),
+                    "FEDFUNDS".to_string(),
+                    "T10Y2Y".to_string(),
+                ],
+                range: eli_core::finance::Span::parse("1y").map_err(|e| anyhow::anyhow!(e))?,
+                granularity: eli_core::finance::Span { n: 1, unit: eli_core::finance::SpanUnit::Month },
+                as_of: None,
+                provider: eli_core::finance::ProviderKind::Yahoo,
+                max_points_per_ticker: None,
+                ibkr: None,
+            },
+            &cache_dir,
+        )
         .await
         .map_err(|e| anyhow::anyhow!(e))
-        .context("direct route macro")?;
+        .context("direct route macro via timeseries")?;
         let odds_resp = eli_core::finance::fetch_odds(odds_series_request("KXRECSSNBER"))
             .await
             .map_err(|e| anyhow::anyhow!(e))
@@ -1026,12 +1969,12 @@ async fn try_agent_direct_route(
 
         let macro_path = artifacts_dir.join("macro.json");
         let odds_path = artifacts_dir.join("odds.json");
-        std::fs::write(&macro_path, serde_json::to_string_pretty(&macro_resp)?)
+        std::fs::write(&macro_path, serde_json::to_string_pretty(&ts_resp)?)
             .context("write direct macro")?;
         std::fs::write(&odds_path, serde_json::to_string_pretty(&odds_resp)?)
             .context("write direct odds")?;
         let macro_meta_value =
-            serde_json::to_value(&macro_resp).context("serialize direct macro for meta")?;
+            serde_json::to_value(&ts_resp).context("serialize direct macro for meta")?;
         write_shadow_meta_for_value(
             &macro_path,
             &macro_meta_value,
@@ -1060,21 +2003,15 @@ async fn try_agent_direct_route(
                     .find(|m| m.title.to_ascii_lowercase().contains("2026"))
             })
             .and_then(|m| m.probability_yes);
-        let unrate = macro_resp
-            .indicators
-            .iter()
-            .find(|i| i.symbol == "UNRATE")
-            .map(|i| i.current_value);
-        let fedfunds = macro_resp
-            .indicators
-            .iter()
-            .find(|i| i.symbol == "FEDFUNDS")
-            .map(|i| i.current_value);
-        let spread_10y2y = macro_resp
-            .indicators
-            .iter()
-            .find(|i| i.symbol == "T10Y2Y")
-            .map(|i| i.current_value);
+        let last_value = |ticker: &str| -> Option<f64> {
+            ts_resp.series.iter()
+                .find(|s| s.ticker == ticker)
+                .and_then(|s| s.candles.last())
+                .map(|c| c.c)
+        };
+        let unrate = last_value("UNRATE");
+        let fedfunds = last_value("FEDFUNDS");
+        let spread_10y2y = last_value("T10Y2Y");
 
         let analysis = json!({
             "recession_2026_probability": recession_2026,
@@ -1143,6 +2080,8 @@ async fn try_agent_direct_route(
         let subject = extract_subject_after_for(task).unwrap_or_else(|| task.to_string());
         let search = eli_core::finance::fetch_search(eli_core::finance::SearchRequest {
             query: subject.clone(),
+            provider: eli_core::finance::ProviderKind::Yahoo,
+            ibkr: None,
             policy_file: None,
             policy_mode: None,
         })
@@ -1155,19 +2094,20 @@ async fn try_agent_direct_route(
             let fallback_query = subject
                 .split_whitespace()
                 .find(|w| {
-                    w.chars().all(|c| c.is_ascii_alphanumeric())
-                        && w.len() >= 2
-                        && w.len() <= 8
+                    w.chars().all(|c| c.is_ascii_alphanumeric()) && w.len() >= 2 && w.len() <= 8
                 })
                 .unwrap_or("apple");
-            let fallback_search = eli_core::finance::fetch_search(eli_core::finance::SearchRequest {
-                query: fallback_query.to_string(),
-                policy_file: None,
-                policy_mode: None,
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
-            .context("direct route risk fallback search")?;
+            let fallback_search =
+                eli_core::finance::fetch_search(eli_core::finance::SearchRequest {
+                    query: fallback_query.to_string(),
+                    provider: eli_core::finance::ProviderKind::Yahoo,
+                    ibkr: None,
+                    policy_file: None,
+                    policy_mode: None,
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!(e))
+                .context("direct route risk fallback search")?;
             symbol = pick_primary_symbol(&fallback_search);
         }
         if symbol.is_none() {
@@ -1179,15 +2119,21 @@ async fn try_agent_direct_route(
 
         let snapshot = eli_core::finance::fetch_snapshot(eli_core::finance::SnapshotRequest {
             tickers: vec![symbol.clone()],
+            as_of: None,
             provider: eli_core::finance::ProviderKind::Yahoo,
+            ibkr: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("direct route risk snapshot")?;
-        let today = chrono::Utc::now().date_naive().format("%Y-%m-%d").to_string();
+        let today = chrono::Utc::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
         let news = eli_core::finance::fetch_news(eli_core::finance::NewsRequest {
             ticker: symbol.clone(),
             date: today.clone(),
+            as_of: None,
             policy_file: None,
             policy_mode: None,
         })
@@ -1222,8 +2168,13 @@ async fn try_agent_direct_route(
             "direct_route:risk:snapshot",
         )
         .context("write risk snapshot sidecar")?;
-        write_shadow_meta_for_value(&news_path, &news_meta, "agent.direct", "direct_route:risk:news")
-            .context("write risk news sidecar")?;
+        write_shadow_meta_for_value(
+            &news_path,
+            &news_meta,
+            "agent.direct",
+            "direct_route:risk:news",
+        )
+        .context("write risk news sidecar")?;
 
         let headline_count = news.news.len();
         let summary_path = artifacts_dir.join("summary.md");
@@ -1273,6 +2224,8 @@ async fn try_agent_direct_route(
     if let Some(subject) = extract_price_subject(task) {
         let search = eli_core::finance::fetch_search(eli_core::finance::SearchRequest {
             query: subject.clone(),
+            provider: eli_core::finance::ProviderKind::Yahoo,
+            ibkr: None,
             policy_file: None,
             policy_mode: None,
         })
@@ -1298,7 +2251,9 @@ async fn try_agent_direct_route(
         };
         let snapshot = eli_core::finance::fetch_snapshot(eli_core::finance::SnapshotRequest {
             tickers: vec![symbol.clone()],
+            as_of: None,
             provider: eli_core::finance::ProviderKind::Yahoo,
+            ibkr: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!(e))
@@ -1388,6 +2343,7 @@ async fn try_agent_direct_route(
                 as_of: None,
                 provider: eli_core::finance::ProviderKind::Yahoo,
                 max_points_per_ticker: None,
+                ibkr: None,
             },
             &cache_dir,
         )
@@ -1492,7 +2448,9 @@ async fn try_agent_direct_route(
         let cache_dir = default_finance_cache_dir()?;
         let snapshot = eli_core::finance::fetch_snapshot(eli_core::finance::SnapshotRequest {
             tickers: vec![ticker.clone()],
+            as_of: None,
             provider: eli_core::finance::ProviderKind::Yahoo,
+            ibkr: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!(e))
@@ -1505,6 +2463,7 @@ async fn try_agent_direct_route(
                 as_of: None,
                 provider: eli_core::finance::ProviderKind::Yahoo,
                 max_points_per_ticker: None,
+                ibkr: None,
             },
             &cache_dir,
         )
@@ -1686,7 +2645,10 @@ fn extract_subject_after_for(task: &str) -> Option<String> {
     if raw.is_empty() {
         None
     } else {
-        Some(raw.trim_matches(|c: char| c == '.' || c == '?' || c == '!').to_string())
+        Some(
+            raw.trim_matches(|c: char| c == '.' || c == '?' || c == '!')
+                .to_string(),
+        )
     }
 }
 
@@ -1814,12 +2776,11 @@ async fn run_agent_worker(
             .join(&artifact_dir)
     };
     let mut model_attempts: Vec<Option<String>> = Vec::new();
-    let primary_candidate =
-        if provider_arg.eq_ignore_ascii_case("openrouter") && model.is_none() {
-            Some("arcee-ai/trinity-mini:free".to_string())
-        } else {
-            model.clone()
-        };
+    let primary_candidate = if provider_arg.eq_ignore_ascii_case("openrouter") && model.is_none() {
+        Some("arcee-ai/trinity-mini:free".to_string())
+    } else {
+        model.clone()
+    };
     model_attempts.push(primary_candidate.clone());
     if model.is_some() && primary_candidate != model {
         model_attempts.push(model.clone());
@@ -2073,7 +3034,12 @@ async fn run_agent_worker(
                     if limited {
                         record_model_limit_signal(&label, Some(err_text.clone()));
                     } else {
-                        record_model_health_attempt(&label, false, Some(err_text.clone()), !transient);
+                        record_model_health_attempt(
+                            &label,
+                            false,
+                            Some(err_text.clone()),
+                            !transient,
+                        );
                     }
                     stderr_tail = if stderr_tail.is_empty() {
                         format!("worker runtime error: {err_text}")
@@ -2198,45 +3164,59 @@ async fn try_swarm_worker_direct_route(
             || task_lower.contains("market-implied")
             || task_lower.contains("odds");
         if finance_goal {
-            if let Ok(macro_resp) = eli_core::finance::fetch_macro(eli_core::finance::MacroRequest {
-                range: Some(eli_core::finance::Span::parse("1y").map_err(|e| anyhow::anyhow!(e))?),
-                compare_to: None,
-                policy_file: None,
-                policy_mode: None,
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!(e)) {
+            let cache_dir = eli_core::finance::default_cache_dir();
+            if let Ok(ts_resp) =
+                eli_core::finance::fetch_timeseries(
+                    eli_core::finance::TimeseriesRequest {
+                        tickers: vec![
+                            "UNRATE".to_string(),
+                            "FEDFUNDS".to_string(),
+                            "T10Y2Y".to_string(),
+                        ],
+                        range: eli_core::finance::Span::parse("1y").map_err(|e| anyhow::anyhow!(e))?,
+                        granularity: eli_core::finance::Span { n: 1, unit: eli_core::finance::SpanUnit::Month },
+                        as_of: None,
+                        provider: eli_core::finance::ProviderKind::Yahoo,
+                        max_points_per_ticker: None,
+                        ibkr: None,
+                    },
+                    &cache_dir,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(e))
+            {
                 let odds_resp = eli_core::finance::fetch_odds(odds_series_request("KXRECSSNBER"))
                     .await
                     .map_err(|e| anyhow::anyhow!(e))
                     .ok();
-                let unrate = macro_resp
-                    .indicators
-                    .iter()
-                    .find(|i| i.symbol == "UNRATE")
-                    .map(|i| i.current_value);
-                let fedfunds = macro_resp
-                    .indicators
-                    .iter()
-                    .find(|i| i.symbol == "FEDFUNDS")
-                    .map(|i| i.current_value);
-                let spread_10y2y = macro_resp
-                    .indicators
-                    .iter()
-                    .find(|i| i.symbol == "T10Y2Y")
-                    .map(|i| i.current_value);
+                let last_value = |ticker: &str| -> Option<f64> {
+                    ts_resp.series.iter()
+                        .find(|s| s.ticker == ticker)
+                        .and_then(|s| s.candles.last())
+                        .map(|c| c.c)
+                };
+                let unrate = last_value("UNRATE");
+                let fedfunds = last_value("FEDFUNDS");
+                let spread_10y2y = last_value("T10Y2Y");
                 let recession_2026 = odds_resp.as_ref().and_then(|o| {
                     o.markets
                         .iter()
                         .find(|m| m.ticker.contains("-26"))
-                        .or_else(|| o.markets.iter().find(|m| m.title.to_ascii_lowercase().contains("2026")))
+                        .or_else(|| {
+                            o.markets
+                                .iter()
+                                .find(|m| m.title.to_ascii_lowercase().contains("2026"))
+                        })
                         .and_then(|m| m.probability_yes)
                 });
                 answer.push_str("- LIVE packet (fallback mode):\n");
                 answer.push_str(&format!("  - Unemployment: {:?}\n", unrate));
                 answer.push_str(&format!("  - Fed funds: {:?}\n", fedfunds));
                 answer.push_str(&format!("  - 10Y-2Y spread: {:?}\n", spread_10y2y));
-                answer.push_str(&format!("  - Recession 2026 implied odds: {:?}\n", recession_2026));
+                answer.push_str(&format!(
+                    "  - Recession 2026 implied odds: {:?}\n",
+                    recession_2026
+                ));
                 let mut warnings = Vec::new();
                 let mut offsets = Vec::new();
                 if recession_2026.unwrap_or(0.0) >= 0.35 {
@@ -2382,7 +3362,9 @@ async fn try_swarm_worker_direct_route(
             }
         }
         answer.push_str("- Conflicts/uncertainty:\n");
-        answer.push_str("  - Some upstream claims may be stale or based on partial chunk coverage.\n");
+        answer.push_str(
+            "  - Some upstream claims may be stale or based on partial chunk coverage.\n",
+        );
         if mode == "debate" {
             answer.push_str("- Debate framing:\n");
             answer.push_str("  - Pro case: strongest supporting line(s) from reduce report.\n");
@@ -2397,7 +3379,9 @@ async fn try_swarm_worker_direct_route(
             answer.push_str("  - Prioritize exact location + quote over broad summary.\n");
         }
         answer.push_str("- Decision note:\n");
-        answer.push_str("  - Treat output as evidence-weighted and update when fresher data arrives.\n");
+        answer.push_str(
+            "  - Treat output as evidence-weighted and update when fresher data arrives.\n",
+        );
         if let Some(p) = critic_report {
             let abs = resolve_abs_path(Path::new(&p));
             answer.push_str("- Critic source: `");
@@ -2689,8 +3673,8 @@ fn build_agent_worker_context(artifact_dir: &Path, must_cite: &[String]) -> Stri
     let citation_clause = if must_cite.is_empty() {
         String::new()
     } else {
-        let mut s =
-            "Required citations: final synthesis.answer must cite file path(s) under:\n".to_string();
+        let mut s = "Required citations: final synthesis.answer must cite file path(s) under:\n"
+            .to_string();
         for prefix in must_cite {
             s.push_str("- ");
             s.push_str(prefix);
@@ -2720,9 +3704,7 @@ fn classify_swarm_mode(goal: &str) -> &'static str {
         || lower.contains("counterargument")
     {
         "debate"
-    } else if lower.contains("evidence")
-        || lower.contains("prove")
-        || lower.contains("source hunt")
+    } else if lower.contains("evidence") || lower.contains("prove") || lower.contains("source hunt")
     {
         "evidence"
     } else if lower.contains("needle")

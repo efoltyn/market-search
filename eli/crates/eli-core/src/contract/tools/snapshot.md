@@ -5,6 +5,7 @@ Current price, market cap, shares, EV for one or more tickers.
 ```bash
 eli finance snapshot --tickers AAPL,MSFT,GOOGL
 eli finance snapshot --tickers SPY,QQQ,IWM --returns 1mo,3mo,1y
+eli finance snapshot --tickers AAPL,MSFT --provider ibkr --ibkr-account U1234567
 ```
 
 **Returns per ticker:**

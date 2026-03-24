@@ -1,22 +1,30 @@
 # eli
 
-Structured real-time data tools for AI agents.
+Native market data tools for AI agents.
 
-Use Eli with Claude Code, Codex, Gemini CLI, Cursor, OpenClaw, or any MCP-compatible agent to fetch live market state and prediction-market expectations as JSON.
+Use Eli with Claude Code, Codex, Gemini CLI, Cursor, OpenClaw, or any MCP-compatible agent to fetch live prices, timeseries, prediction-market odds, filings, and market structure as JSON.
 
-[eli-terminal.com](https://eli-terminal.com)
+[eliterminal.com](https://eliterminal.com)
 
 ---
 
 ## What Eli Is
 
-Eli is a **data ingestion layer** for agents.
+Eli is a **market data layer** for agents.
 
 - Your agent already has websearch for broad discovery and narrative context.
-- Eli gives your agent **direct, structured access** to live public market APIs.
+- Eli gives your agent **direct, structured access** to live market and macro APIs.
 - Output is JSON, so agents can reason, rank, compare deltas, and run calculations without scraping random HTML.
 
-Think of it as: **websearch for stories, Eli for state**.
+Think of it as: **websearch for stories, Eli for numbers**.
+
+For launch, the two pillar tools are:
+- `eli finance timeseries` for movement, context, and timestamps
+- `eli finance odds` for market-implied expectations
+
+Everything else supports those two.
+
+See [docs/core-vs-attachments.md](./docs/core-vs-attachments.md) for the zero-key core vs attachment model.
 
 ---
 
@@ -28,9 +36,9 @@ Built-in websearch is strong for:
 
 Eli is strong for:
 - "What is the price now?"
-- "What changed since last sync?"
+- "How did it move over time?"
 - "What does the market imply for Fed/rates/recession?"
-- "Give me exact article text with fetch diagnostics, not model narrative"
+- "What do filings, auctions, Fed plumbing, and fiscal data say right now?"
 
 Eli is additive, not a replacement.
 
@@ -72,76 +80,78 @@ Restart your agent. Eli tools appear as native MCP tools.
 
 ## MCP Tools Exposed
 
-Current MCP surface in code (`eli/crates/eli-cli/src/cmd/mcp.rs`) exposes **22 tools**:
+Current MCP surface exposes **15 finance tools**:
 
-- Finance: `finance_macro`, `finance_forex`, `finance_snapshot`, `finance_timeseries`, `finance_yield_curve`, `finance_rate_path`, `finance_odds`, `finance_options`, `finance_news`, `finance_prices`, `finance_fundamentals`, `finance_sync`, `finance_search`, `finance_filings`, `finance_schedule`, `finance_dashboard`
-- Web ingestion: `web_search`, `web_read`, `web_crawl`, `web_extract`
-- Code/agent: `code_analyze`, `agent_run`
+- `finance_snapshot`
+- `finance_timeseries`
+- `finance_rate_path`
+- `finance_odds`
+- `finance_options`
+- `finance_fundamentals`
+- `finance_search`
+- `finance_filings`
+- `finance_schedule`
+- `finance_auctions`
+- `finance_cot`
+- `finance_nyfed`
+- `finance_volsurface`
+- `finance_stress`
+- `finance_fiscal`
 
 ---
 
-## No-Auth Data By Default
+## Zero-Key Core
 
-Eli’s data tools target public endpoints, so agents can start immediately without paid data subscriptions.
+Eli’s core market tools work without API keys, so agents can start immediately.
 
-Primary public sources used across tools:
+Primary public sources used across the core:
 - Yahoo Finance
 - FRED
 - Kalshi public API
 - Polymarket public market APIs
+- US Treasury / FiscalData
+- New York Fed
+- OFR
+- CFTC
 - SEC EDGAR
-- Google News RSS
 - Pyth Hermes
 
-No auth is required for these data fetches in normal use.
-
-Note:
-- API keys are only needed if you use Eli’s own chat/tui model providers (`openrouter`, `openai`, `anthropic`, etc.).
+Optional attachments can layer in providers like IBKR or keyed FRED enhancements later without changing the core tools.
 
 ---
 
 ## Quick Command Examples
 
 ```bash
-# Live stock/ETF snapshot
-eli finance snapshot --tickers NVDA,AAPL,SPY
-
 # Mixed market + macro time series (auto provider)
 eli finance timeseries --tickers SPY,UNRATE --range 1y --granularity 1d
 
-# Full macro pack (31 indicators)
-eli finance macro --range 1y
-
-# Broad FX regime read (USD-relative deltas)
-eli finance forex --range 1y --horizons 1w,1mo,3mo,1y
-
 # Prediction markets (search + fresh prices)
-eli finance odds --search "federal reserve" --live --top 10
+eli finance odds --search "recession" --live --top 10
+eli finance odds --event KXFEDDECISION-26APR29
+eli finance odds --market KXRECSSNBER-26
 
-# Bulk sync Kalshi + Polymarket for local fast discovery (non-sports by default)
-eli finance sync --sources kalshi,polymarket
+# Live stock/ETF snapshot
+eli finance snapshot --tickers NVDA,AAPL,SPY
 
-# Bound runtime explicitly when you want a fixed budget
-eli finance sync --sources kalshi,polymarket --max-pages 25
+# Options summary
+eli finance options --ticker SPY --summary --near-money 5
 
-# Include sports too when needed
-eli finance sync --sources kalshi,polymarket --include-sports
+# Search before timeseries when you do not know the symbol
+eli finance search --query "crude oil"
 
-# Paper trading sandbox (local simulated fills, live pricing)
-eli finance paper --command reset --account sandbox --starting-cash 10000
-eli finance paper --command trade --account sandbox --provider kalshi --market KXBTCD-26FEB2400-T59999.99 --side yes --action buy --qty 5
-eli finance paper --command positions --account sandbox
-# Note: --mode kalshi-demo is reserved for upcoming signed demo-order routing; current v1 is local simulated paper execution.
+# Calendar / filings / positioning
+eli finance schedule --kind macro --from 2026-03-23 --to 2026-04-03 --major
+eli finance filings --ticker NVDA --forms 10-K --limit 3
+eli finance cot --query "crude" --weeks 12
 
-# Web ingestion search (deterministic filters, probes)
-eli web search --query "fed meeting march 2026" --mode news --recency week --top 15
+# Fed / fiscal / stress
+eli finance nyfed --kind rates
+eli finance fiscal --kind debt
+eli finance stress --range 30
 
-# Read one or many URLs with diagnostics
-eli web read --url https://example.com/article --max-chars 2400
-eli web read --url https://a.com,https://b.com --max-parallel 6
-
-# Extract key facts from URL/file/text
-eli web extract --url https://example.com/article --bullets 8 --focus "policy"
+# Volatility indices
+eli finance volatility --symbols VIX,VVIX,SKEW --history 5
 ```
 
 ---
@@ -152,6 +162,7 @@ eli web extract --url https://example.com/article --bullets 8 --focus "policy"
 2. Relativity first: compare now vs prior sync/windows; surface deltas.
 3. Token efficiency: compact defaults, with full payloads available when needed.
 4. Breadth without bloat: wide data access + controllable output budgets.
+5. Launch around the core: `timeseries` + `odds` first, everything else second.
 
 ---
 
@@ -159,12 +170,13 @@ eli web extract --url https://example.com/article --bullets 8 --focus "policy"
 
 ```bash
 cd eli
-cargo test
-cargo build
+cargo check -p eli --bin eli
+cargo build -p eli --bin eli
+ln -sf $(pwd)/target/debug/eli ../bin/eli
 ```
 
 MIT licensed.
 
 ---
 
-**[eli-terminal.com](https://eli-terminal.com)** — agent-native market and web ingestion.
+**[eliterminal.com](https://eliterminal.com)** — agent-native market data tools.

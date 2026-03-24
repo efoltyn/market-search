@@ -5,6 +5,9 @@ struct OddsCsvRow {
     title: String,
     event_ticker: String,
     yes_price: String,
+    volume: String,
+    #[serde(default)]
+    status: String,
     probability: String,
 }
 
@@ -20,6 +23,7 @@ struct MeetingAgg {
     cut_25bp_prob: f64,
     cut_50bp_plus_prob: f64,
     hike_prob: f64,
+    volume: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
