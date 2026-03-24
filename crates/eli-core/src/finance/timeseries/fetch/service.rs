@@ -100,12 +100,39 @@ pub async fn fetch_timeseries(
 
     if !errors.is_empty() {
         let valid_tickers: Vec<String> = series.iter().map(|s| s.ticker.clone()).collect();
-        let error = ToolErrorInfo {
-            error: "TickerFetchFailed".to_string(),
-            message: "One or more tickers failed to fetch timeseries data; no series returned."
-                .to_string(),
-            hint: Some("All requested tickers must be valid for this provider.".to_string()),
-            debug: None,
+        // Partial failure: return whatever series succeeded alongside the errors.
+        let (status, error_info) = if series.is_empty() {
+            (
+                "error".to_string(),
+                Some(ToolErrorInfo {
+                    error: "TickerFetchFailed".to_string(),
+                    message: "All tickers failed to fetch timeseries data.".to_string(),
+                    hint: Some(
+                        "All requested tickers must be valid for this provider.".to_string(),
+                    ),
+                    debug: None,
+                }),
+            )
+        } else {
+            (
+                "partial".to_string(),
+                Some(ToolErrorInfo {
+                    error: "PartialTickerFetchFailed".to_string(),
+                    message: format!(
+                        "{} of {} tickers failed; {} series returned.",
+                        errors.len(),
+                        tickers.len(),
+                        series.len()
+                    ),
+                    hint: Some("Some tickers had no data in the requested range.".to_string()),
+                    debug: None,
+                }),
+            )
+        };
+        let analytics = if series.is_empty() {
+            None
+        } else {
+            Some(build_timeseries_analytics(&series, req.granularity))
         };
         return Ok(TimeseriesResponse {
             provider: req.provider,
@@ -115,16 +142,16 @@ pub async fn fetch_timeseries(
             start,
             end,
             generated_at,
-            series: Vec::new(),
-            status: Some("error".to_string()),
-            error: Some(error),
+            series,
+            status: Some(status),
+            error: error_info,
             errors: Some(errors),
             valid_tickers: if valid_tickers.is_empty() {
                 None
             } else {
                 Some(valid_tickers)
             },
-            analytics: None,
+            analytics,
             cache: None,
         });
     }

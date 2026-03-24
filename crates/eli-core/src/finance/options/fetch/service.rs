@@ -927,7 +927,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
 
     let summary_quality = if !has_liquid_near_money {
         Some("illiquid".to_string())
-    } else if !has_iv_data {
+    } else if !has_iv_data || total_call_oi == 0 || total_put_oi == 0 {
         Some("partial".to_string())
     } else {
         Some("usable".to_string())
@@ -935,8 +935,8 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
 
     let metrics = Some(OptionsMetrics {
         underlying_price,
-        put_call_ratio_volume: put_call_ratio_volume.unwrap_or(0.0),
-        put_call_ratio_oi: put_call_ratio_oi.unwrap_or(0.0),
+        put_call_ratio_volume,
+        put_call_ratio_oi,
         total_call_volume,
         total_put_volume,
         total_call_oi,
@@ -959,6 +959,8 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
         note
     } else if selected_expiry.is_none() {
         Some("No options chain returned for the requested expiry. Use `--expirations` to see valid dates.".to_string())
+    } else if req.summary_only && total_call_oi == 0 && total_put_oi == 0 {
+        Some("Open interest was unavailable for the selected expiry, so OI-based metrics like max pain and put/call OI ratio are undefined.".to_string())
     } else if req.summary_only && !has_liquid_near_money {
         Some("Selected expiry returned a chain, but near-money liquidity was sparse after filters. Try a wider --near-money window or a later expiry.".to_string())
     } else {

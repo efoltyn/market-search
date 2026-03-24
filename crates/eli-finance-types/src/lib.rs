@@ -1688,8 +1688,10 @@ pub struct OptionContract {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OptionsMetrics {
     pub underlying_price: f64,
-    pub put_call_ratio_volume: f64,
-    pub put_call_ratio_oi: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub put_call_ratio_volume: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub put_call_ratio_oi: Option<f64>,
     pub total_call_volume: u64,
     pub total_put_volume: u64,
     pub total_call_oi: u64,

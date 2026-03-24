@@ -8,6 +8,10 @@
                     "tickers": {
                         "type": "string",
                         "description": "Comma-separated symbols (e.g. NVDA,AAPL,SPY,CL=F,BTC-USD)"
+                    },
+                    "returns": {
+                        "type": ["string", "boolean"],
+                        "description": "Optional trailing return windows. Pass a comma-separated string like 1mo,3mo,6mo,1y, or true to use the default set."
                     }
                 },
                 "required": ["tickers"]

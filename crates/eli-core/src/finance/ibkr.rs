@@ -992,15 +992,15 @@ fn build_options_response(
     };
     let summary_quality = if !has_liquid_near_money {
         Some("illiquid".to_string())
-    } else if !has_iv_data {
+    } else if !has_iv_data || total_call_oi == 0 || total_put_oi == 0 {
         Some("partial".to_string())
     } else {
         Some("usable".to_string())
     };
     let metrics = Some(OptionsMetrics {
         underlying_price,
-        put_call_ratio_volume: put_call_ratio_volume.unwrap_or(0.0),
-        put_call_ratio_oi: put_call_ratio_oi.unwrap_or(0.0),
+        put_call_ratio_volume,
+        put_call_ratio_oi,
         total_call_volume,
         total_put_volume,
         total_call_oi,

@@ -184,46 +184,81 @@ pub async fn fetch_bis(req: BisRequest) -> Result<BisResponse> {
 /// Parse BIS SDMX CSV. Like ECB, TIME_PERIOD and OBS_VALUE are the last two columns.
 /// Series are distinguished by the REF_AREA column.
 fn parse_bis_csv(body: &str, label_prefix: &str, unit: &str) -> Vec<BisSeries> {
-    let mut lines = body.lines();
-    let header = match lines.next() {
-        Some(h) => h,
-        None => return Vec::new(),
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(body.as_bytes());
+
+    let headers = match rdr.headers() {
+        Ok(h) => h.clone(),
+        Err(_) => return Vec::new(),
     };
 
-    let cols: Vec<&str> = header.split(',').collect();
-    let n = cols.len();
-    if n < 2 {
-        return Vec::new();
-    }
+    let time_idx = match headers.iter().position(|c| c.trim() == "TIME_PERIOD") {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let value_idx = match headers.iter().position(|c| c.trim() == "OBS_VALUE") {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let freq_idx = headers.iter().position(|c| c.trim() == "FREQ");
+    let area_idx = [
+        "REF_AREA",
+        "BORROWERS_CTY",
+        "COUNTERPART_AREA",
+        "COUNTRY",
+        "AREA",
+    ]
+    .iter()
+    .find_map(|name| headers.iter().position(|c| c.trim() == *name));
 
-    let time_idx = n - 2;
-    let value_idx = n - 1;
-    let area_idx = cols.iter().position(|c| c.trim().trim_matches('"') == "REF_AREA");
-    let freq_idx = cols.iter().position(|c| c.trim().trim_matches('"') == "FREQ");
+    let mut by_area: std::collections::BTreeMap<String, Vec<BisObservation>> =
+        std::collections::BTreeMap::new();
+    let mut freq_label: Option<String> = None;
 
-    let mut by_area: std::collections::BTreeMap<String, Vec<BisObservation>> = std::collections::BTreeMap::new();
-
-    for line in lines {
-        let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() < n { continue; }
-
-        let period = fields[time_idx].trim().trim_matches('"').to_string();
-        let value: f64 = match fields[value_idx].trim().trim_matches('"').parse() {
-            Ok(v) => v,
+    for record in rdr.records() {
+        let record = match record {
+            Ok(r) => r,
             Err(_) => continue,
         };
 
+        let period = match record.get(time_idx) {
+            Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+            _ => continue,
+        };
+        let value: f64 = match record.get(value_idx).and_then(|v| v.trim().parse().ok()) {
+            Some(v) => v,
+            None => continue,
+        };
+
         let area = area_idx
-            .and_then(|i| fields.get(i))
-            .map(|s| s.trim().trim_matches('"').to_string())
+            .and_then(|i| record.get(i))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "??".to_string());
 
-        by_area.entry(area).or_default().push(BisObservation { period, value });
+        if freq_label.is_none() {
+            freq_label = freq_idx
+                .and_then(|i| record.get(i))
+                .map(|v| match v.trim() {
+                    "D" => "daily",
+                    "W" => "weekly",
+                    "M" => "monthly",
+                    "Q" => "quarterly",
+                    "A" => "annual",
+                    _ => "unknown",
+                })
+                .map(str::to_string);
+        }
+
+        by_area
+            .entry(area)
+            .or_default()
+            .push(BisObservation { period, value });
     }
 
-    let freq_label = freq_idx
-        .map(|_| "monthly") // default; could parse from first data row
-        .unwrap_or("unknown");
+    let freq_label = freq_label.unwrap_or_else(|| "unknown".to_string());
 
     by_area
         .into_iter()
@@ -234,7 +269,7 @@ fn parse_bis_csv(body: &str, label_prefix: &str, unit: &str) -> Vec<BisSeries> {
                 label: format!("{} {}", area, label_prefix),
                 key: format!("{}/{}", area, label_prefix),
                 ref_area: area,
-                frequency: freq_label.to_string(),
+                frequency: freq_label.clone(),
                 unit: if unit.is_empty() { None } else { Some(unit.to_string()) },
                 observations: obs,
             }

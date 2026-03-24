@@ -93,7 +93,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         (None, None) => {}
     }
 
-    if tickers.is_empty() && prediction_markets.is_empty() {
+    if tickers.is_empty() && preset_stock_tickers.is_empty() && prediction_markets.is_empty() {
         anyhow::bail!("at least one ticker is required");
     }
 

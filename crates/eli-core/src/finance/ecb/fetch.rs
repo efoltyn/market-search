@@ -97,7 +97,7 @@ impl EcbPreset {
                 ("YC", "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_30Y", "EUR 30Y yield", Some("percent")),
             ],
             Self::BalanceSheet => vec![
-                ("BSI", "M.U2.N.A.T00.A.1.Z5.0000.Z01.E", "Eurosystem Total Assets (MFI)", Some("millions_eur")),
+                ("BSI", "M.U2.N.C.T00.A.1.Z5.0000.Z01.E", "Eurosystem Total Assets", Some("millions_eur")),
             ],
         }
     }

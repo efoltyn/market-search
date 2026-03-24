@@ -472,9 +472,11 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                         Some(m) if m >= 1e9 => format!(" ${:.0}B", m / 1e9),
                         _ => String::new(),
                     };
-                    // Include 1mo return if available for trend context
-                    let ret_1mo = snap.get("returns")
-                        .and_then(|r| r.get("1mo")).and_then(|r| r.as_f64())
+                    // Snapshot returns live at the top-level trailing_returns map keyed by ticker.
+                    let ret_1mo = v.get("trailing_returns")
+                        .and_then(|r| r.get(ticker))
+                        .and_then(|r| r.get("1mo"))
+                        .and_then(|r| r.as_f64())
                         .map(|r| format!(" 1mo:{:+.1}%", r * 100.0))
                         .unwrap_or_default();
                     lines.push(format!("{}:{:.2}({:+.1}%){}{}", ticker, price, ret, mcap_str, ret_1mo));
@@ -946,6 +948,17 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
                 .and_then(|t| t.as_str())
                 .ok_or_else(|| anyhow::anyhow!("tickers required"))?;
             let mut v = vec![s("finance"), s("snapshot"), s("--tickers"), s(tickers)];
+            if let Some(returns) = args.get("returns") {
+                match returns {
+                    serde_json::Value::String(periods) if !periods.trim().is_empty() => {
+                        v.extend([s("--returns"), s(periods)]);
+                    }
+                    serde_json::Value::Bool(true) => {
+                        v.extend([s("--returns"), s("1mo,3mo,6mo,1y")]);
+                    }
+                    _ => {}
+                }
+            }
             if let Some(provider) = args.get("provider").and_then(|p| p.as_str()) {
                 v.extend([s("--provider"), s(provider)]);
             }

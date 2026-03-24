@@ -48,6 +48,11 @@ pub enum EiaPreset {
     DistillateStocks,
     AllPetroleumStocks,
     NatGasStorage,
+    NatGasPrices,
+    CrudeProduction,
+    ElectricityDemand,
+    NuclearOutages,
+    Steo,
 }
 
 impl EiaPreset {
@@ -57,7 +62,12 @@ impl EiaPreset {
             "gasoline" | "gas" | "mogas" => Some(Self::GasolineStocks),
             "distillate" | "diesel" | "heating_oil" => Some(Self::DistillateStocks),
             "all" | "petroleum" | "all_stocks" => Some(Self::AllPetroleumStocks),
-            "nat_gas" | "natgas" | "natural_gas" | "ng_storage" => Some(Self::NatGasStorage),
+            "nat_gas" | "natgas" | "natural_gas" | "ng_storage" | "storage" => Some(Self::NatGasStorage),
+            "ng_prices" | "henry_hub" | "gas_prices" => Some(Self::NatGasPrices),
+            "crude_production" | "production" | "us_production" => Some(Self::CrudeProduction),
+            "electricity" | "demand" | "grid" => Some(Self::ElectricityDemand),
+            "nuclear" | "outages" | "nuclear_outages" => Some(Self::NuclearOutages),
+            "steo" | "forecast" | "outlook" => Some(Self::Steo),
             _ => None,
         }
     }
@@ -67,45 +77,94 @@ impl EiaPreset {
             Self::CrudeStocks => vec![EiaQuerySpec {
                 route: "petroleum/stoc/wstk/data/",
                 label: "US Crude Oil Stocks (excl SPR)",
-                facets: vec![("product", "EPC0"), ("process", "SAX"), ("duoarea", "NUS")],
+                facets: vec![("product", "EPC0"), ("process", "SAX"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
             }],
             Self::GasolineStocks => vec![EiaQuerySpec {
                 route: "petroleum/stoc/wstk/data/",
                 label: "US Finished Motor Gasoline Stocks",
-                facets: vec![("product", "EPM0F"), ("process", "SAE"), ("duoarea", "NUS")],
+                facets: vec![("product", "EPM0F"), ("process", "SAE"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
             }],
             Self::DistillateStocks => vec![EiaQuerySpec {
                 route: "petroleum/stoc/wstk/data/",
                 label: "US Distillate Fuel Oil Stocks",
-                facets: vec![("product", "EPD0"), ("process", "SAE"), ("duoarea", "NUS")],
+                facets: vec![("product", "EPD0"), ("process", "SAE"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
             }],
             Self::AllPetroleumStocks => vec![
                 EiaQuerySpec {
                     route: "petroleum/stoc/wstk/data/",
                     label: "US Crude Oil Stocks (excl SPR)",
-                    facets: vec![("product", "EPC0"), ("process", "SAX"), ("duoarea", "NUS")],
+                    facets: vec![("product", "EPC0"), ("process", "SAX"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
                 },
                 EiaQuerySpec {
                     route: "petroleum/stoc/wstk/data/",
                     label: "US Finished Motor Gasoline Stocks",
-                    facets: vec![("product", "EPM0F"), ("process", "SAE"), ("duoarea", "NUS")],
+                    facets: vec![("product", "EPM0F"), ("process", "SAE"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
                 },
                 EiaQuerySpec {
                     route: "petroleum/stoc/wstk/data/",
                     label: "US Distillate Fuel Oil Stocks",
-                    facets: vec![("product", "EPD0"), ("process", "SAE"), ("duoarea", "NUS")],
+                    facets: vec![("product", "EPD0"), ("process", "SAE"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
                 },
                 EiaQuerySpec {
                     route: "petroleum/stoc/wstk/data/",
                     label: "Cushing OK Crude Oil Stocks",
-                    facets: vec![("product", "EPC0"), ("process", "SAX"), ("duoarea", "YCUOK")],
+                    facets: vec![("product", "EPC0"), ("process", "SAX"), ("duoarea", "YCUOK")], frequency: "weekly", data_col: "value",
                 },
             ],
             Self::NatGasStorage => vec![EiaQuerySpec {
                 route: "natural-gas/stor/wkly/data/",
                 label: "Lower 48 Natural Gas Working Storage",
-                facets: vec![("process", "SWO"), ("duoarea", "R48")],
+                facets: vec![("process", "SWO"), ("duoarea", "R48")], frequency: "weekly", data_col: "value",
             }],
+            Self::NatGasPrices => vec![EiaQuerySpec {
+                route: "natural-gas/pri/fut/data/",
+                label: "Henry Hub Natural Gas Futures",
+                facets: vec![("series", "RNGC1")], frequency: "daily", data_col: "value",
+            }],
+            Self::CrudeProduction => vec![EiaQuerySpec {
+                route: "petroleum/crd/crpdn/data/",
+                label: "US Crude Oil Production",
+                facets: vec![],
+                frequency: "monthly", data_col: "value",
+            }],
+            Self::ElectricityDemand => vec![EiaQuerySpec {
+                route: "electricity/rto/daily-region-data/data/",
+                label: "US Electricity Demand (daily)",
+                facets: vec![("type", "D")], frequency: "daily", data_col: "value",
+            }],
+            Self::NuclearOutages => vec![EiaQuerySpec {
+                route: "nuclear-outages/us-nuclear-outages/data/",
+                label: "US Nuclear Outages",
+                facets: vec![],
+                frequency: "daily", data_col: "outage",
+            // NOTE: this endpoint uses data[0]=outage not data[0]=value
+            }],
+            Self::Steo => vec![
+                EiaQuerySpec {
+                    route: "steo/data/",
+                    label: "WTI Crude Price Forecast",
+                    facets: vec![("seriesId", "WTIPUUS")],
+                    frequency: "monthly", data_col: "value",
+                },
+                EiaQuerySpec {
+                    route: "steo/data/",
+                    label: "Brent Crude Price Forecast",
+                    facets: vec![("seriesId", "BREPUUS")],
+                    frequency: "monthly", data_col: "value",
+                },
+                EiaQuerySpec {
+                    route: "steo/data/",
+                    label: "Henry Hub Price Forecast",
+                    facets: vec![("seriesId", "NGHHUUS")],
+                    frequency: "monthly", data_col: "value",
+                },
+                EiaQuerySpec {
+                    route: "steo/data/",
+                    label: "US Crude Production Forecast",
+                    facets: vec![("seriesId", "COPRPUS")],
+                    frequency: "monthly", data_col: "value",
+                },
+            ],
         }
     }
 }
@@ -114,6 +173,8 @@ struct EiaQuerySpec {
     route: &'static str,
     label: &'static str,
     facets: Vec<(&'static str, &'static str)>,
+    frequency: &'static str, // weekly, monthly, daily, annual
+    data_col: &'static str,  // usually "value", nuclear uses "outage"
 }
 
 pub async fn fetch_eia(req: EiaRequest) -> Result<EiaResponse> {
@@ -141,6 +202,7 @@ pub async fn fetch_eia(req: EiaRequest) -> Result<EiaResponse> {
                     (k, v)
                 })
                 .collect(),
+            frequency: "weekly", data_col: "value",
         }]
     } else {
         return Err(Error::InvalidInput(
@@ -154,8 +216,8 @@ pub async fn fetch_eia(req: EiaRequest) -> Result<EiaResponse> {
 
     for spec in &queries {
         let mut url = format!(
-            "{}/{}?api_key={}&frequency=weekly&data[0]=value&sort[0][column]=period&sort[0][direction]=desc&length={}",
-            EIA_BASE, spec.route, api_key, length
+            "{}/{}?api_key={}&frequency={}&data[0]={}&sort[0][column]=period&sort[0][direction]=desc&length={}",
+            EIA_BASE, spec.route, api_key, spec.frequency, spec.data_col, length
         );
         for (facet_key, facet_val) in &spec.facets {
             url.push_str(&format!("&facets[{}][]={}", facet_key, facet_val));
