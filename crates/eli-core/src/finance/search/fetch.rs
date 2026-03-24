@@ -70,9 +70,8 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // FRED catalog search: find macro series by name (e.g. "michigan consumer sentiment" → UMCSENT).
-    // Hardcoded catalog — instant, no API key needed, always works.
-    results.extend(search_fred_catalog(&query));
+    // FRED search: live API if key available (800K+ series), else hardcoded catalog (60 series).
+    results.extend(search_fred_live_or_catalog(&query).await);
 
     // Policy-driven macro suggestions from catalog.
     let macro_items: Vec<SearchItem> = resolved_policy
@@ -141,6 +140,81 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
         results,
         macro_suggestions: suggestions,
     })
+}
+
+/// Search FRED series. Tries the live API first (if FRED_API_KEY is available),
+/// falls back to the hardcoded catalog. Live search covers 800K+ series vs 60 hardcoded.
+async fn search_fred_live_or_catalog(query: &str) -> Vec<SearchItem> {
+    // Try live FRED API search first.
+    if let Ok(api_key) = crate::finance::credentials::resolve_fred_api_key() {
+        if let Ok(results) = search_fred_api(query, &api_key).await {
+            if !results.is_empty() {
+                return results;
+            }
+        }
+    }
+    // Fall back to hardcoded catalog (no key needed, instant).
+    search_fred_catalog(query)
+}
+
+/// Search FRED via fred/series/search API. Returns up to 20 results ranked by popularity.
+async fn search_fred_api(query: &str, api_key: &str) -> Result<Vec<SearchItem>> {
+    let client = &*crate::finance::shared_client::GENERAL;
+    let url = format!(
+        "https://api.stlouisfed.org/fred/series/search?search_text={}&api_key={}&file_type=json&limit=20&order_by=search_rank&sort_order=desc",
+        urlencoding::encode(query),
+        api_key,
+    );
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| Error::Provider(format!("fred search failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Ok(Vec::new()); // silently fall back to catalog
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| Error::Provider(format!("fred search parse failed: {e}")))?;
+
+    let series = body
+        .get("seriess")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut items = Vec::new();
+    for s in &series {
+        let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let freq = s.get("frequency_short").and_then(|v| v.as_str()).unwrap_or("");
+        let units = s.get("units_short").and_then(|v| v.as_str()).unwrap_or("");
+        let sa = s.get("seasonal_adjustment_short").and_then(|v| v.as_str()).unwrap_or("");
+        let popularity = s.get("popularity").and_then(|v| v.as_i64()).unwrap_or(0);
+        let last_updated = s.get("last_updated").and_then(|v| v.as_str()).unwrap_or("");
+
+        if id.is_empty() { continue; }
+
+        let name = if !freq.is_empty() || !units.is_empty() {
+            format!("{} [{} {} {}]", title, freq, units, sa).trim_end().to_string()
+        } else {
+            title
+        };
+
+        items.push(SearchItem {
+            symbol: id,
+            name: Some(name),
+            exchange: Some("FRED".to_string()),
+            asset_type: Some(format!("MACRO (pop:{}, updated:{})", popularity, &last_updated[..10.min(last_updated.len())])),
+            score: Some(popularity as f64),
+        });
+    }
+
+    Ok(items)
 }
 
 /// Search common FRED macro series by name. Hardcoded catalog covers 60+ popular series.
