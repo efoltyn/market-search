@@ -10,13 +10,12 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
     if query.is_empty() {
         return Err(Error::InvalidInput("search query is required".to_string()));
     }
-    let policy_mode = req.policy_mode.unwrap_or_default();
-    let policy_file = req.policy_file.as_deref().map(std::path::Path::new);
-    let resolved_policy = crate::finance::policy::load_policy(policy_file, policy_mode)?;
 
     let client = &*crate::finance::shared_client::GENERAL;
 
-    let resp = client
+    // Yahoo search — instrument/ticker lookup.
+    let mut yahoo_results = Vec::new();
+    let yahoo_resp = client
         .get(YAHOO_SEARCH_URL)
         .query(&[
             ("q", query.as_str()),
@@ -25,134 +24,116 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
         ])
         .header("User-Agent", "Mozilla/5.0")
         .send()
-        .await
-        .map_err(|e| Error::Provider(format!("yahoo search fetch failed: {e}")))?;
+        .await;
 
-    if !resp.status().is_success() {
-        return Err(Error::Provider(format!(
-            "yahoo search fetch failed: http {}",
-            resp.status()
-        )));
-    }
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| Error::Provider(format!("yahoo search parse failed: {e}")))?;
-
-    let mut yahoo_results = Vec::new();
-    if let Some(quotes) = json["quotes"].as_array() {
-        for q in quotes {
-            let symbol = q["symbol"].as_str().unwrap_or_default();
-            if symbol.is_empty() {
-                continue;
+    if let Ok(resp) = yahoo_resp {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(quotes) = json["quotes"].as_array() {
+                    for q in quotes {
+                        let symbol = q["symbol"].as_str().unwrap_or_default();
+                        if symbol.is_empty() { continue; }
+                        yahoo_results.push(SearchItem {
+                            symbol: symbol.to_string(),
+                            name: q["shortname"]
+                                .as_str()
+                                .or(q["longname"].as_str())
+                                .map(|s| s.to_string()),
+                            exchange: Some(q["exchange"].as_str().unwrap_or_default().to_string()),
+                            asset_type: q["quoteType"].as_str().map(|s| s.to_string()),
+                            score: q["score"].as_f64(),
+                        });
+                    }
+                }
             }
-            let score = q["score"].as_f64().unwrap_or(0.0);
-            let exchange = q["exchange"].as_str().unwrap_or_default();
-
-            yahoo_results.push(SearchItem {
-                symbol: symbol.to_string(),
-                name: q["shortname"]
-                    .as_str()
-                    .or(q["longname"].as_str())
-                    .map(|s| s.to_string()),
-                exchange: Some(exchange.to_string()),
-                asset_type: q["quoteType"].as_str().map(|s| s.to_string()),
-                score: Some(score),
-            });
         }
     }
 
-    // Sort by boosted score
-    yahoo_results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // FRED search: live API if key available (800K+ series), else hardcoded catalog (60 series).
-    // Preserve each provider's own ordering; do not try to normalize Yahoo and FRED scores.
+    // FRED search — macro series discovery.
+    // Live API if key available (800K+ series), else hardcoded catalog.
+    // Preserve FRED's native ordering. Don't stuff popularity into score.
     let fred_results = search_fred_live_or_catalog(&query).await;
-    let prefer_fred = prefers_fred_search(&query);
-    let mut results = merge_search_results(yahoo_results, fred_results, prefer_fred);
 
-    // Policy-driven macro suggestions from catalog.
-    let macro_items: Vec<SearchItem> = resolved_policy
-        .policy
-        .macro_catalog
-        .indicators
-        .iter()
-        .map(|ind| SearchItem {
-            symbol: ind.id.clone(),
-            name: Some(ind.name.clone()),
-            exchange: Some("FRED".into()),
-            asset_type: Some("MACRO".into()),
-            score: None,
-        })
-        .collect();
+    // Route by intent.
+    let preferred_provider = determine_preferred_provider(&query, &yahoo_results, &fred_results);
 
-    let query_lower = query.to_lowercase();
-    let suggestions = if query_lower.len() > 2 {
-        macro_items
-            .into_iter()
-            .filter(|item| {
-                item.symbol.to_lowercase().contains(&query_lower)
-                    || item
-                        .name
-                        .as_ref()
-                        .map(|n| n.to_lowercase().contains(&query_lower))
-                        .unwrap_or(false)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    if results.is_empty() && !suggestions.is_empty() {
-        results = suggestions.clone();
-    }
+    let latency_ms = started.elapsed().as_millis() as u64;
 
-    let data_as_of = Some(generated_at);
     Ok(SearchResponse {
         query,
         generated_at,
-        schema_version: "finance.search.v2".to_string(),
-        freshness_summary: FreshnessSummary {
-            data_as_of,
-            max_age_seconds: Some(0),
-            stale_count: 0,
-        },
-        applied_policy: AppliedPolicy {
-            mode: resolved_policy.mode,
-            sources: resolved_policy.sources,
-        },
+        schema_version: "finance.search.v3".to_string(),
+        preferred_provider,
+        yahoo_results,
+        fred_results,
         decision_trace: vec![
-            "policy_driven_macro_suggestions=true".to_string(),
-            format!(
-                "provider_order={}",
-                if prefer_fred { "fred,yahoo" } else { "yahoo,fred" }
-            ),
-            format!("results={}", results.len()),
-            format!("macro_suggestions={}", suggestions.len()),
+            format!("latency_ms={}", latency_ms),
         ],
-        run_meta: RunMeta {
-            latency_ms: started.elapsed().as_millis() as u64,
-            stdout_chars: 0,
-            stored_bytes: 0,
-            coverage_counts: std::collections::BTreeMap::from([
-                ("results".to_string(), results.len()),
-                ("macro_suggestions".to_string(), suggestions.len()),
-            ]),
-            token_efficiency: None,
-        },
-        results,
-        macro_suggestions: suggestions,
     })
+}
+
+/// Determine which provider is most relevant for this query.
+fn determine_preferred_provider(
+    query: &str,
+    yahoo: &[SearchItem],
+    fred: &[SearchItem],
+) -> String {
+    let raw = query.trim();
+    let q = raw.to_ascii_lowercase();
+
+    if raw.is_empty() {
+        return "yahoo".to_string();
+    }
+
+    // Explicit macro intent → fred
+    const FRED_TERMS: &[&str] = &[
+        "inflation", "cpi", "pce", "ppi", "gdp", "unemployment", "employment", "payroll",
+        "jobs", "labor", "mortgage rate", "yield", "treasury", "fed fund", "federal funds",
+        "recession", "sentiment", "consumer confidence", "housing starts", "claims",
+        "delinquency", "money supply", "m2", "balance sheet", "debt to gdp",
+    ];
+    if FRED_TERMS.iter().any(|term| q.contains(term)) {
+        return "fred".to_string();
+    }
+
+    // Explicit instrument intent → yahoo
+    const YAHOO_TERMS: &[&str] = &[
+        "stock", "stocks", "share", "shares", "etf", "etfs", "option", "options",
+        "future", "futures", "earnings", "dividend", "ipo",
+    ];
+    if YAHOO_TERMS.iter().any(|term| q.contains(term)) {
+        return "yahoo".to_string();
+    }
+
+    // Ticker-like input (short, uppercase, no spaces) → yahoo
+    let symbol_charset = raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '^' | '-' | '=' | ':'));
+    let all_caps_like = raw.chars().all(|c| !c.is_ascii_lowercase());
+    let short_alpha = raw.len() <= 5 && raw.chars().all(|c| c.is_ascii_alphabetic());
+    let ticker_like = !raw.contains(' ') && symbol_charset && (all_caps_like || short_alpha);
+    if ticker_like {
+        return "yahoo".to_string();
+    }
+
+    // Multi-word query with FRED results → fred
+    if raw.contains(' ') && !fred.is_empty() {
+        return "fred".to_string();
+    }
+
+    // Default: whichever has results
+    if !yahoo.is_empty() && fred.is_empty() {
+        "yahoo".to_string()
+    } else if yahoo.is_empty() && !fred.is_empty() {
+        "fred".to_string()
+    } else {
+        "both".to_string()
+    }
 }
 
 /// Search FRED series. Tries the live API first (if FRED_API_KEY is available),
 /// falls back to the hardcoded catalog. Live search covers 800K+ series vs 60 hardcoded.
 async fn search_fred_live_or_catalog(query: &str) -> Vec<SearchItem> {
-    // Try live FRED API search first.
     if let Ok(api_key) = crate::finance::credentials::resolve_fred_api_key() {
         if let Ok(results) = search_fred_api(query, &api_key).await {
             if !results.is_empty() {
@@ -160,7 +141,6 @@ async fn search_fred_live_or_catalog(query: &str) -> Vec<SearchItem> {
             }
         }
     }
-    // Fall back to hardcoded catalog (no key needed, instant).
     search_fred_catalog(query)
 }
 
@@ -180,7 +160,7 @@ async fn search_fred_api(query: &str, api_key: &str) -> Result<Vec<SearchItem>> 
         .map_err(|e| Error::Provider(format!("fred search failed: {e}")))?;
 
     if !resp.status().is_success() {
-        return Ok(Vec::new()); // silently fall back to catalog
+        return Ok(Vec::new());
     }
 
     let body: serde_json::Value = resp
@@ -201,11 +181,10 @@ async fn search_fred_api(query: &str, api_key: &str) -> Result<Vec<SearchItem>> 
         let freq = s.get("frequency_short").and_then(|v| v.as_str()).unwrap_or("");
         let units = s.get("units_short").and_then(|v| v.as_str()).unwrap_or("");
         let sa = s.get("seasonal_adjustment_short").and_then(|v| v.as_str()).unwrap_or("");
-        let popularity = s.get("popularity").and_then(|v| v.as_i64()).unwrap_or(0);
-        let last_updated = s.get("last_updated").and_then(|v| v.as_str()).unwrap_or("");
 
         if id.is_empty() { continue; }
 
+        // Build descriptive name with metadata inline
         let name = if !freq.is_empty() || !units.is_empty() {
             format!("{} [{} {} {}]", title, freq, units, sa).trim_end().to_string()
         } else {
@@ -216,140 +195,55 @@ async fn search_fred_api(query: &str, api_key: &str) -> Result<Vec<SearchItem>> 
             symbol: id,
             name: Some(name),
             exchange: Some("FRED".to_string()),
-            asset_type: Some(format!("MACRO (pop:{}, updated:{})", popularity, &last_updated[..10.min(last_updated.len())])),
-            score: Some(popularity as f64),
+            asset_type: Some("MACRO".to_string()),
+            score: None, // preserve FRED's native search_rank ordering, don't fake a score
         });
     }
 
     Ok(items)
 }
 
-fn merge_search_results(
-    yahoo_results: Vec<SearchItem>,
-    fred_results: Vec<SearchItem>,
-    prefer_fred: bool,
-) -> Vec<SearchItem> {
-    let mut seen = std::collections::HashSet::new();
-    let mut merged = Vec::new();
-    let ordered_groups = if prefer_fred {
-        [fred_results, yahoo_results]
-    } else {
-        [yahoo_results, fred_results]
-    };
-
-    for group in ordered_groups {
-        for item in group {
-            let key = item.symbol.to_ascii_uppercase();
-            if seen.insert(key) {
-                merged.push(item);
-            }
-        }
-    }
-
-    merged
-}
-
-fn prefers_fred_search(query: &str) -> bool {
-    let raw = query.trim();
-    let q = raw.to_ascii_lowercase();
-    if raw.is_empty() {
-        return false;
-    }
-
-    const FRED_INTENT_TERMS: &[&str] = &[
-        "inflation", "cpi", "pce", "ppi", "gdp", "unemployment", "employment", "payroll",
-        "jobs", "labor", "mortgage", "rate", "yield", "treasury", "fed", "federal funds",
-        "recession", "sentiment", "consumer", "housing", "claims", "delinquency",
-    ];
-    if FRED_INTENT_TERMS.iter().any(|term| q.contains(term)) {
-        return true;
-    }
-
-    const YAHOO_INTENT_TERMS: &[&str] = &[
-        "stock", "stocks", "share", "shares", "etf", "etfs", "option", "options", "call",
-        "calls", "put", "puts", "future", "futures", "earnings", "dividend",
-    ];
-    if YAHOO_INTENT_TERMS.iter().any(|term| q.contains(term)) {
-        return false;
-    }
-
-    let symbol_charset = raw
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '^' | '-' | '=' | ':'));
-    let all_caps_like = raw.chars().all(|c| !c.is_ascii_lowercase());
-    let short_alpha = raw.len() <= 5 && raw.chars().all(|c| c.is_ascii_alphabetic());
-    let ticker_like = !raw.contains(' ') && symbol_charset && (all_caps_like || short_alpha);
-    if ticker_like {
-        return false;
-    }
-
-    raw.contains(' ')
-}
-
-/// Search common FRED macro series by name. Hardcoded catalog covers 60+ popular series.
-/// No API key needed — instant, offline, always works.
+/// Hardcoded FRED catalog fallback — works without API key.
 fn search_fred_catalog(query: &str) -> Vec<SearchItem> {
     static FRED_CATALOG: &[(&str, &str)] = &[
         ("UMCSENT", "University of Michigan Consumer Sentiment"),
-        ("UMCSENT1", "University of Michigan Consumer Sentiment 1-Year Ahead"),
         ("MICH", "University of Michigan Inflation Expectation"),
         ("UNRATE", "Unemployment Rate"),
         ("PAYEMS", "All Employees, Total Nonfarm"),
         ("CPIAUCSL", "Consumer Price Index for All Urban Consumers"),
-        ("CPILFESL", "Consumer Price Index Less Food and Energy (Core CPI)"),
-        ("PCEPI", "Personal Consumption Expenditures Price Index"),
-        ("PCEPILFE", "Personal Consumption Expenditures Excluding Food and Energy (Core PCE)"),
+        ("CPILFESL", "Core CPI (Less Food and Energy)"),
+        ("PCEPILFE", "Core PCE (Fed's 2% target measure)"),
         ("GDP", "Gross Domestic Product"),
         ("GDPC1", "Real Gross Domestic Product"),
         ("FEDFUNDS", "Federal Funds Effective Rate"),
         ("DFF", "Federal Funds Effective Rate (Daily)"),
-        ("T10Y2Y", "10-Year Treasury Minus 2-Year Treasury Spread"),
-        ("T10Y3M", "10-Year Treasury Minus 3-Month Treasury Spread"),
-        ("DGS1MO", "1-Month Treasury Constant Maturity Rate"),
-        ("DGS3MO", "3-Month Treasury Constant Maturity Rate"),
-        ("DGS6MO", "6-Month Treasury Constant Maturity Rate"),
-        ("DGS1", "1-Year Treasury Constant Maturity Rate"),
-        ("DGS2", "2-Year Treasury Constant Maturity Rate"),
-        ("DGS5", "5-Year Treasury Constant Maturity Rate"),
-        ("DGS10", "10-Year Treasury Constant Maturity Rate"),
-        ("DGS20", "20-Year Treasury Constant Maturity Rate"),
-        ("DGS30", "30-Year Treasury Constant Maturity Rate"),
-        ("WALCL", "Federal Reserve Total Assets (Balance Sheet)"),
+        ("T10Y2Y", "10-Year Minus 2-Year Spread"),
+        ("T10Y3M", "10-Year Minus 3-Month Spread"),
+        ("DGS2", "2-Year Treasury Rate"),
+        ("DGS10", "10-Year Treasury Rate"),
+        ("DGS30", "30-Year Treasury Rate"),
+        ("WALCL", "Fed Total Assets (Balance Sheet)"),
         ("WTREGEN", "Treasury General Account (TGA)"),
-        ("RRPONTSYD", "Overnight Reverse Repurchase Agreements (RRP)"),
-        ("GFDEGDQ188S", "Federal Debt to GDP Ratio"),
-        ("MORTGAGE30US", "30-Year Fixed Rate Mortgage Average"),
-        ("DCOILWTICO", "Crude Oil Prices: WTI"),
-        ("DCOILBRENTEU", "Crude Oil Prices: Brent"),
-        ("GOLDAMGBD228NLBM", "Gold Fixing Price, London"),
-        ("VIXCLS", "CBOE Volatility Index: VIX"),
-        ("NASDAQCOM", "NASDAQ Composite Index"),
-        ("SP500", "S&P 500 Index"),
-        ("DTWEXBGS", "Trade Weighted U.S. Dollar Index"),
-        ("DEXUSEU", "U.S./Euro Foreign Exchange Rate"),
-        ("DEXJPUS", "Japan/U.S. Foreign Exchange Rate"),
-        ("DEXUSUK", "U.S./U.K. Foreign Exchange Rate"),
+        ("RRPONTSYD", "Overnight Reverse Repo (RRP)"),
+        ("MORTGAGE30US", "30-Year Mortgage Rate"),
+        ("DCOILWTICO", "WTI Crude Oil Price"),
+        ("DCOILBRENTEU", "Brent Crude Oil Price"),
+        ("GOLDAMGBD228NLBM", "Gold Price (London Fix)"),
+        ("VIXCLS", "VIX"),
+        ("SP500", "S&P 500"),
+        ("DTWEXBGS", "Trade-Weighted Dollar Index"),
         ("CSUSHPINSA", "Case-Shiller Home Price Index"),
         ("HOUST", "Housing Starts"),
         ("RSAFS", "Advance Retail Sales"),
-        ("INDPRO", "Industrial Production Index"),
-        ("PERMIT", "New Privately-Owned Housing Units Authorized"),
-        ("M2SL", "M2 Money Stock"),
-        ("ICSA", "Initial Claims (Jobless Claims)"),
-        ("CCSA", "Continued Claims"),
-        ("JTSJOL", "Job Openings: JOLTS"),
-        ("CIVPART", "Labor Force Participation Rate"),
-        ("A191RL1Q225SBEA", "Real GDP Growth Rate (Quarterly)"),
-        ("CPALTT01USM657N", "CPI Annual Change"),
-        ("BAMLH0A0HYM2", "ICE BofA High Yield Spread"),
-        ("BAMLC0A0CM", "ICE BofA Corporate Bond Spread"),
-        ("TEDRATE", "TED Spread"),
-        ("WILL5000IND", "Wilshire 5000 Total Market Index"),
-        ("STLFSI4", "St. Louis Fed Financial Stress Index"),
-        ("USREC", "NBER Recession Indicator"),
+        ("INDPRO", "Industrial Production"),
+        ("M2SL", "M2 Money Supply"),
+        ("ICSA", "Initial Jobless Claims"),
+        ("JTSJOL", "JOLTS Job Openings"),
+        ("BAMLH0A0HYM2", "High Yield Credit Spread"),
+        ("BAMLC0A0CM", "Investment Grade Credit Spread"),
+        ("STLFSI4", "St. Louis Financial Stress Index"),
         ("SAHMREALTIME", "Sahm Rule Recession Indicator"),
-        ("PSAVERT", "Personal Saving Rate"),
-        ("W875RX1", "Real Disposable Personal Income"),
+        ("USREC", "NBER Recession Indicator"),
     ];
 
     let q = query.to_lowercase();
@@ -360,7 +254,6 @@ fn search_fred_catalog(query: &str) -> Vec<SearchItem> {
         .filter(|(id, name)| {
             let id_lower = id.to_lowercase();
             let name_lower = name.to_lowercase();
-            // Match if all query words appear in either the ID or name
             words.iter().all(|w| id_lower.contains(w) || name_lower.contains(w))
         })
         .map(|(id, name)| SearchItem {
@@ -368,7 +261,7 @@ fn search_fred_catalog(query: &str) -> Vec<SearchItem> {
             name: Some(name.to_string()),
             exchange: Some("FRED".to_string()),
             asset_type: Some("MACRO".to_string()),
-            score: Some(100.0), // rank above Yahoo noise
+            score: None,
         })
         .collect()
 }

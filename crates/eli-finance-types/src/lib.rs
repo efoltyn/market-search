@@ -850,16 +850,12 @@ pub struct SearchResponse {
     pub generated_at: DateTime<Utc>,
     #[serde(default)]
     pub schema_version: String,
-    #[serde(default)]
-    pub freshness_summary: FreshnessSummary,
-    #[serde(default)]
-    pub applied_policy: AppliedPolicy,
+    /// "yahoo" | "fred" | "both" — which provider the agent should read first.
+    pub preferred_provider: String,
+    pub yahoo_results: Vec<SearchItem>,
+    pub fred_results: Vec<SearchItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decision_trace: Vec<String>,
-    #[serde(default)]
-    pub run_meta: RunMeta,
-    pub results: Vec<SearchItem>,
-    pub macro_suggestions: Vec<SearchItem>, // Curated FRED-like IDs
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

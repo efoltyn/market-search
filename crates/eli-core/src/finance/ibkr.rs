@@ -414,34 +414,13 @@ pub async fn fetch_ibkr_search(req: &SearchRequest) -> Result<SearchResponse> {
     Ok(SearchResponse {
         query,
         generated_at,
-        schema_version: "finance.search.v2".to_string(),
-        freshness_summary: FreshnessSummary {
-            data_as_of: Some(generated_at),
-            max_age_seconds: Some(0),
-            stale_count: 0,
-        },
-        applied_policy: AppliedPolicy {
-            mode: resolved_policy.mode,
-            sources: resolved_policy.sources,
-        },
+        schema_version: "finance.search.v3".to_string(),
+        preferred_provider: "yahoo".to_string(), // IBKR results are instrument-like
+        yahoo_results: results,
+        fred_results: suggestions,
         decision_trace: vec![
             "provider=ibkr".to_string(),
-            "policy_driven_macro_suggestions=true".to_string(),
-            format!("results={}", results.len()),
-            format!("macro_suggestions={}", suggestions.len()),
         ],
-        run_meta: RunMeta {
-            latency_ms: started.elapsed().as_millis() as u64,
-            stdout_chars: 0,
-            stored_bytes: 0,
-            coverage_counts: std::collections::BTreeMap::from([
-                ("results".to_string(), results.len()),
-                ("macro_suggestions".to_string(), suggestions.len()),
-            ]),
-            token_efficiency: None,
-        },
-        results,
-        macro_suggestions: suggestions,
     })
 }
 

@@ -2233,19 +2233,19 @@ async fn try_agent_direct_route(
         .map_err(|e| anyhow::anyhow!(e))
         .context("direct route search")?;
         let symbol = search
-            .results
+            .yahoo_results
             .iter()
             .find(|x| {
                 x.asset_type
                     .as_ref()
-                    .map(|t| {
+                    .map(|t: &String| {
                         let tt = t.to_ascii_uppercase();
                         tt == "EQUITY" || tt == "ETF" || tt == "INDEX"
                     })
                     .unwrap_or(true)
             })
             .map(|x| x.symbol.clone())
-            .or_else(|| search.results.first().map(|x| x.symbol.clone()));
+            .or_else(|| search.yahoo_results.first().or(search.fred_results.first()).map(|x| x.symbol.clone()));
         let Some(symbol) = symbol else {
             return Ok(None);
         };
@@ -2654,19 +2654,19 @@ fn extract_subject_after_for(task: &str) -> Option<String> {
 
 fn pick_primary_symbol(search: &eli_core::finance::SearchResponse) -> Option<String> {
     search
-        .results
+        .yahoo_results
         .iter()
         .find(|x| {
             x.asset_type
                 .as_ref()
-                .map(|t| {
+                .map(|t: &String| {
                     let tt = t.to_ascii_uppercase();
                     tt == "EQUITY" || tt == "ETF" || tt == "INDEX"
                 })
                 .unwrap_or(true)
         })
         .map(|x| x.symbol.clone())
-        .or_else(|| search.results.first().map(|x| x.symbol.clone()))
+        .or_else(|| search.yahoo_results.first().or(search.fred_results.first()).map(|x| x.symbol.clone()))
 }
 
 fn infer_symbol_from_text(text: &str) -> Option<String> {
