@@ -92,7 +92,17 @@ fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// When true, return full raw JSON inline (for HTTP/web clients that can't read files).
+/// When false, use the summary + file system (for Claude Code stdio).
 async fn mcp_tools_call(id: serde_json::Value, request: &serde_json::Value) -> serde_json::Value {
+    mcp_tools_call_inner(id, request, false).await
+}
+
+async fn mcp_tools_call_full(id: serde_json::Value, request: &serde_json::Value) -> serde_json::Value {
+    mcp_tools_call_inner(id, request, true).await
+}
+
+async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value, full_output: bool) -> serde_json::Value {
     let params = match request.get("params") {
         Some(p) => p,
         None => {
@@ -138,15 +148,17 @@ async fn mcp_tools_call(id: serde_json::Value, request: &serde_json::Value) -> s
 
     match mcp_run_subprocess(cli_args).await {
         Ok(output) => {
-            // File-first, summary-back: ALWAYS save full output to file.
-            // Return only a compact synthesis (500-2000 chars) + file path.
-            // The AI reads the file only when it needs drill-down detail.
+            // HTTP mode (web/phone clients): return full raw JSON inline.
+            // These clients can't read files — they need the data in the response.
             //
-            // Small tools (< 2K chars) are returned inline — they're already compact enough.
-            // Everything else: save to file, build per-tool summary, return summary.
+            // Stdio mode (Claude Code): summary + file. The AI reads the file
+            // only when it needs drill-down detail.
             const INLINE_THRESHOLD: usize = 2_000;
 
-            let response_text = if output.len() <= INLINE_THRESHOLD {
+            let response_text = if full_output {
+                // HTTP mode: return everything inline
+                output
+            } else if output.len() <= INLINE_THRESHOLD {
                 // Small outputs: return inline (yield_curve, rate_path, auctions, etc.)
                 output
             } else {
@@ -1677,7 +1689,7 @@ async fn cmd_mcp_http(port: u16) -> Result<()> {
 
     let app = Router::new()
         .route("/", get(mcp_http_health))
-        .route("/mcp", post(mcp_http_handle))
+        .route("/mcp", get(mcp_http_health).post(mcp_http_handle))
         .layer(cors);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
@@ -1734,7 +1746,7 @@ async fn mcp_http_handle(
     let response = match method.as_str() {
         "initialize" => mcp_initialize(id),
         "tools/list" => mcp_tools_list(id),
-        "tools/call" => mcp_tools_call(id, &request).await,
+        "tools/call" => mcp_tools_call_full(id, &request).await,
         _ => json!({
             "jsonrpc": "2.0",
             "id": id,

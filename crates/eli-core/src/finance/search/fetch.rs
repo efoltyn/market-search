@@ -40,7 +40,7 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
         .await
         .map_err(|e| Error::Provider(format!("yahoo search parse failed: {e}")))?;
 
-    let mut results = Vec::new();
+    let mut yahoo_results = Vec::new();
     if let Some(quotes) = json["quotes"].as_array() {
         for q in quotes {
             let symbol = q["symbol"].as_str().unwrap_or_default();
@@ -50,7 +50,7 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
             let score = q["score"].as_f64().unwrap_or(0.0);
             let exchange = q["exchange"].as_str().unwrap_or_default();
 
-            results.push(SearchItem {
+            yahoo_results.push(SearchItem {
                 symbol: symbol.to_string(),
                 name: q["shortname"]
                     .as_str()
@@ -64,36 +64,17 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
     }
 
     // Sort by boosted score
-    results.sort_by(|a, b| {
+    yahoo_results.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // FRED search: live API if key available (800K+ series), else hardcoded catalog (60 series).
-    // Dedupe against Yahoo results by symbol, then merge by score.
+    // Preserve each provider's own ordering; do not try to normalize Yahoo and FRED scores.
     let fred_results = search_fred_live_or_catalog(&query).await;
-    {
-        let existing_symbols: std::collections::HashSet<String> = results
-            .iter()
-            .map(|r| r.symbol.to_ascii_uppercase())
-            .collect();
-        for fred_item in fred_results {
-            if !existing_symbols.contains(&fred_item.symbol.to_ascii_uppercase()) {
-                results.push(fred_item);
-            }
-        }
-        // Re-sort: FRED items with high popularity should interleave with Yahoo results,
-        // not just sit at the bottom. Yahoo scores are typically 10K-100K range;
-        // FRED popularity is 0-100. Boost FRED items so popular series rank competitively.
-        results.sort_by(|a, b| {
-            let score_a = a.score.unwrap_or(0.0)
-                + if a.exchange.as_deref() == Some("FRED") { 5000.0 } else { 0.0 };
-            let score_b = b.score.unwrap_or(0.0)
-                + if b.exchange.as_deref() == Some("FRED") { 5000.0 } else { 0.0 };
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
-        });
-    }
+    let prefer_fred = prefers_fred_search(&query);
+    let mut results = merge_search_results(yahoo_results, fred_results, prefer_fred);
 
     // Policy-driven macro suggestions from catalog.
     let macro_items: Vec<SearchItem> = resolved_policy
@@ -146,6 +127,10 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
         },
         decision_trace: vec![
             "policy_driven_macro_suggestions=true".to_string(),
+            format!(
+                "provider_order={}",
+                if prefer_fred { "fred,yahoo" } else { "yahoo,fred" }
+            ),
             format!("results={}", results.len()),
             format!("macro_suggestions={}", suggestions.len()),
         ],
@@ -179,7 +164,7 @@ async fn search_fred_live_or_catalog(query: &str) -> Vec<SearchItem> {
     search_fred_catalog(query)
 }
 
-/// Search FRED via fred/series/search API. Returns up to 20 results ranked by popularity.
+/// Search FRED via fred/series/search API. Preserves FRED's search ordering.
 async fn search_fred_api(query: &str, api_key: &str) -> Result<Vec<SearchItem>> {
     let client = &*crate::finance::shared_client::GENERAL;
     let url = format!(
@@ -237,6 +222,68 @@ async fn search_fred_api(query: &str, api_key: &str) -> Result<Vec<SearchItem>> 
     }
 
     Ok(items)
+}
+
+fn merge_search_results(
+    yahoo_results: Vec<SearchItem>,
+    fred_results: Vec<SearchItem>,
+    prefer_fred: bool,
+) -> Vec<SearchItem> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+    let ordered_groups = if prefer_fred {
+        [fred_results, yahoo_results]
+    } else {
+        [yahoo_results, fred_results]
+    };
+
+    for group in ordered_groups {
+        for item in group {
+            let key = item.symbol.to_ascii_uppercase();
+            if seen.insert(key) {
+                merged.push(item);
+            }
+        }
+    }
+
+    merged
+}
+
+fn prefers_fred_search(query: &str) -> bool {
+    let raw = query.trim();
+    let q = raw.to_ascii_lowercase();
+    if raw.is_empty() {
+        return false;
+    }
+
+    const FRED_INTENT_TERMS: &[&str] = &[
+        "inflation", "cpi", "pce", "ppi", "gdp", "unemployment", "employment", "payroll",
+        "jobs", "labor", "mortgage", "rate", "yield", "treasury", "fed", "federal funds",
+        "recession", "sentiment", "consumer", "housing", "claims", "delinquency",
+    ];
+    if FRED_INTENT_TERMS.iter().any(|term| q.contains(term)) {
+        return true;
+    }
+
+    const YAHOO_INTENT_TERMS: &[&str] = &[
+        "stock", "stocks", "share", "shares", "etf", "etfs", "option", "options", "call",
+        "calls", "put", "puts", "future", "futures", "earnings", "dividend",
+    ];
+    if YAHOO_INTENT_TERMS.iter().any(|term| q.contains(term)) {
+        return false;
+    }
+
+    let symbol_charset = raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '^' | '-' | '=' | ':'));
+    let all_caps_like = raw.chars().all(|c| !c.is_ascii_lowercase());
+    let short_alpha = raw.len() <= 5 && raw.chars().all(|c| c.is_ascii_alphabetic());
+    let ticker_like = !raw.contains(' ') && symbol_charset && (all_caps_like || short_alpha);
+    if ticker_like {
+        return false;
+    }
+
+    raw.contains(' ')
 }
 
 /// Search common FRED macro series by name. Hardcoded catalog covers 60+ popular series.
