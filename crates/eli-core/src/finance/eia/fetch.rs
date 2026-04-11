@@ -347,6 +347,10 @@ pub async fn fetch_eia(req: EiaRequest) -> Result<EiaResponse> {
             });
         }
 
+        // EIA returns observations newest-first (sort=desc).
+        // Reverse to chronological order so .last() gives the most recent.
+        observations.reverse();
+
         all_series.push(EiaSeries {
             label: spec.label.to_string(),
             observations,

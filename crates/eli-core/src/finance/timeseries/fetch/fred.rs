@@ -30,12 +30,26 @@ pub(crate) async fn fetch_fred_series(
                     "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}&cosd={}&coed={}",
                     series_id, start_date, end_date
                 );
+                // Don't use --fail; some Akamai 4xx responses cause CURLE_RECV_ERROR (exit 56)
+                // before the HTTP status fully arrives. Capture status via -w and inspect body.
                 let output = tokio::process::Command::new("curl")
-                    .args(["--silent", "--fail", "--max-time", "15", "--retry", "2", &url])
+                    .args([
+                        "--silent",
+                        "--location",
+                        "--max-time",
+                        "15",
+                        "--retry",
+                        "2",
+                        "--write-out",
+                        "\nHTTPCODE:%{http_code}",
+                        &url,
+                    ])
                     .output()
                     .await;
-                let body = match output {
-                    Ok(o) if o.status.success() => {
+                let raw = match output {
+                    Ok(o) if o.status.success() || o.status.code() == Some(56) => {
+                        // Exit 56 (CURLE_RECV_ERROR) often means Akamai dropped mid-response on
+                        // a 4xx; we still got partial body + the -w marker, so process anyway.
                         String::from_utf8_lossy(&o.stdout).into_owned()
                     }
                     Ok(o) => {
@@ -58,6 +72,46 @@ pub(crate) async fn fetch_fred_series(
                         });
                     }
                 };
+                // Split off the HTTPCODE marker we appended via -w.
+                let (body, http_code) = if let Some(idx) = raw.rfind("\nHTTPCODE:") {
+                    let code: u16 = raw[idx + 10..].trim().parse().unwrap_or(0);
+                    (raw[..idx].to_string(), code)
+                } else {
+                    (raw, 0u16)
+                };
+
+                // Series-not-found: FRED returns HTML 404 page instead of CSV.
+                if http_code == 404 || body.trim_start().starts_with("<!DOCTYPE")
+                    || body.trim_start().starts_with("<html")
+                {
+                    let hint = if series_id.starts_with("W")
+                        && (series_id.contains("STUS")
+                            || series_id.contains("STPADD")
+                            || series_id.starts_with("WCR")
+                            || series_id.starts_with("WGF")
+                            || series_id.starts_with("WDI")
+                            || series_id.starts_with("WCE")
+                            || series_id.starts_with("WCS"))
+                    {
+                        " (this looks like an EIA petroleum series ID — use finance_eia with preset=crude/gasoline/distillate/all instead)"
+                    } else {
+                        " (verify the series ID at https://fred.stlouisfed.org/)"
+                    };
+                    return Err(TimeseriesError {
+                        ticker: series_id.clone(),
+                        stage: Some("fetch".to_string()),
+                        message: format!(
+                            "FRED series '{series_id}' not found (HTTP {http_code}){hint}"
+                        ),
+                    });
+                }
+                if http_code != 0 && http_code != 200 {
+                    return Err(TimeseriesError {
+                        ticker: series_id.clone(),
+                        stage: Some("fetch".to_string()),
+                        message: format!("fred fetch HTTP {http_code} for '{series_id}'"),
+                    });
+                }
 
                 let mut candles = Vec::new();
                 let mut parse_err: Option<TimeseriesError> = None;
