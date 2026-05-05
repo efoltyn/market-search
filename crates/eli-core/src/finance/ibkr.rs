@@ -173,6 +173,15 @@ fn exchange_default_currency(exchange: &str) -> Option<&'static str> {
 }
 
 fn parse_ibkr_ticker(raw: &str) -> (String, ContractInput) {
+    // Strip optional `IBKR:` / `ibkr:` provider prefix so that
+    // `--tickers IBKR:SPY` and `--tickers IBKR:FUT:CL:NYMEX` are equivalent
+    // to the bare forms.  Without this strip the snapshot path treats
+    // `IBKR` as a literal symbol prefix and the contract resolution fails
+    // with "no security definition".
+    let raw = raw
+        .strip_prefix("IBKR:")
+        .or_else(|| raw.strip_prefix("ibkr:"))
+        .unwrap_or(raw);
     let parts: Vec<&str> = raw.split(':').collect();
     let known_sec_types = [
         "STK", "FUT", "OPT", "CASH", "IND", "BOND", "CMDTY", "FOP", "WAR", "CFD", "CRYPTO",
@@ -239,14 +248,21 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
     let client = connect_client(&connection).await?;
     apply_market_data_type(&client, &connection).await?;
     let collected_at = Utc::now();
-    let market_data_type = requested_market_data_type(&connection);
+    let requested_type = requested_market_data_type(&connection);
     let timeout_secs = connection.timeout_secs.unwrap_or(15);
+    // Shared effective market-data type — flips to 4 (delayed-frozen) if we
+    // hit an entitlement failure while requesting Realtime (1).  Wrapped in
+    // an Arc<AtomicI32> so concurrent ticker tasks see the flip and stamp
+    // their snapshots with the right session_state/freshness.
+    let effective_type =
+        std::sync::Arc::new(std::sync::atomic::AtomicI32::new(requested_type));
 
     normalize_tickers(&req.tickers)
         .into_iter()
         .map(|ticker| {
             let (display_name, contract_input) = parse_ibkr_ticker(&ticker);
             let client = &client;
+            let effective_type = std::sync::Arc::clone(&effective_type);
             async move {
             let detail = resolve_contract_detail(
                 client,
@@ -254,23 +270,62 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
                 timeout_secs,
             )
             .await?;
-            let data = fetch_contract_snapshot(&client, &detail.contract, timeout_secs)
-                .await
-                .map_err(|err| match err {
-                    Error::Provider(msg)
-                        if msg == "timeout waiting for ibkr snapshot ticks".to_string() =>
-                    {
-                        Error::Provider(format!(
-                            "timeout waiting for ibkr snapshot ticks for {display_name}"
-                        ))
-                    }
-                    other => other,
-                })?;
+
+            // First attempt with the configured market-data type.  If we
+            // requested Realtime and IBKR signals an entitlement failure
+            // (codes 354/10089/10090/10091/10168) the snapshot drain returns
+            // immediately with "ibkr market data not subscribed (...)".  In
+            // that case auto-fallback to delayed-frozen and retry once.
+            let mut fallback_used = false;
+            let data = match fetch_contract_snapshot(client, &detail.contract, timeout_secs).await {
+                Ok(data) => data,
+                Err(Error::Provider(msg))
+                    if msg.contains("not subscribed") && requested_type == 1 =>
+                {
+                    // Switch the client globally to delayed-frozen so other
+                    // concurrent ticker tasks benefit from the flip too.
+                    client
+                        .switch_market_data_type(MarketDataType::DelayedFrozen)
+                        .await
+                        .map_err(map_ibapi_error)
+                        .map_err(Error::Provider)?;
+                    effective_type.store(4, std::sync::atomic::Ordering::SeqCst);
+                    fallback_used = true;
+                    eprintln!(
+                        "[ibkr snapshot] {display_name}: live entitlement denied, retrying with delayed-frozen ({msg})"
+                    );
+                    fetch_contract_snapshot(client, &detail.contract, timeout_secs)
+                        .await
+                        .map_err(|err| match err {
+                            Error::Provider(msg)
+                                if msg == "timeout waiting for ibkr snapshot ticks" =>
+                            {
+                                Error::Provider(format!(
+                                    "timeout waiting for ibkr snapshot ticks for {display_name}"
+                                ))
+                            }
+                            other => other,
+                        })?
+                }
+                Err(err) => {
+                    return Err(match err {
+                        Error::Provider(msg)
+                            if msg == "timeout waiting for ibkr snapshot ticks" =>
+                        {
+                            Error::Provider(format!(
+                                "timeout waiting for ibkr snapshot ticks for {display_name}"
+                            ))
+                        }
+                        other => other,
+                    });
+                }
+            };
 
             let observed_at = data
                 .last_timestamp
                 .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
                 .unwrap_or(collected_at);
+            let market_data_type = effective_type.load(std::sync::atomic::Ordering::SeqCst);
             let state = match market_data_type {
                 1 => FreshnessState::Live,
                 2 => FreshnessState::Eod,
@@ -291,6 +346,17 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
                 if !local_sym.is_empty() { parts.push(local_sym.clone()); }
                 if !expiry.is_empty() { parts.push(expiry); }
                 parts.join(" ")
+            };
+            let (clock_status, integrity_note) = if fallback_used {
+                (
+                    Some("delayed_frozen_fallback".to_string()),
+                    Some(
+                        "retried with delayed-frozen after live entitlement failure"
+                            .to_string(),
+                    ),
+                )
+            } else {
+                (None, None)
             };
             Ok(TickerSnapshot {
                 ticker: display_name,
@@ -327,8 +393,8 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
                 session_state: market_data_type_name(market_data_type).to_string(),
                 market_closed_fallback: used_market_closed_fallback,
                 effective_at: Some(observed_at),
-                clock_status: None,
-                integrity_note: None,
+                clock_status,
+                integrity_note,
             })
         }})
         .collect::<futures::stream::FuturesOrdered<_>>()
@@ -1648,7 +1714,26 @@ async fn drain_snapshot_ticks(
             Ok(Some(Ok(TickTypes::PriceSize(price_size)))) => {
                 apply_tick_price(data, price_size.price_tick_type, price_size.price);
             }
-            Ok(Some(Ok(TickTypes::Notice(_)))) => {}
+            Ok(Some(Ok(TickTypes::Notice(notice)))) => {
+                // IBKR entitlement-failure error codes — surface immediately rather
+                // than burning the full timeout in silence.  See:
+                // https://interactivebrokers.github.io/tws-api/message_codes.html
+                //   354    Requested market data is not subscribed
+                //  10089   Requested market data requires additional subscription
+                //  10090   Part of requested market data is not subscribed
+                //  10091   Requested market data is not subscribed; delayed available
+                //  10168   Requested market data is not subscribed; display delayed
+                const ENTITLEMENT_CODES: [i32; 5] = [354, 10089, 10090, 10091, 10168];
+                let code = notice.code;
+                if ENTITLEMENT_CODES.contains(&code) {
+                    return Err(Error::Provider(format!(
+                        "ibkr market data not subscribed (code {code}: {}). Retry with --market-data-type 3 (delayed) or --market-data-type 4 (delayed-frozen).",
+                        notice.message
+                    )));
+                }
+                // Other notices: log to stderr but keep waiting
+                eprintln!("[ibkr snapshot] notice {code}: {}", notice.message);
+            }
             Ok(Some(Ok(_))) => {}
             Ok(Some(Err(err))) => return Err(Error::Provider(map_ibapi_error(err))),
             Ok(None) => break,
