@@ -170,7 +170,7 @@
         },
         {
             "name": "finance_options",
-            "description": "Options chain with IV (from Yahoo), put/call OI ratio, max pain, and vol skew. Defaults to summary mode with ±10% strikes around current price. No Greeks (no Black-Scholes) — IV is passthrough from exchange. Max pain filters out pre-split strike artifacts. For full chain across ALL expirations with IV term structure and OI concentration, pass all=true.",
+            "description": "Options chain with IV (from Yahoo), put/call OI ratio, max pain, and vol skew. Defaults to summary mode with ±10% strikes around current price. No Greeks (no Black-Scholes) — IV is passthrough from exchange. Max pain filters out pre-split strike artifacts. For full chain across ALL expirations with IV term structure and OI concentration, pass all=true. Top-level `atm_iv` mirrors `metrics.atm_iv` (jq `.atm_iv`); in `all=true` mode it reflects the nearest non-expired snapshot's ATM IV.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

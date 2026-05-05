@@ -184,7 +184,7 @@ async fn cmd_finance_eia(args: FinanceEiaArgs) -> Result<()> {
 
     if preset.is_none() && args.route.is_none() {
         anyhow::bail!(
-            "eia requires --preset (crude|gasoline|distillate|all|nat_gas) or --route"
+            "eia requires --preset (crude|gasoline|distillate|all|nat_gas|ng_prices|electricity|nuclear|steo|energy) or --route"
         );
     }
 

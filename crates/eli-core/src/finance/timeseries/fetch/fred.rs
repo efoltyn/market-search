@@ -192,10 +192,20 @@ pub(crate) async fn fetch_fred_series(
                 let candles = resample_candles(&candles, start, step);
 
                 if candles.is_empty() {
+                    // Most common cause: the series is monthly/quarterly and the
+                    // requested range is shorter than one observation interval
+                    // (e.g. preset=macro --range 1mo includes JTSJOL/PAYEMS which
+                    // print monthly). Tag explicitly so callers can surface "use
+                    // a longer range" instead of a generic parse error.
                     return Err(TimeseriesError {
                         ticker: series_id.clone(),
-                        stage: Some("parse".to_string()),
-                        message: "fred returned no data points in the requested range".to_string(),
+                        stage: Some("insufficient_data".to_string()),
+                        message: format!(
+                            "FRED series '{series_id}' returned no observations in the requested range \
+                             ({start_date} to {end_date}); likely a monthly/quarterly series — \
+                             retry with --range >=6mo, or check the series at \
+                             https://fred.stlouisfed.org/series/{series_id}"
+                        ),
                     });
                 }
 

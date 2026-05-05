@@ -352,10 +352,10 @@ fn parse_dealers(json: &serde_json::Value, kind: &str) -> Result<NyFedResponse> 
             continue;
         };
 
-        let value_raw = item
-            .get("value")
-            .and_then(parse_f64)
-            .unwrap_or(0.0);
+        // Preserve the upstream None — the prior `unwrap_or(0.0)` made retired
+        // series (notably PDSORA-UTSETTOT repo, which now ships "*") read as a
+        // hard zero in JSON, hiding the fact that the row no longer has a value.
+        let value_millions = item.get("value").and_then(parse_f64);
 
         let report_date = parse_string(
             item.get("asofdate")
@@ -366,7 +366,7 @@ fn parse_dealers(json: &serde_json::Value, kind: &str) -> Result<NyFedResponse> 
 
         let candidate = NyFedDealerItem {
             description: description.to_string(),
-            value_millions: value_raw,
+            value_millions,
             report_date,
         };
 

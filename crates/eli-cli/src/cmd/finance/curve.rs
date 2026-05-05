@@ -116,25 +116,48 @@ pub fn list_commodities() -> Vec<(&'static str, &'static str, &'static str)> {
 }
 
 /// Generate tickers for the next N contract months from today.
+///
+/// Walks the *valid* contract calendar for the root symbol so e.g. gold
+/// (Feb/Apr/Jun/Aug/Oct/Dec) doesn't enumerate Jul/Sep/Nov tickers that don't
+/// trade. The single source of truth for which months a root supports is
+/// `futures_curve_months()` in `timeseries.rs`; we fall back to every month
+/// only for roots not in that table.
 pub fn generate_futures_tickers(spec: &CommoditySpec, months: usize) -> Vec<(String, String)> {
     use chrono::Datelike;
     let now = chrono::Utc::now();
-    let mut year = now.year();
+    let mut year = now.year() as i32;
     // Start from next month — current month contract is often expired/rolling
-    let mut month_idx = now.month() as usize + 1; // 1-based, skip current
+    let mut month: u32 = now.month() + 1;
+    if month > 12 {
+        month = 1;
+        year += 1;
+    }
+
+    // Pull the valid month set from the shared calendar table in
+    // timeseries.rs. All curve.rs commodities are covered there today; the
+    // fallback to ALL_MONTHS keeps future additions from silently breaking.
+    let valid_months: &[u32] = futures_curve_months(spec.root)
+        .map(|(_exchange, m)| m)
+        .unwrap_or(ALL_MONTHS);
 
     let mut tickers = Vec::with_capacity(months);
-    for _ in 0..months {
-        if month_idx > 12 {
-            month_idx = 1;
+    // Walk forward up to ~3 years to collect `months` valid contracts.
+    for _ in 0..36 {
+        if tickers.len() >= months {
+            break;
+        }
+        if valid_months.contains(&month) {
+            let (code, label) = MONTH_CODES[(month - 1) as usize];
+            let yy = year % 100;
+            let ticker = format!("{}{}{:02}{}", spec.root, code, yy, spec.exchange);
+            let contract_label = format!("{} {}", label, year);
+            tickers.push((ticker, contract_label));
+        }
+        month += 1;
+        if month > 12 {
+            month = 1;
             year += 1;
         }
-        let (code, label) = MONTH_CODES[month_idx - 1];
-        let yy = year % 100;
-        let ticker = format!("{}{}{:02}{}", spec.root, code, yy, spec.exchange);
-        let contract_label = format!("{} {}", label, year);
-        tickers.push((ticker, contract_label));
-        month_idx += 1;
     }
     tickers
 }

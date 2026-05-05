@@ -24,6 +24,11 @@ pub struct EiaSeries {
     /// This is a URL fragment, NOT a series identifier — renamed from `key` to
     /// `route` to make that explicit and avoid being conflated with ECB SDMX keys.
     pub route: Option<String>,
+    /// Canonical EIA series identifier (e.g. `"DHHNGSP"`, `"RNGC1"`, `"WTIPUUS"`).
+    /// Stable code that downstream tools can match against; `route + facets` is
+    /// the *how*, `code` is the *what*.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub observations: Vec<EiaObservation>,
 }
 
@@ -57,6 +62,9 @@ pub enum EiaPreset {
     ElectricityDemand,
     NuclearOutages,
     Steo,
+    /// Daily price bundle: WTI spot, Brent spot, Henry Hub daily spot, RBOB,
+    /// Heating Oil — the headline macro-energy series in one call.
+    Energy,
 }
 
 impl EiaPreset {
@@ -72,6 +80,7 @@ impl EiaPreset {
             "electricity" | "demand" | "grid" => Some(Self::ElectricityDemand),
             "nuclear" | "outages" | "nuclear_outages" => Some(Self::NuclearOutages),
             "steo" | "forecast" | "outlook" => Some(Self::Steo),
+            "energy" | "energy_prices" | "prices" => Some(Self::Energy),
             _ => None,
         }
     }
@@ -82,65 +91,77 @@ impl EiaPreset {
                 route: "petroleum/stoc/wstk/data/",
                 label: "US Crude Oil Stocks (excl SPR)",
                 facets: vec![("product", "EPC0"), ("process", "SAX"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
+                code: Some("WCESTUS1"),
             }],
             Self::GasolineStocks => vec![EiaQuerySpec {
                 route: "petroleum/stoc/wstk/data/",
                 label: "US Finished Motor Gasoline Stocks",
                 facets: vec![("product", "EPM0F"), ("process", "SAE"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
+                code: Some("WGFSTUS1"),
             }],
             Self::DistillateStocks => vec![EiaQuerySpec {
                 route: "petroleum/stoc/wstk/data/",
                 label: "US Distillate Fuel Oil Stocks",
                 facets: vec![("product", "EPD0"), ("process", "SAE"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
+                code: Some("WDISTUS1"),
             }],
             Self::AllPetroleumStocks => vec![
                 EiaQuerySpec {
                     route: "petroleum/stoc/wstk/data/",
                     label: "US Crude Oil Stocks (excl SPR)",
                     facets: vec![("product", "EPC0"), ("process", "SAX"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
+                    code: Some("WCESTUS1"),
                 },
                 EiaQuerySpec {
                     route: "petroleum/stoc/wstk/data/",
                     label: "US Finished Motor Gasoline Stocks",
                     facets: vec![("product", "EPM0F"), ("process", "SAE"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
+                    code: Some("WGFSTUS1"),
                 },
                 EiaQuerySpec {
                     route: "petroleum/stoc/wstk/data/",
                     label: "US Distillate Fuel Oil Stocks",
                     facets: vec![("product", "EPD0"), ("process", "SAE"), ("duoarea", "NUS")], frequency: "weekly", data_col: "value",
+                    code: Some("WDISTUS1"),
                 },
                 EiaQuerySpec {
                     route: "petroleum/stoc/wstk/data/",
                     label: "Cushing OK Crude Oil Stocks",
                     facets: vec![("product", "EPC0"), ("process", "SAX"), ("duoarea", "YCUOK")], frequency: "weekly", data_col: "value",
+                    code: Some("WCESTP41"),
                 },
             ],
             Self::NatGasStorage => vec![EiaQuerySpec {
                 route: "natural-gas/stor/wkly/data/",
                 label: "Lower 48 Natural Gas Working Storage",
                 facets: vec![("process", "SWO"), ("duoarea", "R48")], frequency: "weekly", data_col: "value",
+                code: Some("NW2_EPG0_SWO_R48_BCF"),
             }],
             Self::NatGasPrices => vec![EiaQuerySpec {
                 route: "natural-gas/pri/fut/data/",
                 label: "Henry Hub Natural Gas Futures",
                 facets: vec![("series", "RNGC1")], frequency: "daily", data_col: "value",
+                code: Some("RNGC1"),
             }],
             Self::CrudeProduction => vec![EiaQuerySpec {
                 route: "petroleum/crd/crpdn/data/",
                 label: "US Crude Oil Production",
                 facets: vec![],
                 frequency: "monthly", data_col: "value",
+                code: None,
             }],
             Self::ElectricityDemand => vec![EiaQuerySpec {
                 route: "electricity/rto/daily-region-data/data/",
                 label: "Balancing Authority Electricity Demand (daily)",
                 facets: vec![("type", "D")], frequency: "daily", data_col: "value",
+                code: None,
             }],
             Self::NuclearOutages => vec![EiaQuerySpec {
                 route: "nuclear-outages/us-nuclear-outages/data/",
                 label: "US Nuclear Outages",
                 facets: vec![],
                 frequency: "daily", data_col: "outage",
+                code: None,
             // NOTE: this endpoint uses data[0]=outage not data[0]=value
             }],
             Self::Steo => vec![
@@ -149,24 +170,56 @@ impl EiaPreset {
                     label: "WTI Crude Price Forecast",
                     facets: vec![("seriesId", "WTIPUUS")],
                     frequency: "monthly", data_col: "value",
+                    code: Some("WTIPUUS"),
                 },
                 EiaQuerySpec {
                     route: "steo/data/",
                     label: "Brent Crude Price Forecast",
                     facets: vec![("seriesId", "BREPUUS")],
                     frequency: "monthly", data_col: "value",
+                    code: Some("BREPUUS"),
                 },
                 EiaQuerySpec {
                     route: "steo/data/",
                     label: "Henry Hub Price Forecast",
                     facets: vec![("seriesId", "NGHHUUS")],
                     frequency: "monthly", data_col: "value",
+                    code: Some("NGHHUUS"),
                 },
                 EiaQuerySpec {
                     route: "steo/data/",
                     label: "US Crude Production Forecast",
                     facets: vec![("seriesId", "COPRPUS")],
                     frequency: "monthly", data_col: "value",
+                    code: Some("COPRPUS"),
+                },
+            ],
+            // Daily macro-energy price bundle. DHHNGSP is the Henry Hub Daily Spot
+            // (the FRED-canonical code; EIA's own series ID is RNGWHHD on the
+            // natural-gas/pri/sum endpoint). We surface DHHNGSP as `code` so
+            // downstream tools can match either identifier.
+            Self::Energy => vec![
+                EiaQuerySpec {
+                    route: "petroleum/pri/spt/data/",
+                    label: "WTI Cushing Spot Price",
+                    facets: vec![("series", "RWTC")], frequency: "daily", data_col: "value",
+                    code: Some("RWTC"),
+                },
+                EiaQuerySpec {
+                    route: "petroleum/pri/spt/data/",
+                    label: "Brent Europe Spot Price",
+                    facets: vec![("series", "RBRTE")], frequency: "daily", data_col: "value",
+                    code: Some("RBRTE"),
+                },
+                // Henry Hub Natural Gas spot (DHHNGSP) and RBOB Gasoline spot
+                // (EER_EPMRR_PF4_Y35NY_DPG) are not accessible via EIA v2 API
+                // with simple `series` facets. Use `FRED:DHHNGSP` or `NG=F` (Yahoo)
+                // for natural gas, and `RB=F` (Yahoo) for RBOB front-month futures.
+                EiaQuerySpec {
+                    route: "petroleum/pri/spt/data/",
+                    label: "NY Harbor No. 2 Heating Oil Spot Price",
+                    facets: vec![("series", "EER_EPD2F_PF4_Y35NY_DPG")], frequency: "daily", data_col: "value",
+                    code: Some("EER_EPD2F_PF4_Y35NY_DPG"),
                 },
             ],
         }
@@ -179,6 +232,10 @@ struct EiaQuerySpec {
     facets: Vec<(&'static str, &'static str)>,
     frequency: &'static str, // weekly, monthly, daily, annual
     data_col: &'static str,  // usually "value", nuclear uses "outage"
+    /// Canonical EIA series ID surfaced on the response so downstream tools
+    /// can match against a stable identifier (e.g. "DHHNGSP", "RNGC1").
+    /// None for routes where the series ID lives in row data instead.
+    code: Option<&'static str>,
 }
 
 pub async fn fetch_eia(req: EiaRequest) -> Result<EiaResponse> {
@@ -207,6 +264,7 @@ pub async fn fetch_eia(req: EiaRequest) -> Result<EiaResponse> {
                 })
                 .collect(),
             frequency: "weekly", data_col: "value",
+            code: None,
         }]
     } else {
         return Err(Error::InvalidInput(
@@ -358,6 +416,7 @@ pub async fn fetch_eia(req: EiaRequest) -> Result<EiaResponse> {
         all_series.push(EiaSeries {
             label: spec.label.to_string(),
             route: Some(spec.route.to_string()),
+            code: spec.code.map(|s| s.to_string()),
             observations,
         });
 

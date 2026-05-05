@@ -1,5 +1,63 @@
 use super::super::*;
 
+/// Yahoo's v7 quote endpoint exposes `priceEpsCurrentYear` (current fiscal year
+/// forward P/E) which Yahoo's web UI displays as "Forward P/E". The v10
+/// quoteSummary endpoint's `forwardPE` instead uses next-fiscal-year EPS, which
+/// can read meaningfully lower (e.g. NVDA: v10 17.66 vs v7 23.80 on 2026-05-05).
+/// We prefer the v7 number since it matches what readers see on Yahoo Finance.
+#[derive(Default)]
+struct V7Quote {
+    forward_pe_current_year: Option<f64>,
+}
+
+async fn fetch_v7_quote(ticker: &str) -> V7Quote {
+    let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
+    let client = match reqwest::Client::builder()
+        .timeout(StdDuration::from_secs(10))
+        .cookie_provider(jar)
+        .user_agent("Mozilla/5.0")
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return V7Quote::default(),
+    };
+
+    // Initialize cookies, then get crumb.
+    let _ = client.get("https://fc.yahoo.com").send().await;
+    let crumb = match client.get(YAHOO_CRUMB_URL).send().await {
+        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+        _ => return V7Quote::default(),
+    };
+    if crumb.is_empty() {
+        return V7Quote::default();
+    }
+
+    let url = format!(
+        "https://query2.finance.yahoo.com/v7/finance/quote?symbols={}&crumb={}",
+        urlencoding::encode(ticker),
+        urlencoding::encode(&crumb),
+    );
+    let body: serde_json::Value = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(v) => v,
+            Err(_) => return V7Quote::default(),
+        },
+        _ => return V7Quote::default(),
+    };
+
+    let row = body
+        .get("quoteResponse")
+        .and_then(|q| q.get("result"))
+        .and_then(|r| r.as_array())
+        .and_then(|arr| arr.first());
+
+    V7Quote {
+        forward_pe_current_year: row
+            .and_then(|r| r.get("priceEpsCurrentYear"))
+            .and_then(|v| v.as_f64()),
+    }
+}
+
 pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<FundamentalsResponse> {
     let ticker = req.ticker.trim().to_ascii_uppercase();
     if ticker.is_empty() {
@@ -9,9 +67,13 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
     let mut connector = yahoo_finance_api::YahooConnector::new()
         .map_err(|e| Error::Provider(format!("yahoo init failed: {e}")))?;
 
-    let info = connector
-        .get_ticker_info(&ticker)
-        .await
+    // Fan out the v10 quoteSummary (via the upstream connector) and the v7 quote
+    // call in parallel — v7 is the only path that exposes `priceEpsCurrentYear`,
+    // which is what Yahoo's UI shows as "Forward P/E".
+    let info_fut = connector.get_ticker_info(&ticker);
+    let v7_fut = fetch_v7_quote(&ticker);
+    let (info_res, v7) = tokio::join!(info_fut, v7_fut);
+    let info = info_res
         .map_err(|e| Error::Provider(format!("yahoo fundamentals failed for '{ticker}': {e}")))?;
 
     let qs = info
@@ -85,8 +147,12 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
         market_cap: summary.and_then(|s| s.market_cap),
         enterprise_value: stats.and_then(|s| s.enterprise_value),
         trailing_pe: summary.and_then(|s| s.trailing_pe),
-        forward_pe: summary
-            .and_then(|s| s.forward_pe)
+        // Prefer v7 `priceEpsCurrentYear` (current-fiscal-year forward P/E,
+        // matches Yahoo Finance's UI). Fall back to v10's `forwardPE` (computed
+        // from next-fiscal-year EPS estimate, often reads materially lower).
+        forward_pe: v7
+            .forward_pe_current_year
+            .or_else(|| summary.and_then(|s| s.forward_pe))
             .or_else(|| stats.and_then(|s| s.forward_pe)),
         trailing_eps: stats.and_then(|s| s.trailing_eps),
         forward_eps: stats.and_then(|s| s.forward_eps),
@@ -119,6 +185,7 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
         recommendation_mean: fin.and_then(|f| f.recommendation_mean),
         recommendation_key: fin.and_then(|f| f.recommendation_key.clone()),
         analyst_count: fin.and_then(|f| f.number_of_analyst_opinions),
+        dividend_yield: summary.and_then(|s| s.dividend_yield),
     };
     let profile = eli_finance_types::FundamentalsProfile {
         sector: profile.and_then(|p| p.sector.clone()),

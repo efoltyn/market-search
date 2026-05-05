@@ -57,7 +57,7 @@ pub enum BojPreset {
 impl BojPreset {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "policy_rate" | "rate" | "discount" => Some(Self::PolicyRate),
+            "policy_rate" | "rate" | "policy" => Some(Self::PolicyRate),
             "call_rate" | "call" | "overnight" => Some(Self::CallRate),
             "monetary_base" | "base" | "mb" => Some(Self::MonetaryBase),
             "balance_sheet" | "bs" | "assets" => Some(Self::BalanceSheet),
@@ -71,7 +71,7 @@ impl BojPreset {
     fn queries(&self) -> Vec<(&'static str, &'static str, &'static str)> {
         // (db, codes_comma_sep, label)
         match self {
-            Self::PolicyRate => vec![("IR01", "MADR1Z@D", "BOJ Basic Discount Rate (daily)")],
+            Self::PolicyRate => vec![("FM01", "STRDCLUCON", "Uncollateralized Overnight Call Rate (BOJ policy operating target, daily avg)")],
             Self::CallRate => vec![("FM01", "STRDCLUCON", "Call Rate (daily avg)")],
             Self::MonetaryBase => vec![("MD01", "MABS1AN11", "Monetary Base (monthly)")],
             Self::BalanceSheet => vec![("BS01", "MABJMTA", "BOJ Total Assets (monthly)")],

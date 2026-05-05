@@ -59,6 +59,10 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
     const COMMON_NOUN_AMBIGUOUS: &[&str] = &[
         "apple", "orange", "peach", "cotton", "sugar", "butter",
         "lemon", "berry", "wheat", "corn", "rice", "salt",
+        // Commodity nouns: Yahoo correctly surfaces the equity ETF (GLD, SLV,
+        // CPER, BITO) while FRED returns commodity-pricing series with high
+        // search_rank. Suppress FRED when Yahoo dominates.
+        "gold", "silver", "copper", "bitcoin", "ether",
     ];
     let q_lower = query.to_ascii_lowercase();
     let is_ambiguous = COMMON_NOUN_AMBIGUOUS.contains(&q_lower.as_str());

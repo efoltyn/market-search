@@ -809,6 +809,9 @@ pub struct FundamentalsMetrics {
     pub recommendation_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analyst_count: Option<u64>,
+    /// Trailing-twelve-month dividend yield, expressed as a decimal (0.04 = 4%).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dividend_yield: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1770,6 +1773,10 @@ pub struct OptionsResponse {
     pub selection_reason: Option<String>,
     pub calls: Vec<OptionContract>,
     pub puts: Vec<OptionContract>,
+    /// Top-level mirror of `metrics.atm_iv` for ergonomic single-jq access.
+    /// In `--all` mode this reflects the nearest non-expired snapshot's ATM IV.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atm_iv: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<OptionsMetrics>,
     /// Human-readable hint when options are unavailable or filtered out.
@@ -2870,7 +2877,11 @@ pub struct NyFedSomaItem {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NyFedDealerItem {
     pub description: String,
-    pub value_millions: f64,
+    /// Always serialized — emits `null` when the upstream NY Fed API returns no
+    /// value for this series on this date (e.g. PDSORA-UTSETTOT repo was retired
+    /// and now ships "*"). Previously defaulted to 0.0, which silently looked
+    /// like "zero repo" instead of "missing".
+    pub value_millions: Option<f64>,
     pub report_date: String,
 }
 

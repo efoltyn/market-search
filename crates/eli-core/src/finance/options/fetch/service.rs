@@ -142,6 +142,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
                 selection_reason: None,
                 calls: vec![],
                 puts: vec![],
+                atm_iv: None,
                 metrics: None,
                 note: None,
                 multi_expiry_summary: None,
@@ -241,6 +242,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             selection_reason: None,
             calls: vec![],
             puts: vec![],
+            atm_iv: None,
             metrics: None,
             note,
             multi_expiry_summary: None,
@@ -263,19 +265,47 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
         let mut aggregate_volume: u64 = 0;
         let mut weighted_pc_sum: f64 = 0.0;
 
-        for exp_ts in expiration_timestamps {
-            let url = format!(
-                "{}/{}?crumb={}&date={}",
-                YAHOO_OPTIONS_URL, ticker, crumb, exp_ts
-            );
-            let resp = client.get(&url).send().await;
+        // Fetch all expirations in parallel (batches of 8 to avoid Yahoo rate limits).
+        // Yahoo throttles around ~10 concurrent; 8 is the safe ceiling.
+        // join_all preserves order so the snapshot Vec stays in expiration order.
+        const PARALLEL_FETCH_BATCH: usize = 8;
+        let mut fetched_chains: Vec<(i64, Option<YahooOptions>)> =
+            Vec::with_capacity(expiration_timestamps.len());
+        for batch in expiration_timestamps.chunks(PARALLEL_FETCH_BATCH) {
+            let futs = batch.iter().map(|&exp_ts| {
+                let url = format!(
+                    "{}/{}?crumb={}&date={}",
+                    YAHOO_OPTIONS_URL, ticker, crumb, exp_ts
+                );
+                let client = client.clone();
+                async move {
+                    let opts = match client.get(&url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            match resp.json::<YahooOptionsResp>().await {
+                                Ok(body) => body
+                                    .option_chain
+                                    .result
+                                    .into_iter()
+                                    .next()
+                                    .and_then(|r| r.options)
+                                    .and_then(|o| o.into_iter().next()),
+                                Err(_) => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    (exp_ts, opts)
+                }
+            });
+            let batch_results = futures::future::join_all(futs).await;
+            fetched_chains.extend(batch_results);
+        }
 
-            if let Ok(resp) = resp {
-                if resp.status().is_success() {
-                    if let Ok(body) = resp.json::<YahooOptionsResp>().await {
-                        if let Some(chain_result) = body.option_chain.result.into_iter().next() {
-                            if let Some(opts) =
-                                chain_result.options.and_then(|o| o.into_iter().next())
+        for (exp_ts, opts) in fetched_chains {
+            if let Some(opts) = opts {
+                {
+                    {
+                        {
                             {
                                 let calls = opts.calls.unwrap_or_default();
                                 let puts = opts.puts.unwrap_or_default();
@@ -420,9 +450,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
                     }
                 }
             }
-
-            // Rate limit
-            tokio::time::sleep(StdDuration::from_millis(100)).await;
+            // (parallel fetch already complete; no per-iteration sleep needed)
         }
 
         let weighted_put_call_ratio = if aggregate_volume > 0 {
@@ -514,6 +542,13 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             }
         };
 
+        // Top-level atm_iv for --all mode: pick the nearest non-expired snapshot that has IV.
+        let top_atm_iv = snapshots
+            .iter()
+            .filter(|s| s.atm_iv.is_some() && s.days_to_expiry >= 0)
+            .min_by_key(|s| s.days_to_expiry)
+            .and_then(|s| s.atm_iv);
+
         let multi_summary = MultiExpirySummary {
             snapshots,
             aggregate_volume,
@@ -539,6 +574,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             selection_reason: Some("multi_expiry_summary".to_string()),
             calls: vec![],
             puts: vec![],
+            atm_iv: top_atm_iv,
             metrics: None,
             note,
             multi_expiry_summary: Some(multi_summary),
@@ -964,6 +1000,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
         selection_reason,
         calls: final_calls,
         puts: final_puts,
+        atm_iv,
         metrics,
         note,
         multi_expiry_summary: None,

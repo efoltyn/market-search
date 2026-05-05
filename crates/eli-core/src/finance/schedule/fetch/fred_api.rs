@@ -87,14 +87,21 @@ fn curated_fred_api_release_specs(
             time_et: "08:15 ET",
         },
     ];
-    // Major: weekly Claims is the only "true major" release that's NOT in the Census
-    // PDF parsed by fetch_official_major_macro (which covers CPI/PPI/PCE/GDP/Retail/Housing/NFP).
-    // Without this list, --major silently drops Jobless Claims — a top-tier rates indicator.
+    // Major: Claims (180) and JOLTS (192) are the "true major" labor releases NOT in
+    // the Census PDF parsed by fetch_official_major_macro (which covers CPI/PPI/PCE/
+    // GDP/Retail/Housing/NFP). Without this list, --major silently drops them — both
+    // are top-tier indicators (Claims = weekly labor pulse; JOLTS = Fed's preferred
+    // job-market gauge per Powell).
     const MAJOR: &[FredApiReleaseSpec] = &[
         FredApiReleaseSpec {
             release_id: 180,
             title: "Unemployment Insurance Weekly Claims Report",
             time_et: "08:30 ET",
+        },
+        FredApiReleaseSpec {
+            release_id: 192,
+            title: "Job Openings and Labor Turnover Survey",
+            time_et: "10:00 ET",
         },
     ];
     match macro_profile {
