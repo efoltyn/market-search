@@ -394,13 +394,26 @@ fn mcp_timeseries_summary(output: &str) -> Option<String> {
         } else {
             0.0
         };
-        let (high, low) = candles
+        let get_ts = |c: &serde_json::Value| c.get("t").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let (high, low, high_date, low_date) = candles
             .iter()
-            .fold((f64::NEG_INFINITY, f64::INFINITY), |(h, l), c| {
-                let hi = c.get("h").and_then(|x| x.as_f64()).unwrap_or(h);
-                let lo = c.get("l").and_then(|x| x.as_f64()).unwrap_or(l);
-                (h.max(hi), l.min(lo))
-            });
+            .fold(
+                (f64::NEG_INFINITY, f64::INFINITY, String::new(), String::new()),
+                |(h, l, hd, ld), c| {
+                    let hi = c.get("h").and_then(|x| x.as_f64()).unwrap_or(h);
+                    let lo = c.get("l").and_then(|x| x.as_f64()).unwrap_or(l);
+                    let ts = get_ts(c);
+                    let new_hd = if hi > h { ts.clone() } else { hd };
+                    let new_ld = if lo < l { ts } else { ld };
+                    (h.max(hi), l.min(lo), new_hd, new_ld)
+                },
+            );
+        let range = high - low;
+        let position_pct = if range > 0.0 {
+            ((end - low) / range * 1000.0).round() / 10.0
+        } else {
+            50.0
+        };
         // Annualised volatility — detect candle period from timestamps to use correct √N
         // √252 is only correct for daily candles; hourly needs √(252*6.5), etc.
         let ann_factor = if candles.len() >= 2 {
@@ -436,6 +449,9 @@ fn mcp_timeseries_summary(output: &str) -> Option<String> {
         } else {
             0.0
         };
+        // Truncate timestamps to date-only for readability (first 10 chars = YYYY-MM-DD)
+        let high_date_short = if high_date.len() >= 10 { &high_date[..10] } else { &high_date };
+        let low_date_short = if low_date.len() >= 10 { &low_date[..10] } else { &low_date };
         map.insert(
             ticker.to_string(),
             serde_json::json!({
@@ -443,7 +459,10 @@ fn mcp_timeseries_summary(output: &str) -> Option<String> {
                 "end":   (end   * 100.0).round() / 100.0,
                 "return_pct": (return_pct * 10.0).round() / 10.0,
                 "high": (high * 100.0).round() / 100.0,
+                "high_date": high_date_short,
                 "low":  (low  * 100.0).round() / 100.0,
+                "low_date": low_date_short,
+                "position_pct": position_pct,
                 "vol_ann_pct": vol_ann,
                 "n_candles": candles.len(),
             }),
@@ -467,47 +486,6 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
     };
 
     match tool {
-        "finance_snapshot" => {
-            // Extract: ticker, price, daily_return for each ticker
-            let mut lines = Vec::new();
-            if let Some(snaps) = v.get("snapshots").and_then(|s| s.as_array()) {
-                for snap in snaps {
-                    let ticker = snap.get("ticker").and_then(|t| t.as_str()).unwrap_or("?");
-                    let price = snap.get("price").and_then(|p| p.as_f64())
-                        .or_else(|| snap.get("current_price").and_then(|p| p.as_f64()))
-                        .unwrap_or(0.0);
-                    let prev = snap.get("previous_close").and_then(|p| p.as_f64()).unwrap_or(price);
-                    let ret = if prev != 0.0 { (price / prev - 1.0) * 100.0 } else { 0.0 };
-                    let mcap = snap.get("market_cap").and_then(|m| m.as_f64());
-                    let mcap_str = match mcap {
-                        Some(m) if m >= 1e12 => format!(" ${:.1}T", m / 1e12),
-                        Some(m) if m >= 1e9 => format!(" ${:.0}B", m / 1e9),
-                        _ => String::new(),
-                    };
-                    // Snapshot returns live at the top-level trailing_returns map keyed by ticker.
-                    let ret_1mo = v.get("trailing_returns")
-                        .and_then(|r| r.get(ticker))
-                        .and_then(|r| r.get("1mo"))
-                        .and_then(|r| r.as_f64())
-                        .map(|r| format!(" 1mo:{:+.1}%", r * 100.0))
-                        .unwrap_or_default();
-                    lines.push(format!("{}:{:.2}({:+.1}%){}{}", ticker, price, ret, mcap_str, ret_1mo));
-                }
-            }
-            let n = v.get("snapshots").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0);
-            let first_snap = v.get("snapshots").and_then(|s| s.as_array()).and_then(|a| a.first());
-            let session = first_snap.and_then(|s| s.get("session_state")).and_then(|s| s.as_str()).unwrap_or("unknown");
-            let market_note = v.get("market_note").and_then(|s| s.as_str()).unwrap_or("");
-            let note_str = if !market_note.is_empty() { format!(",\"market_note\":\"{}\"", market_note) } else { String::new() };
-            format!(
-                "\"n\":{},\"session\":\"{}\"{},\"_schema\":\".snapshots[].{{ticker,current_price,previous_close,market_cap,shares_outstanding,returns.{{1d,1mo,3mo,6mo,1y}}}}\",\"tickers\":[{}]",
-                n, session, note_str,
-                lines.iter()
-                    .map(|l| format!("\"{}\"", l))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        }
         "finance_odds" => {
             // Extract: top markets by volume with probability
             let mut lines = Vec::new();
@@ -569,14 +547,26 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                     let prob = mkt.get("probability_yes").and_then(|p| p.as_f64()).unwrap_or(0.0);
                     let vol = mkt.get("volume_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let src = mkt.get("source").and_then(|s| s.as_str()).unwrap_or("?");
+                    // market_id is required for citation hygiene rule #2 — every prediction
+                    // market quote in a synthesis must be re-pullable. The underlying data
+                    // calls this field `ticker` (numeric for Polymarket, alphanumeric for
+                    // Kalshi); we surface it as `id:` for re-pull lookups.
+                    let market_id = mkt.get("ticker")
+                        .or_else(|| mkt.get("market_id"))
+                        .and_then(|m| m.as_str())
+                        .map(|s| {
+                            let trimmed: String = s.chars().take(40).collect();
+                            format!(" id:{}", trimmed)
+                        })
+                        .unwrap_or_default();
                     let delta_str = mkt.get("delta_since_last_sync")
                         .and_then(|d| d.get("probability_delta_pct_points"))
                         .and_then(|d| d.as_f64())
                         .map(|d| format!(" d:{:+.1}pp", d))
                         .unwrap_or_default();
                     lines.push(format!(
-                        "{}|{:.0}%|${:.0}K_USD|{}{}",
-                        title_short, prob * 100.0, vol / 1000.0, src, delta_str
+                        "{}|{:.0}%|${:.0}K_USD|{}{}{}",
+                        title_short, prob * 100.0, vol / 1000.0, src, market_id, delta_str
                     ));
                 }
             }
@@ -588,7 +578,7 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 .map(|s| format!(",\"delta_as_of\":\"{}\"", &s[..16.min(s.len())]))
                 .unwrap_or_default();
             format!(
-                "\"query\":\"{}\",\"total_markets\":{},\"total_vol_usd\":{:.0},\"sources\":\"kalshi:{} poly:{}\"{},\"_schema\":\".markets[].{{title,probability_yes,volume_usd,source,market_id,event_id}}\",\"top\":[{}]",
+                "\"query\":\"{}\",\"total_markets\":{},\"total_vol_usd\":{:.0},\"sources\":\"kalshi:{} poly:{}\"{},\"_schema\":\".markets[].{{title,probability_yes,volume_usd,source,ticker,event_ticker}}\",\"top\":[{}]",
                 query, total, total_vol_usd, kalshi_count, poly_count, sync_age,
                 lines.iter()
                     .map(|l| format!("\"{}\"", l.replace('"', "'")))
@@ -652,7 +642,7 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             }
         }
         "finance_cot" => {
-            // Group all weeks by contract, compute historical percentile + direction signal + data age
+            // Group all weeks by contract, compute raw historical percentile + data age (no labels)
             let mut contract_weeks: std::collections::HashMap<String, Vec<(String, i64, i64, f64)>> =
                 std::collections::HashMap::new();
             if let Some(positions) = v.get("positions").and_then(|p| p.as_array()) {
@@ -682,42 +672,10 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 let all_nets: Vec<i64> = sorted.iter().map(|w| w.1).collect();
                 let n_weeks = all_nets.len();
 
-                // Historical percentile: where does current net sit across all returned weeks
+                // Historical percentile: where does current net sit across all returned weeks.
+                // Raw rank only — no categorical labels (NET_LONG/NET_SHORT/COVERING/etc removed).
                 let rank = all_nets.iter().filter(|&&n| n <= *latest_net).count();
                 let pctile = if n_weeks > 1 { (rank * 100) / n_weeks } else { 50usize };
-
-                // Direction: week-over-week change relative to current position size (not absolute)
-                // Threshold: |chg| > 15% of |net|, minimum 200 contracts to filter noise
-                let abs_net = latest_net.unsigned_abs() as f64;
-                let abs_chg = latest_chg.unsigned_abs() as f64;
-                let rel_move = if abs_net > 0.0 { abs_chg / abs_net } else { 0.0 };
-                let significant = abs_chg >= 200.0 && rel_move >= 0.10;
-                let direction = if !significant { "FLAT" }
-                    else if *latest_chg > 0 && *latest_net < 0 { "COVERING↑" }
-                    else if *latest_chg > 0 { "ADDING_LONGS↑" }
-                    else if *latest_chg < 0 && *latest_net > 0 { "TRIMMING↓" }
-                    else { "ADDING_SHORTS↓" };
-
-                // Signal: combine direction of net with historical percentile
-                // pctile = rank of current net (low = most negative / most short)
-                // Signal: net direction + whether position is growing or shrinking vs recent history
-                // pctile low = position more negative (shorter) than most recent weeks
-                // pctile high = position less negative (more covered) than most recent weeks
-                let signal = if *latest_net < -500 {
-                    match pctile {
-                        p if p <= 10 => "NET_SHORT_DEEPENING",   // most negative in range
-                        p if p <= 30 => "NET_SHORT",
-                        p if p >= 70 => "NET_SHORT_COVERING",    // still short but less than recent weeks
-                        _ => "NET_SHORT",
-                    }
-                } else if *latest_net > 500 {
-                    match pctile {
-                        p if p >= 90 => "NET_LONG_GROWING",
-                        p if p >= 70 => "NET_LONG",
-                        p if p <= 10 => "NET_LONG_TRIMMING",     // still long but less than recent weeks
-                        _ => "NET_LONG",
-                    }
-                } else { "FLAT" };
 
                 // Data age
                 let age_str = if latest_date.len() >= 10 {
@@ -728,16 +686,15 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                             NaiveDate::parse_from_str(gd, "%Y-%m-%d"),
                         ) {
                             let days = (gd - rd).num_days();
-                            if days > 0 { format!(" (as_of:{},{}d-stale)", &latest_date[..10], days) } else { String::new() }
+                            if days > 0 { format!(" as_of:{} ({}d)", &latest_date[..10], days) } else { format!(" as_of:{}", &latest_date[..10]) }
                         } else { format!(" as_of:{}", &latest_date[..10]) }
                     } else { format!(" as_of:{}", &latest_date[..10]) }
                 } else { String::new() };
 
-                let pctile_tag = if pctile <= 15 || pctile >= 85 { format!("[{}th/{}w]", pctile, n_weeks) } else { format!("({}w)", n_weeks) };
                 let name_short: String = contract.chars().take(35).collect();
                 lines.push(format!(
-                    "{}|{}{}|net:{:+}|chg:{:+}|{:.1}%OI{}",
-                    name_short, signal, pctile_tag, latest_net, latest_chg, latest_pct, age_str
+                    "{}|net:{:+}|chg:{:+}|pctile:{}/{}w|{:.1}%OI{}",
+                    name_short, latest_net, latest_chg, pctile, n_weeks, latest_pct, age_str
                 ));
             }
 
@@ -944,6 +901,247 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
             )
         }
+        "finance_ecb" => {
+            // ECB: series[].{label, observations[].{period, value}}
+            // Show latest value per series, compact
+            let preset = v.get("preset").and_then(|p| p.as_str()).unwrap_or("custom");
+            let mut lines = Vec::new();
+            if let Some(series) = v.get("series").and_then(|s| s.as_array()) {
+                for s in series {
+                    let label = s.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+                    let label_short: String = label.chars().take(30).collect();
+                    let unit = s.get("unit").and_then(|u| u.as_str());
+                    if let Some(obs) = s.get("observations").and_then(|o| o.as_array()).and_then(|a| a.last()) {
+                        let period = obs.get("period").and_then(|p| p.as_str()).unwrap_or("?");
+                        let val = obs.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let val_str = match unit {
+                            Some(u) if u.contains("percent") || u.contains("pct") => format!("{:.2}%", val),
+                            Some(u) if u.contains("EUR") && val > 1e9 => format!("{:.1}B EUR", val / 1e9),
+                            _ if val > 1e12 => format!("{:.1}T", val / 1e12),
+                            _ if val > 1e9 => format!("{:.1}B", val / 1e9),
+                            _ => format!("{:.4}", val),
+                        };
+                        lines.push(format!("{}:{}({})", label_short, val_str, period));
+                    }
+                }
+            }
+            let n = v.get("series").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0);
+            format!(
+                "\"preset\":\"{}\",\"n_series\":{},\"_schema\":\".series[].{{label,key,dataset,unit,observations[].{{period,value}}}}\",\"latest\":[{}]",
+                preset, n,
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
+        "finance_curve" => {
+            // Futures forward curve: contracts[].{contract, price, change_from_front_pct}
+            let commodity = v.get("commodity").and_then(|c| c.as_str()).unwrap_or("?");
+            let structure = v.get("structure").and_then(|s| s.as_str()).unwrap_or("?");
+            let front = v.get("front_month_price").and_then(|p| p.as_f64()).unwrap_or(0.0);
+            let back = v.get("back_month_price").and_then(|p| p.as_f64()).unwrap_or(0.0);
+            let spread_pct = v.get("spread_pct").and_then(|s| s.as_f64()).unwrap_or(0.0);
+            let unit = v.get("unit").and_then(|u| u.as_str()).unwrap_or("");
+            let mut contracts_str = Vec::new();
+            if let Some(contracts) = v.get("contracts").and_then(|c| c.as_array()) {
+                for c in contracts {
+                    let month = c.get("contract").and_then(|m| m.as_str()).unwrap_or("?");
+                    let price = c.get("price").and_then(|p| p.as_f64()).unwrap_or(0.0);
+                    let chg = c.get("change_from_front_pct").and_then(|p| p.as_f64()).unwrap_or(0.0);
+                    contracts_str.push(format!("{}:{:.2}({:+.1}%)", month, price, chg));
+                }
+            }
+            format!(
+                "\"commodity\":\"{}\",\"structure\":\"{}\",\"unit\":\"{}\",\"front\":{:.2},\"back\":{:.2},\"spread_pct\":{:.1},\"contracts\":[{}]",
+                commodity, structure, unit, front, back, spread_pct,
+                contracts_str.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(",")
+            )
+        }
+        "finance_boe" => {
+            // BOE: series[].{code, label, observations[].{date, value}}
+            let preset = v.get("preset").and_then(|p| p.as_str()).unwrap_or("custom");
+            let mut lines = Vec::new();
+            if let Some(series) = v.get("series").and_then(|s| s.as_array()) {
+                for s in series {
+                    let label = s.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+                    let label_short: String = label.chars().take(25).collect();
+                    if let Some(obs) = s.get("observations").and_then(|o| o.as_array()).and_then(|a| a.last()) {
+                        let date = obs.get("date").and_then(|d| d.as_str()).unwrap_or("?");
+                        let val = obs.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        // BOE series: rates in %, FX as levels, M4 in millions
+                        let val_str = if label.contains("Rate") || label.contains("Yield") || label.contains("SONIA") {
+                            format!("{:.2}%", val)
+                        } else if label.contains("GBP/") {
+                            format!("{:.4}", val)
+                        } else if val > 1e6 {
+                            format!("{:.0}M", val / 1e6)
+                        } else {
+                            format!("{:.2}", val)
+                        };
+                        lines.push(format!("{}:{}({})", label_short, val_str, date));
+                    }
+                }
+            }
+            let n = v.get("series").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0);
+            format!(
+                "\"preset\":\"{}\",\"n_series\":{},\"_schema\":\".series[].{{code,label,observations[].{{date,value}}}}\",\"latest\":[{}]",
+                preset, n,
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
+        "finance_boj" => {
+            // BOJ: series[].{code, name, unit, observations[].{period, value}}
+            let preset = v.get("preset").and_then(|p| p.as_str()).unwrap_or("custom");
+            let mut lines = Vec::new();
+            if let Some(series) = v.get("series").and_then(|s| s.as_array()) {
+                for s in series {
+                    let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                    let name_short: String = name.chars().take(30).collect();
+                    let unit = s.get("unit").and_then(|u| u.as_str()).unwrap_or("");
+                    if let Some(obs) = s.get("observations").and_then(|o| o.as_array()).and_then(|a| a.last()) {
+                        let period = obs.get("period").and_then(|p| p.as_str()).unwrap_or("?");
+                        let val = obs.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let val_str = if unit.contains("%") || unit.to_lowercase().contains("percent") {
+                            format!("{:.2}%", val)
+                        } else if unit.contains("100mil") || unit.contains("億") {
+                            format!("{:.0}(100M¥)", val)
+                        } else if val.abs() > 1e6 {
+                            format!("{:.1}M", val / 1e6)
+                        } else {
+                            format!("{:.2}", val)
+                        };
+                        lines.push(format!("{}:{}({})", name_short, val_str, period));
+                    }
+                }
+            }
+            let n = v.get("series").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0);
+            format!(
+                "\"preset\":\"{}\",\"n_series\":{},\"_schema\":\".series[].{{code,name,unit,frequency,observations[].{{period,value}}}}\",\"latest\":[{}]",
+                preset, n,
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
+        "finance_bis" => {
+            // BIS: series[].{label, ref_area, unit, observations[].{period, value}}
+            let dataset = v.get("dataset").and_then(|d| d.as_str()).unwrap_or("?");
+            let mut lines = Vec::new();
+            if let Some(series) = v.get("series").and_then(|s| s.as_array()) {
+                for s in series {
+                    let label = s.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+                    let label_short: String = label.chars().take(30).collect();
+                    let ref_area = s.get("ref_area").and_then(|r| r.as_str()).unwrap_or("?");
+                    let unit = s.get("unit").and_then(|u| u.as_str());
+                    if let Some(obs) = s.get("observations").and_then(|o| o.as_array()).and_then(|a| a.last()) {
+                        let period = obs.get("period").and_then(|p| p.as_str()).unwrap_or("?");
+                        let val = obs.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let val_str = match unit {
+                            Some(u) if u.contains("percent") || u.contains("pct") => format!("{:.2}%", val),
+                            _ if val > 1e9 => format!("{:.1}B", val / 1e9),
+                            _ => format!("{:.2}", val),
+                        };
+                        lines.push(format!("{}[{}]:{}({})", label_short, ref_area, val_str, period));
+                    }
+                }
+            }
+            let n = v.get("series").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0);
+            format!(
+                "\"dataset\":\"{}\",\"n_series\":{},\"_schema\":\".series[].{{label,key,ref_area,unit,frequency,observations[].{{period,value}}}}\",\"latest\":[{}]",
+                dataset, n,
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
+        "finance_eia" => {
+            // EIA: series[].{label, observations[].{period, value, units, product_name}}
+            let preset = v.get("preset").and_then(|p| p.as_str()).unwrap_or("custom");
+            let mut lines = Vec::new();
+            if let Some(series) = v.get("series").and_then(|s| s.as_array()) {
+                for s in series {
+                    let label = s.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+                    let label_short: String = label.chars().take(35).collect();
+                    if let Some(obs_arr) = s.get("observations").and_then(|o| o.as_array()) {
+                        if let Some(latest) = obs_arr.last() {
+                            let period = latest.get("period").and_then(|p| p.as_str()).unwrap_or("?");
+                            let val = latest.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let units = latest.get("units").and_then(|u| u.as_str()).unwrap_or("");
+                            // WoW change if at least 2 observations
+                            let wow_str = if obs_arr.len() >= 2 {
+                                let prev = obs_arr[obs_arr.len() - 2].get("value").and_then(|v| v.as_f64()).unwrap_or(val);
+                                let chg = val - prev;
+                                if chg.abs() > 0.01 { format!(" WoW:{:+.1}", chg) } else { String::new() }
+                            } else { String::new() };
+                            let val_str = if units.contains("bbl") && val > 1e6 {
+                                format!("{:.1}M bbl", val / 1e6)
+                            } else if units.contains("Bcf") || units.contains("bcf") {
+                                format!("{:.0} Bcf", val)
+                            } else if val > 1e6 {
+                                format!("{:.1}M", val / 1e6)
+                            } else {
+                                format!("{:.1} {}", val, &units[..units.len().min(10)])
+                            };
+                            lines.push(format!("{}:{}{}({})", label_short, val_str, wow_str, period));
+                        }
+                    }
+                }
+            }
+            let n = v.get("series").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0);
+            format!(
+                "\"preset\":\"{}\",\"n_series\":{},\"_schema\":\".series[].{{label,observations[].{{period,value,units,product_name,area_name}}}}\",\"latest\":[{}]",
+                preset, n,
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
+        "finance_fiscal" => {
+            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
+            let mut lines = Vec::new();
+            match kind {
+                "debt" => {
+                    if let Some(items) = v.get("debt").and_then(|d| d.as_array()) {
+                        for item in items.iter().take(3) {
+                            let date = item.get("record_date").and_then(|d| d.as_str()).unwrap_or("?");
+                            let total = item.get("total_debt_billions").and_then(|t| t.as_f64()).unwrap_or(0.0);
+                            let public = item.get("public_debt_billions").and_then(|p| p.as_f64());
+                            let pub_str = public.map(|p| format!(" pub:${:.1}T", p / 1e3)).unwrap_or_default();
+                            lines.push(format!("{}|total:${:.2}T{}", date, total / 1e3, pub_str));
+                        }
+                    }
+                }
+                "statement" => {
+                    if let Some(items) = v.get("statement").and_then(|s| s.as_array()) {
+                        // Group by date, show most recent
+                        for item in items.iter().take(5) {
+                            let date = item.get("record_date").and_then(|d| d.as_str()).unwrap_or("?");
+                            let acct = item.get("account").and_then(|a| a.as_str()).unwrap_or("?");
+                            let acct_short: String = acct.chars().take(30).collect();
+                            let close = item.get("close_today_bal").and_then(|c| c.as_f64());
+                            let close_str = close.map(|c| format!("${:.0}M", c)).unwrap_or("?".to_string());
+                            lines.push(format!("{}|{}|{}", date, acct_short, close_str));
+                        }
+                    }
+                }
+                "interest" => {
+                    if let Some(items) = v.get("interest").and_then(|i| i.as_array()) {
+                        let mut seen_date = String::new();
+                        for item in items.iter().take(10) {
+                            let date = item.get("record_date").and_then(|d| d.as_str()).unwrap_or("?");
+                            let desc = item.get("security_desc").and_then(|s| s.as_str()).unwrap_or("?");
+                            let desc_short: String = desc.chars().take(25).collect();
+                            let rate = item.get("avg_interest_rate_pct").and_then(|r| r.as_f64()).unwrap_or(0.0);
+                            if seen_date.is_empty() { seen_date = date.to_string(); }
+                            if date == seen_date {
+                                lines.push(format!("{}:{:.3}%", desc_short, rate));
+                            }
+                        }
+                        if !seen_date.is_empty() {
+                            lines.insert(0, format!("as_of:{}", seen_date));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            format!(
+                "\"kind\":\"{}\",\"_schema\":\".{{debt[],statement[],interest[]}}\",\"data\":[{}]",
+                kind,
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
         _ => {
             // No custom summary for this tool — data is in the file, read it.
             format!("\"_hint\":\"no summary for {tool} — use data_query or read file directly\"")
@@ -954,31 +1152,6 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
 fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Vec<String>> {
     let s = |v: &str| v.to_string();
     match tool {
-        "finance_snapshot" => {
-            let tickers = args
-                .get("tickers")
-                .and_then(|t| t.as_str())
-                .ok_or_else(|| anyhow::anyhow!("tickers required"))?;
-            let mut v = vec![s("finance"), s("snapshot"), s("--tickers"), s(tickers)];
-            if let Some(returns) = args.get("returns") {
-                match returns {
-                    serde_json::Value::String(periods) if !periods.trim().is_empty() => {
-                        v.extend([s("--returns"), s(periods)]);
-                    }
-                    serde_json::Value::Bool(true) => {
-                        v.extend([s("--returns"), s("1mo,3mo,6mo,1y")]);
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(provider) = args.get("provider").and_then(|p| p.as_str()) {
-                v.extend([s("--provider"), s(provider)]);
-            }
-            if let Some(account) = args.get("ibkr_account").and_then(|a| a.as_str()) {
-                v.extend([s("--ibkr-account"), s(account)]);
-            }
-            Ok(v)
-        }
         "finance_timeseries" => {
             let mut v = vec![s("finance"), s("timeseries")];
             if let Some(preset) = args.get("preset").and_then(|p| p.as_str()) {
@@ -1054,6 +1227,9 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             } else {
                 // Default near-money to 10% to prevent oversized chain output
                 v.extend([s("--near-money"), s("10")]);
+            }
+            if args.get("all").and_then(|b| b.as_bool()).unwrap_or(false) {
+                v.push(s("--all"));
             }
             Ok(v)
         }
@@ -1506,6 +1682,9 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if let Some(report) = args.get("report").and_then(|r| r.as_str()) {
                 v.extend([s("--report"), s(report)]);
             }
+            if let Some(limit) = args.get("limit").and_then(|n| n.as_u64()) {
+                v.extend([s("--limit"), limit.to_string()]);
+            }
             Ok(v)
         }
         "finance_nyfed" => {
@@ -1601,6 +1780,16 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             if let Some(start) = args.get("start").and_then(|s| s.as_str()) {
                 v.extend([s("--start"), s(start)]);
+            }
+            Ok(v)
+        }
+        "finance_curve" => {
+            let mut v = vec![s("finance"), s("curve")];
+            if let Some(commodity) = args.get("commodity").and_then(|c| c.as_str()) {
+                v.extend([s("--commodity"), s(commodity)]);
+            }
+            if let Some(months) = args.get("months").and_then(|n| n.as_u64()) {
+                v.extend([s("--months"), months.to_string()]);
             }
             Ok(v)
         }

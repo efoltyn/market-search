@@ -3944,7 +3944,11 @@ fn cmd_finance_odds_where(args: FinanceOddsWhereArgs) -> Result<()> {
 
     #[derive(Serialize)]
     struct OddsWhereResponse {
+        ok: bool,
         cache_dir: String,
+        markets_db: String,
+        kalshi_csv_dir: String,
+        polymarket_csv_dir: String,
         kalshi_csv_path: String,
         polymarket_csv_path: String,
         merged_csv_path: String,
@@ -3961,7 +3965,14 @@ fn cmd_finance_odds_where(args: FinanceOddsWhereArgs) -> Result<()> {
     });
 
     let resp = OddsWhereResponse {
+        ok: true,
         cache_dir: cache_dir.display().to_string(),
+        markets_db: cache_dir.join("markets.db").display().to_string(),
+        // Both providers' CSVs live in the same `cache_dir`; per-provider
+        // paths are exposed as `*_csv_path` below. The directory keys are
+        // for callers that want to glob (e.g. delta archives next to the CSV).
+        kalshi_csv_dir: cache_dir.display().to_string(),
+        polymarket_csv_dir: cache_dir.display().to_string(),
         kalshi_csv_path: cache_dir.join("kalshi_markets.csv").display().to_string(),
         polymarket_csv_path: cache_dir
             .join("polymarket_markets.csv")

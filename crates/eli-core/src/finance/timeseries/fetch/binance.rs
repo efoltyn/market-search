@@ -185,6 +185,7 @@ pub(crate) async fn fetch_binance_series(
                     t,
                     o, h, l, c,
                     v: if v > 0.0 { Some(v) } else { None },
+                    kind: None,
                 });
 
                 // Advance cursor past this candle for pagination.
@@ -218,9 +219,16 @@ pub(crate) async fn fetch_binance_series(
         }
 
         if !all_candles.is_empty() {
+            let upstream = ticker
+                .strip_prefix("BN:")
+                .or_else(|| ticker.strip_prefix("BINANCE:"))
+                .unwrap_or(ticker)
+                .to_string();
             out.push(TickerSeries {
                 ticker: ticker.clone(),
                 candles: all_candles,
+                source: Some("binance".to_string()),
+                upstream_id: Some(upstream),
             });
         }
 

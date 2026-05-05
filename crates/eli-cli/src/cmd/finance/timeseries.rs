@@ -52,6 +52,36 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
     }
 
+    // Expand CURVE:<commodity> tickers into individual contract month tickers.
+    // e.g. "CURVE:oil" → CLK26.NYM,CLM26.NYM,CLN26.NYM,...
+    let mut expanded_tickers: Vec<String> = Vec::new();
+    for t in &tickers {
+        if let Some(commodity) = t.strip_prefix("CURVE:").or_else(|| t.strip_prefix("curve:")) {
+            let months = 12usize;
+            if commodity == "all" {
+                // Expand all commodities
+                for (aliases, _, _) in list_commodities() {
+                    let name = aliases.split(" / ").next().unwrap_or(aliases);
+                    if let Some(spec) = lookup_commodity(name) {
+                        for (ticker, _label) in generate_futures_tickers(&spec, months) {
+                            expanded_tickers.push(ticker);
+                        }
+                    }
+                }
+            } else if let Some(spec) = lookup_commodity(commodity) {
+                let futures = generate_futures_tickers(&spec, months);
+                for (ticker, _label) in futures {
+                    expanded_tickers.push(ticker);
+                }
+            } else {
+                expanded_tickers.push(t.clone());
+            }
+        } else {
+            expanded_tickers.push(t.clone());
+        }
+    }
+    let tickers = expanded_tickers;
+
     let mut range = eli_core::finance::Span::parse(&args.range)
         .map_err(|e| anyhow::anyhow!(e))
         .context("parse --range")?;
@@ -122,6 +152,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             let tickers: Vec<String> = series.iter().map(|s| s.ticker.clone()).collect();
             let resp = eli_core::finance::TimeseriesResponse {
                 provider,
+                sources: Vec::new(),
                 tickers,
                 granularity,
                 range,
@@ -184,15 +215,17 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         );
     let mut pyth_tickers = Vec::new();
     let mut fred_tickers = Vec::new();
-    let mut stooq_tickers = Vec::new();
     let mut binance_tickers = Vec::new();
+    let mut ibkr_tickers = Vec::new();
+    let mut cleveland_tickers = Vec::new();
     let mut yahoo_tickers = Vec::new();
     for t in &preset_stock_tickers {
         match classify_timeseries_ticker(t, &provider_str, fred_preset) {
             TimeseriesTickerBucket::Pyth => pyth_tickers.push(t.clone()),
             TimeseriesTickerBucket::Fred => fred_tickers.push(t.clone()),
-            TimeseriesTickerBucket::Stooq => stooq_tickers.push(t.clone()),
             TimeseriesTickerBucket::Binance => binance_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Ibkr => ibkr_tickers.push(t.clone()),
+            TimeseriesTickerBucket::ClevelandFed => cleveland_tickers.push(t.clone()),
             TimeseriesTickerBucket::Main => yahoo_tickers.push(t.clone()),
         }
     }
@@ -200,15 +233,17 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         match classify_timeseries_ticker(t, &provider_str, false) {
             TimeseriesTickerBucket::Pyth => pyth_tickers.push(t.clone()),
             TimeseriesTickerBucket::Fred => fred_tickers.push(t.clone()),
-            TimeseriesTickerBucket::Stooq => stooq_tickers.push(t.clone()),
             TimeseriesTickerBucket::Binance => binance_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Ibkr => ibkr_tickers.push(t.clone()),
+            TimeseriesTickerBucket::ClevelandFed => cleveland_tickers.push(t.clone()),
             TimeseriesTickerBucket::Main => yahoo_tickers.push(t.clone()),
         }
     }
     let has_pyth = !pyth_tickers.is_empty();
     let has_fred = !fred_tickers.is_empty();
-    let has_stooq = !stooq_tickers.is_empty();
     let has_binance = !binance_tickers.is_empty();
+    let has_ibkr = !ibkr_tickers.is_empty();
+    let has_cleveland = !cleveland_tickers.is_empty();
 
     let provider = match provider_str.as_str() {
         "auto" | "yahoo" => eli_core::finance::ProviderKind::Yahoo,
@@ -216,15 +251,14 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         "fred" => eli_core::finance::ProviderKind::Fred,
         "ibkr" => eli_core::finance::ProviderKind::Ibkr,
         "pyth" => eli_core::finance::ProviderKind::Pyth,
-        "stooq" => eli_core::finance::ProviderKind::Stooq,
         "binance" => eli_core::finance::ProviderKind::Binance,
         other => {
             anyhow::bail!(
-                "unsupported --provider '{other}' (supported: auto, mock, yahoo, fred, ibkr, pyth, stooq, binance)"
+                "unsupported --provider '{other}' (supported: auto, yahoo, fred, ibkr, pyth, binance)"
             )
         }
     };
-    let use_ibkr = matches!(provider, eli_core::finance::ProviderKind::Ibkr);
+    let use_ibkr_explicit = matches!(provider, eli_core::finance::ProviderKind::Ibkr);
 
     let cache_dir = if let Some(path) = args.cache_dir {
         path
@@ -234,32 +268,129 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         paths.cache_dir
     };
 
+    // Standalone Cleveland Fed path: only CLEV: tickers (+ optional prediction markets).
+    let only_cleveland = has_cleveland
+        && yahoo_tickers.is_empty()
+        && fred_tickers.is_empty()
+        && pyth_tickers.is_empty()
+        && binance_tickers.is_empty()
+        && ibkr_tickers.is_empty();
+    if only_cleveland {
+        let now = chrono::Utc::now();
+        let end = as_of.unwrap_or(now).min(now);
+        let start = end
+            .checked_sub_signed(range.approx_duration())
+            .ok_or_else(|| anyhow::anyhow!("range underflow"))?;
+
+        let clev_series = fetch_cleveland_fed_series(&cleveland_tickers, start, end).await?;
+        if clev_series.is_empty() {
+            anyhow::bail!("no Cleveland Fed nowcast data found for requested tickers/range");
+        }
+
+        let mut all_series = clev_series;
+
+        // Merge prediction market series if present.
+        if !prediction_markets.is_empty() {
+            let (market_series, _market_errors) =
+                fetch_prediction_market_series_batch(&prediction_markets, start, end, granularity)
+                    .await;
+            all_series.extend(market_series);
+        }
+
+        let analytics =
+            eli_core::finance::build_timeseries_analytics(&all_series, granularity);
+        let tickers_out: Vec<String> = all_series.iter().map(|s| s.ticker.clone()).collect();
+        let resp = eli_core::finance::TimeseriesResponse {
+            provider: eli_core::finance::ProviderKind::Fred, // closest match
+            sources: Vec::new(),
+            tickers: tickers_out,
+            granularity,
+            range,
+            start,
+            end,
+            generated_at: now,
+            series: all_series,
+            status: None,
+            error: None,
+            errors: None,
+            valid_tickers: None,
+            analytics: Some(analytics),
+            cache: None,
+        };
+
+        if let Some(out_path) = args.out {
+            let wr = write_json_out_with_meta(
+                out_path,
+                &resp,
+                "finance.timeseries",
+                &[
+                    format!("provider=cleveland_fed"),
+                    format!("tickers={}", cleveland_tickers.join(",")),
+                ],
+            )?;
+            println!(
+                "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
+                serde_json::to_string(&wr.out_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+                serde_json::to_string(&wr.meta_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+            );
+        } else {
+            let json = serde_json::to_string_pretty(&resp)?;
+            println!("{json}");
+        }
+        return Ok(());
+    }
+
     // Route to the right provider based on ticker types.
     // Priority: FRED tickers are the "main" request when present (most common preset case).
     // Pyth and Yahoo are merged in separately.
-    let (main_tickers, main_provider) = if has_fred {
+    let (main_tickers, main_provider) = if has_ibkr && yahoo_tickers.is_empty() && !has_fred && !has_pyth && !has_binance {
+        // All IBKR — strip IBKR: prefix before sending to provider
+        let stripped: Vec<String> = ibkr_tickers.iter().map(|t| t.strip_prefix("IBKR:").or_else(|| t.strip_prefix("ibkr:")).unwrap_or(t).to_string()).collect();
+        (stripped, eli_core::finance::ProviderKind::Ibkr)
+    } else if has_fred {
         // FRED as main, Pyth and Yahoo merged separately
         (fred_tickers.clone(), eli_core::finance::ProviderKind::Fred)
-    } else if has_stooq && yahoo_tickers.is_empty() && !has_pyth && !has_binance {
-        // All Stooq
-        (stooq_tickers.clone(), eli_core::finance::ProviderKind::Stooq)
-    } else if has_binance && yahoo_tickers.is_empty() && !has_pyth && !has_stooq {
+    } else if has_binance && yahoo_tickers.is_empty() && !has_pyth && !has_ibkr {
         // All Binance
         (binance_tickers.clone(), eli_core::finance::ProviderKind::Binance)
-    } else if has_pyth && yahoo_tickers.is_empty() && !has_stooq && !has_binance {
+    } else if has_pyth && yahoo_tickers.is_empty() && !has_binance && !has_ibkr {
         // All Pyth
         (pyth_tickers.clone(), eli_core::finance::ProviderKind::Pyth)
     } else {
         // Yahoo (default) — other providers merge in separately
         (yahoo_tickers.clone(), provider.clone())
     };
+    let use_ibkr = use_ibkr_explicit || matches!(main_provider, eli_core::finance::ProviderKind::Ibkr);
+
+    // FRED rejects sub-daily granularity. If the user requested 1m/5m/15m/30m/1h
+    // for a request whose main bucket is FRED, downgrade JUST the FRED sub-fetch
+    // to 1d rather than failing the whole call. Other-bucket merges below keep the
+    // user's requested granularity. A `granularity_downgraded` warning is added to
+    // each FRED series at response time.
+    let fred_granularity_downgraded = matches!(
+        main_provider,
+        eli_core::finance::ProviderKind::Fred
+    ) && matches!(
+        granularity.unit,
+        eli_core::finance::SpanUnit::Minute | eli_core::finance::SpanUnit::Hour
+    );
+    let main_granularity = if fred_granularity_downgraded {
+        eli_core::finance::Span {
+            n: 1,
+            unit: eli_core::finance::SpanUnit::Day,
+        }
+    } else {
+        granularity
+    };
 
     let req = eli_core::finance::TimeseriesRequest {
         tickers: main_tickers.clone(),
         range,
-        granularity,
+        granularity: main_granularity,
         as_of,
-        provider: main_provider,
+        provider: main_provider.clone(),
         max_points_per_ticker: args.max_points_per_ticker,
         ibkr: use_ibkr.then(|| {
             build_ibkr_connection_config(
@@ -275,6 +406,32 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
 
     let mut resp = eli_core::finance::fetch_timeseries(req, &cache_dir)
         .await
+        .map(|mut r| {
+            if fred_granularity_downgraded {
+                let warn = format!(
+                    "granularity downgraded from requested {:?} to 1d for FRED provider (sub-daily not supported)",
+                    granularity.unit
+                );
+                r.errors.get_or_insert_with(Vec::new).push(
+                    eli_core::finance::TimeseriesError {
+                        ticker: main_tickers.join(","),
+                        stage: Some("granularity_downgrade".to_string()),
+                        message: warn,
+                    },
+                );
+            }
+            // IBKR strips its `IBKR:` prefix before fetch (line ~354). Restore it on
+            // returned series so callers see the round-tripped ticker — matching how
+            // PYTH:/CLEV:/POLYMARKET:/KALSHI: prefixes round-trip in their fetchers.
+            if matches!(main_provider, eli_core::finance::ProviderKind::Ibkr) {
+                for s in &mut r.series {
+                    if !s.ticker.starts_with("IBKR:") && !s.ticker.starts_with("ibkr:") {
+                        s.ticker = format!("IBKR:{}", s.ticker);
+                    }
+                }
+            }
+            r
+        })
         .map_err(|e| anyhow::anyhow!(e))
         .context("fetch timeseries")?;
 
@@ -346,44 +503,6 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
     }
 
-    // If mixed tickers: fetch Stooq tickers separately and merge.
-    if has_stooq && !stooq_tickers.iter().all(|t| main_tickers.contains(t)) {
-        let stooq_req = eli_core::finance::TimeseriesRequest {
-            tickers: stooq_tickers.clone(),
-            range,
-            granularity,
-            as_of,
-            provider: eli_core::finance::ProviderKind::Stooq,
-            max_points_per_ticker: args.max_points_per_ticker,
-            ibkr: None,
-        };
-        match eli_core::finance::fetch_timeseries(stooq_req, &cache_dir).await {
-            Ok(stooq_resp) => {
-                resp.series.extend(stooq_resp.series);
-                resp.tickers.extend(stooq_tickers.clone());
-                if let Some(ref stooq_errors) = stooq_resp.errors {
-                    resp.errors
-                        .get_or_insert_with(Vec::new)
-                        .extend(stooq_errors.clone());
-                }
-                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-                    &resp.series,
-                    resp.granularity,
-                ));
-            }
-            Err(e) => {
-                eprintln!("warning: Stooq fetch failed: {e}");
-                resp.errors
-                    .get_or_insert_with(Vec::new)
-                    .push(eli_core::finance::TimeseriesError {
-                        ticker: stooq_tickers.join(","),
-                        stage: Some("stooq".to_string()),
-                        message: format!("Stooq provider failed: {e}"),
-                    });
-            }
-        }
-    }
-
     // If mixed tickers: fetch Binance tickers separately and merge.
     if has_binance && !binance_tickers.iter().all(|t| main_tickers.contains(t)) {
         let binance_req = eli_core::finance::TimeseriesRequest {
@@ -417,6 +536,94 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                         ticker: binance_tickers.join(","),
                         stage: Some("binance".to_string()),
                         message: format!("Binance provider failed: {e}"),
+                    });
+            }
+        }
+    }
+
+    // If mixed tickers: fetch IBKR tickers separately and merge.
+    // Skip if IBKR is already the main provider (all tickers were IBKR).
+    if has_ibkr && !use_ibkr {
+        let stripped: Vec<String> = ibkr_tickers
+            .iter()
+            .map(|t| {
+                t.strip_prefix("IBKR:")
+                    .or_else(|| t.strip_prefix("ibkr:"))
+                    .unwrap_or(t)
+                    .to_string()
+            })
+            .collect();
+        let ibkr_conn = eli_core::finance::IbkrConnectionConfig {
+            market_data_type: Some(3), // delayed
+            ..Default::default()
+        };
+        let ibkr_req = eli_core::finance::TimeseriesRequest {
+            tickers: stripped,
+            range,
+            granularity,
+            as_of,
+            provider: eli_core::finance::ProviderKind::Ibkr,
+            max_points_per_ticker: args.max_points_per_ticker,
+            ibkr: Some(ibkr_conn),
+        };
+        match eli_core::finance::fetch_timeseries(ibkr_req, &cache_dir).await {
+            Ok(mut ibkr_resp) => {
+                // Re-attach IBKR: prefix on returned series so round-trip is consistent
+                // with PYTH:/CLEV:/POLYMARKET:/KALSHI: prefix preservation.
+                for s in &mut ibkr_resp.series {
+                    if !s.ticker.starts_with("IBKR:") && !s.ticker.starts_with("ibkr:") {
+                        s.ticker = format!("IBKR:{}", s.ticker);
+                    }
+                }
+                resp.series.extend(ibkr_resp.series);
+                resp.tickers.extend(ibkr_tickers.clone());
+                if let Some(ref ibkr_errors) = ibkr_resp.errors {
+                    resp.errors
+                        .get_or_insert_with(Vec::new)
+                        .extend(ibkr_errors.clone());
+                }
+                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+                    &resp.series,
+                    resp.granularity,
+                ));
+            }
+            Err(e) => {
+                eprintln!("warning: IBKR fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: ibkr_tickers.join(","),
+                        stage: Some("ibkr".to_string()),
+                        message: format!("IBKR provider failed: {e}"),
+                    });
+            }
+        }
+    }
+
+    // If mixed tickers: fetch Cleveland Fed tickers separately and merge.
+    if has_cleveland && !only_cleveland {
+        let now = chrono::Utc::now();
+        let clev_end = as_of.unwrap_or(now).min(now);
+        let clev_start = clev_end
+            .checked_sub_signed(range.approx_duration())
+            .ok_or_else(|| anyhow::anyhow!("range underflow"))?;
+        match fetch_cleveland_fed_series(&cleveland_tickers, clev_start, clev_end).await {
+            Ok(clev_series) => {
+                resp.series.extend(clev_series);
+                resp.tickers.extend(cleveland_tickers.clone());
+                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+                    &resp.series,
+                    resp.granularity,
+                ));
+            }
+            Err(e) => {
+                eprintln!("warning: Cleveland Fed fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: cleveland_tickers.join(","),
+                        stage: Some("cleveland_fed".to_string()),
+                        message: format!("Cleveland Fed provider failed: {e}"),
                     });
             }
         }
@@ -558,6 +765,84 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
     }
 
+    // Populate top-level `sources` with distinct providers actually present in series.
+    // The legacy `provider` field reflects only the dispatch-time main bucket and lies
+    // on mixed calls; `sources` is the truth.
+    {
+        let mut distinct: Vec<String> = Vec::new();
+        for s in &resp.series {
+            if let Some(src) = &s.source {
+                if !distinct.iter().any(|x| x == src) {
+                    distinct.push(src.clone());
+                }
+            }
+        }
+        distinct.sort();
+        resp.sources = distinct;
+    }
+
+    // Silent-drop detection: every requested ticker must appear in either resp.series
+    // or resp.errors. If a ticker fell through both buckets without an explicit error
+    // (e.g., classified to a bucket that returned data for siblings but skipped this one),
+    // surface it as a stage="silent_drop" error so the caller knows.
+    {
+        use std::collections::HashSet;
+        let mut requested: HashSet<String> = HashSet::new();
+        for t in &preset_stock_tickers {
+            requested.insert(t.clone());
+        }
+        for t in &tickers {
+            requested.insert(t.clone());
+        }
+        for pm in &prediction_markets {
+            requested.insert(pm.market.clone());
+        }
+        let mut accounted: HashSet<String> = HashSet::new();
+        for s in &resp.series {
+            // Series ticker often differs from input (PYTH:BTC ↔ PYTH:BTC, 906975 ↔
+            // POLYMARKET:906975:YES, IBKR:FUT:CL:NYMEX ↔ FUT:CL:NYMEX). Mark any
+            // requested ticker that appears as substring of the series ticker
+            // OR that contains the series ticker as accounted-for.
+            for req in &requested {
+                if s.ticker == *req
+                    || s.ticker.contains(req.as_str())
+                    || req.contains(s.ticker.as_str())
+                {
+                    accounted.insert(req.clone());
+                }
+            }
+        }
+        if let Some(errs) = &resp.errors {
+            for e in errs {
+                for req in &requested {
+                    if e.ticker == *req
+                        || e.ticker.contains(req.as_str())
+                        || req.contains(e.ticker.as_str())
+                    {
+                        accounted.insert(req.clone());
+                    }
+                }
+            }
+        }
+        let dropped: Vec<String> = requested.difference(&accounted).cloned().collect();
+        if !dropped.is_empty() {
+            let drop_errors: Vec<eli_core::finance::TimeseriesError> = dropped
+                .into_iter()
+                .map(|t| eli_core::finance::TimeseriesError {
+                    ticker: t,
+                    stage: Some("silent_drop".to_string()),
+                    message:
+                        "no provider returned data and no error was recorded for this ticker"
+                            .to_string(),
+                })
+                .collect();
+            resp.errors.get_or_insert_with(Vec::new).extend(drop_errors);
+            if resp.status.is_none() && !resp.series.is_empty() {
+                resp.status = Some("partial".to_string());
+            }
+        }
+    }
+
     if let Some(out_path) = args.out {
         let wr = write_json_out_with_meta(
             out_path,
@@ -607,8 +892,9 @@ fn parse_window_start(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
 enum TimeseriesTickerBucket {
     Pyth,
     Fred,
-    Stooq,
     Binance,
+    Ibkr,
+    ClevelandFed,
     Main,
 }
 
@@ -617,11 +903,14 @@ fn classify_timeseries_ticker(
     provider_str: &str,
     auto_prefers_fred: bool,
 ) -> TimeseriesTickerBucket {
+    if ticker.starts_with("CLEV:") || ticker.starts_with("clev:") {
+        return TimeseriesTickerBucket::ClevelandFed;
+    }
+    if ticker.starts_with("IBKR:") || ticker.starts_with("ibkr:") || provider_str == "ibkr" {
+        return TimeseriesTickerBucket::Ibkr;
+    }
     if eli_core::finance::is_pyth_ticker(ticker) || provider_str == "pyth" {
         return TimeseriesTickerBucket::Pyth;
-    }
-    if eli_core::finance::is_stooq_ticker(ticker) || provider_str == "stooq" {
-        return TimeseriesTickerBucket::Stooq;
     }
     if eli_core::finance::is_binance_ticker(ticker) || provider_str == "binance" {
         return TimeseriesTickerBucket::Binance;
@@ -713,6 +1002,97 @@ fn parse_optional_prediction_market_request(
     }))
 }
 
+/// Known futures root symbols → (exchange, contract offsets in months).
+/// When a bare root symbol is passed as a ticker, it auto-expands to the full
+/// curve across multiple contract months via IBKR.
+/// Valid contract-month set for a futures root.
+/// `&[u32]` of months 1-12 that are actually traded.
+type ContractMonths = &'static [u32];
+
+/// Every month — energy, metals (mostly).
+const ALL_MONTHS: ContractMonths = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+/// Quarterly — Treasuries, equity index, palladium, platinum.
+const QUARTERLY_MONTHS: ContractMonths = &[3, 6, 9, 12];
+/// Grains: Mar, May, Jul, Sep, Dec.
+const GRAIN_MONTHS: ContractMonths = &[3, 5, 7, 9, 12];
+/// Soybeans: Jan, Mar, May, Jul, Aug, Sep, Nov.
+const SOYBEAN_MONTHS: ContractMonths = &[1, 3, 5, 7, 8, 9, 11];
+/// Sugar: Mar, May, Jul, Oct.
+const SUGAR_MONTHS: ContractMonths = &[3, 5, 7, 10];
+/// Cotton: Mar, May, Jul, Oct, Dec.
+const COTTON_MONTHS: ContractMonths = &[3, 5, 7, 10, 12];
+
+fn futures_curve_months(root: &str) -> Option<(&'static str, ContractMonths)> {
+    match root {
+        // Energy — every month
+        "CL" => Some(("NYMEX", ALL_MONTHS)),    // WTI Crude
+        "BZ" => Some(("NYMEX", ALL_MONTHS)),    // Brent Crude Last Day Financial (NYMEX cash-settled, Yahoo BZ=F)
+        "COIL" | "B" | "BRN" => Some(("IPE", ALL_MONTHS)),  // ICE Brent (physical, IPE/ICEEU)
+        "HO" => Some(("NYMEX", ALL_MONTHS)),    // Heating Oil
+        "RB" => Some(("NYMEX", ALL_MONTHS)),    // RBOB Gasoline
+        "NG" => Some(("NYMEX", ALL_MONTHS)),    // Natural Gas
+        "GOIL" => Some(("IPE", ALL_MONTHS)),    // ICE Gasoil
+        // Metals
+        "GC" => Some(("COMEX", &[2, 4, 6, 8, 10, 12])),  // Gold (even months + active)
+        "SI" => Some(("COMEX", &[3, 5, 7, 9, 12])),      // Silver
+        "HG" => Some(("COMEX", ALL_MONTHS)),              // Copper
+        "PA" => Some(("NYMEX", QUARTERLY_MONTHS)),        // Palladium
+        "PL" => Some(("NYMEX", &[1, 4, 7, 10])),          // Platinum (Jan/Apr/Jul/Oct)
+        // Treasuries — quarterly (Mar/Jun/Sep/Dec)
+        "ZT" => Some(("CBOT", QUARTERLY_MONTHS)),         // 2-Year Note
+        "ZF" => Some(("CBOT", QUARTERLY_MONTHS)),         // 5-Year Note
+        "ZN" => Some(("CBOT", QUARTERLY_MONTHS)),         // 10-Year Note
+        "ZB" => Some(("CBOT", QUARTERLY_MONTHS)),         // 30-Year Bond
+        "UB" => Some(("CBOT", QUARTERLY_MONTHS)),         // Ultra Bond
+        // Equity index — quarterly
+        "ES" => Some(("CME", QUARTERLY_MONTHS)),          // E-mini S&P 500
+        "NQ" => Some(("CME", QUARTERLY_MONTHS)),          // E-mini Nasdaq
+        "YM" => Some(("CBOT", QUARTERLY_MONTHS)),         // E-mini Dow
+        "RTY" => Some(("CME", QUARTERLY_MONTHS)),         // E-mini Russell
+        // Volatility — every month
+        "VIX" | "VX" => Some(("CFE", ALL_MONTHS)),        // VIX monthly
+        // Agriculture
+        "ZC" => Some(("CBOT", GRAIN_MONTHS)),             // Corn
+        "ZW" => Some(("CBOT", GRAIN_MONTHS)),             // Wheat
+        "ZS" => Some(("CBOT", SOYBEAN_MONTHS)),           // Soybeans
+        "KC" => Some(("NYBOT", GRAIN_MONTHS)),            // Coffee (Mar/May/Jul/Sep/Dec)
+        "CT" => Some(("NYBOT", COTTON_MONTHS)),           // Cotton
+        "SB" => Some(("NYBOT", SUGAR_MONTHS)),            // Sugar
+        "CC" => Some(("NYBOT", GRAIN_MONTHS)),            // Cocoa (Mar/May/Jul/Sep/Dec)
+        _ => None,
+    }
+}
+
+/// Generate up to 8 forward contract months by walking the valid contract calendar
+/// starting from the current month. Skips months not in the valid set.
+fn expand_futures_curve(root: &str) -> Option<Vec<String>> {
+    let (exchange, valid_months) = futures_curve_months(root)?;
+    let now = chrono::Utc::now();
+    let now_year = now.format("%Y").to_string().parse::<i32>().ok()?;
+    let now_month = now.format("%m").to_string().parse::<u32>().ok()?;
+
+    let mut tickers = Vec::new();
+    let mut year = now_year;
+    let mut month = now_month;
+    let max_contracts = 8;
+    // Walk forward up to ~3 years to collect 8 contracts.
+    for _ in 0..36 {
+        if tickers.len() >= max_contracts {
+            break;
+        }
+        if valid_months.contains(&month) {
+            let ym = format!("{year:04}{month:02}");
+            tickers.push(format!("IBKR:FUT:{root}:{exchange}:{ym}"));
+        }
+        month += 1;
+        if month > 12 {
+            month = 1;
+            year += 1;
+        }
+    }
+    Some(tickers)
+}
+
 fn push_timeseries_input(
     raw: &str,
     prediction_markets: &mut Vec<PredictionMarketRequest>,
@@ -724,6 +1104,11 @@ fn push_timeseries_input(
     }
     if let Some(req) = parse_prediction_market_ticker(trimmed) {
         push_prediction_market_request(prediction_markets, req);
+    } else if let Some(curve_tickers) = expand_futures_curve(trimmed) {
+        // Bare futures root symbol → auto-expand to the full curve
+        for t in curve_tickers {
+            plain_tickers.push(t);
+        }
     } else {
         plain_tickers.push(trimmed.to_string());
     }
@@ -848,6 +1233,201 @@ async fn fetch_prediction_market_series(
             fetch_polymarket_market_series(req, start, end, granularity).await
         }
     }
+}
+
+const CLEVELAND_FED_NOWCAST_URL: &str =
+    "https://www.clevelandfed.org/-/media/files/webcharts/inflationnowcasting/nowcast_quarter.json";
+
+/// Fetch Cleveland Fed inflation nowcast series for the given CLEV: tickers.
+/// Returns daily nowcast values as TickerSeries (OHLC all set to the nowcast value).
+async fn fetch_cleveland_fed_series(
+    tickers: &[String],
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<eli_core::finance::TickerSeries>> {
+    use chrono::{NaiveDate, TimeZone};
+
+    // Map CLEV: ticker suffixes to FusionCharts series names.
+    let series_map: Vec<(String, &str)> = tickers
+        .iter()
+        .filter_map(|t| {
+            let suffix = t
+                .strip_prefix("CLEV:")
+                .or_else(|| t.strip_prefix("clev:"))
+                .unwrap_or(t)
+                .to_ascii_uppercase();
+            let fc_name = match suffix.as_str() {
+                "CPI" => "CPI Inflation",
+                "CORECPI" => "Core CPI Inflation",
+                "PCE" => "PCE Inflation",
+                "COREPCE" => "Core PCE Inflation",
+                _ => return None,
+            };
+            Some((t.clone(), fc_name))
+        })
+        .collect();
+
+    if series_map.is_empty() {
+        anyhow::bail!("no valid Cleveland Fed tickers (supported: CPI, CORECPI, PCE, COREPCE)");
+    }
+
+    // Fetch the JSON.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let body = client
+        .get(CLEVELAND_FED_NOWCAST_URL)
+        .header("User-Agent", "eli/1.0")
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let quarters: Vec<serde_json::Value> = serde_json::from_str(&body)?;
+
+    if quarters.is_empty() {
+        anyhow::bail!("Cleveland Fed nowcast returned empty data");
+    }
+
+    // Build date+value vectors from ALL quarters that overlap [start, end].
+    // For each quarter: subcaption = "YYYY:QN", categories has date labels.
+    let mut ticker_candles: BTreeMap<String, Vec<eli_core::finance::Candle>> = BTreeMap::new();
+    for (orig_ticker, _) in &series_map {
+        ticker_candles.insert(orig_ticker.clone(), Vec::new());
+    }
+
+    for quarter in &quarters {
+        let subcaption = quarter
+            .pointer("/chart/subcaption")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // Parse "YYYY:QN" → base year.
+        let base_year: i32 = match subcaption.split(':').next().and_then(|y| y.parse().ok()) {
+            Some(y) => y,
+            None => continue,
+        };
+
+        // Extract non-vline date labels.
+        let categories = match quarter.pointer("/categories/0/category").and_then(|v| v.as_array())
+        {
+            Some(c) => c,
+            None => continue,
+        };
+        let mut date_labels: Vec<NaiveDate> = Vec::new();
+        let mut prev_month: u32 = 0;
+        let mut year = base_year;
+        for cat in categories {
+            if cat.get("vline").is_some() {
+                continue;
+            }
+            let label = match cat.get("label").and_then(|v| v.as_str()) {
+                Some(l) => l,
+                None => continue,
+            };
+            // Label format: "MM/DD"
+            let parts: Vec<&str> = label.split('/').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let month: u32 = match parts[0].parse() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let day: u32 = match parts[1].parse() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            // Detect year rollover (e.g., Q4: Oct→Dec is base_year, Jan→Mar is base_year+1).
+            if month < prev_month && prev_month >= 10 && month <= 3 {
+                year = base_year + 1;
+            }
+            prev_month = month;
+            if let Some(nd) = NaiveDate::from_ymd_opt(year, month, day) {
+                date_labels.push(nd);
+            }
+        }
+
+        // Extract dataset values for requested series.
+        let datasets = match quarter.get("dataset").and_then(|v| v.as_array()) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        for (orig_ticker, fc_name) in &series_map {
+            // Find matching dataset.
+            let ds = match datasets.iter().find(|d| {
+                d.get("seriesname")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == *fc_name)
+                    .unwrap_or(false)
+            }) {
+                Some(d) => d,
+                None => continue,
+            };
+            let data_arr = match ds.get("data").and_then(|v| v.as_array()) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            let candles = ticker_candles.get_mut(orig_ticker).unwrap();
+            // data_arr aligns 1:1 with non-vline categories.
+            let mut date_idx = 0;
+            for item in data_arr {
+                if date_idx >= date_labels.len() {
+                    break;
+                }
+                let nd = date_labels[date_idx];
+                date_idx += 1;
+                let val_str = match item.get("value").and_then(|v| v.as_str()) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => continue,
+                };
+                let val: f64 = match val_str.parse() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let dt = chrono::Utc
+                    .from_utc_datetime(&nd.and_hms_opt(0, 0, 0).unwrap());
+                // Filter to [start, end].
+                if dt < start || dt > end {
+                    continue;
+                }
+                candles.push(eli_core::finance::Candle {
+                    t: dt,
+                    o: val,
+                    h: val,
+                    l: val,
+                    c: val,
+                    v: None,
+                    kind: Some("point".to_string()),
+                });
+            }
+        }
+    }
+
+    // Build TickerSeries results.
+    let mut result = Vec::new();
+    for (orig_ticker, _) in &series_map {
+        let mut candles = ticker_candles.remove(orig_ticker).unwrap_or_default();
+        // Deduplicate by date (later quarters may overlap).
+        candles.sort_by_key(|c| c.t);
+        candles.dedup_by_key(|c| c.t);
+        if !candles.is_empty() {
+            let upstream = orig_ticker
+                .strip_prefix("CLEV:")
+                .or_else(|| orig_ticker.strip_prefix("clev:"))
+                .unwrap_or(orig_ticker)
+                .to_string();
+            result.push(eli_core::finance::TickerSeries {
+                ticker: orig_ticker.clone(),
+                candles,
+                source: Some("cleveland_fed".to_string()),
+                upstream_id: Some(upstream),
+            });
+        }
+    }
+
+    Ok(result)
 }
 
 async fn fetch_prediction_market_series_batch(
@@ -1088,6 +1668,7 @@ async fn fetch_kalshi_market_series(
             l: req.side.apply(yes_low),
             c: req.side.apply(yes_close),
             v: kc.volume.map(|v| v as f64),
+            kind: None,
         });
     }
 
@@ -1121,6 +1702,8 @@ async fn fetch_kalshi_market_series(
             req.side.as_str().to_ascii_uppercase()
         ),
         candles,
+        source: Some("kalshi".to_string()),
+        upstream_id: Some(market.market_ticker.clone()),
     })
 }
 
@@ -1291,6 +1874,7 @@ async fn fetch_polymarket_market_series(
             l: ohlc.l,
             c: ohlc.c,
             v: None,
+            kind: None,
         });
     }
 
@@ -1300,6 +1884,8 @@ async fn fetch_polymarket_market_series(
             req.side.as_str().to_ascii_uppercase()
         ),
         candles,
+        source: Some("polymarket".to_string()),
+        upstream_id: Some(market_id.to_string()),
     })
 }
 
@@ -1469,7 +2055,7 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
             // Employment
             "UNRATE", "PAYEMS", "ICSA", "JTSJOL",
             // GDP
-            "GDPC1", "INDPRO",
+            "GDPC1", "INDPRO", "GDPNOW", "PCENOW",
             // Rates
             "FEDFUNDS", "DGS2", "DGS10", "DGS30", "T10Y2Y", "DFII10", "MORTGAGE30US",
             // Debt
@@ -1594,8 +2180,38 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
             "BUSLOANS",       // C&I loans
             "DRTSCILM",      // SLOOS lending standards
         ],
+        // Energy futures via IBKR (front month each)
+        "energy" | "oil" => vec![
+            "IBKR:FUT:CL:NYMEX",    // WTI Crude
+            "IBKR:FUT:COIL:IPE",    // ICE Brent
+            "IBKR:FUT:HO:NYMEX",    // Heating Oil
+            "IBKR:FUT:RB:NYMEX",    // RBOB Gasoline
+            "IBKR:FUT:NG:NYMEX",    // Natural Gas
+            "IBKR:FUT:GOIL:IPE",    // ICE Gasoil
+        ],
+        // Broad commodities via IBKR
+        "commodities" | "cmdty" => vec![
+            "IBKR:FUT:CL:NYMEX",    // WTI Crude
+            "IBKR:FUT:GC:COMEX",    // Gold
+            "IBKR:FUT:SI:COMEX",    // Silver
+            "IBKR:FUT:HG:COMEX",    // Copper
+            "IBKR:FUT:ZC:CBOT",     // Corn
+            "IBKR:FUT:ZW:CBOT",     // Wheat
+            "IBKR:FUT:ZS:CBOT",     // Soybeans
+            "IBKR:FUT:KC:NYBOT",    // Coffee
+            "IBKR:FUT:CT:NYBOT",    // Cotton
+            "IBKR:FUT:SB:NYBOT",    // Sugar
+        ],
+        // Treasury futures + VIX via IBKR
+        "treasuries" | "treasury_futures" => vec![
+            "IBKR:FUT:ZT:CBOT",     // 2-Year Note
+            "IBKR:FUT:ZF:CBOT",     // 5-Year Note
+            "IBKR:FUT:ZN:CBOT",     // 10-Year Note
+            "IBKR:FUT:ZB:CBOT",     // 30-Year Bond
+            "IBKR:FUT:VIX:CFE",     // VIX Futures
+        ],
         other => anyhow::bail!(
-            "unknown --preset '{other}' (supported: macro, forex_majors, yield_curve, liquidity, crypto, credit, financial_conditions, recession, fed_balance_sheet, housing, labor, inflation, real_rates, consumer_credit)"
+            "unknown --preset '{other}' (supported: macro, forex_majors, yield_curve, liquidity, crypto, credit, financial_conditions, recession, fed_balance_sheet, housing, labor, inflation, real_rates, consumer_credit, energy, commodities, treasuries). For futures curves, pass the root symbol directly as a ticker (e.g. --tickers CL,GC,ZN) and the tool auto-expands to the curve."
         ),
     };
     Ok(tickers.into_iter().map(String::from).collect())
@@ -1604,8 +2220,14 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
 /// Heuristic: FRED series IDs are ALL-CAPS alphanumeric (plus underscore),
 /// typically 3-20 chars, no dots/dashes/equals/carets that Yahoo tickers use.
 /// Known FRED prefixes: DGS, BAML, FRED indicators like UNRATE, CPIAUCSL, etc.
+/// Also accepts explicit `FRED:` / `fred:` prefix (stripped before classification).
 fn is_fred_ticker(ticker: &str) -> bool {
-    let t = ticker.trim();
+    let t_trimmed = ticker.trim();
+    // Strip explicit FRED:/fred: prefix before checking the bare ID against the heuristic.
+    let t = t_trimmed
+        .strip_prefix("FRED:")
+        .or_else(|| t_trimmed.strip_prefix("fred:"))
+        .unwrap_or(t_trimmed);
     if t.is_empty() || t.len() < 2 {
         return false;
     }

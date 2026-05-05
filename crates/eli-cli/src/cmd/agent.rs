@@ -152,9 +152,13 @@ async fn cmd_agent_report(
             "snapshot".to_string(),
             vec![
                 "finance".to_string(),
-                "snapshot".to_string(),
-                "--ticker".to_string(),
+                "timeseries".to_string(),
+                "--tickers".to_string(),
                 tickers_csv.clone(),
+                "--range".to_string(),
+                "5d".to_string(),
+                "--granularity".to_string(),
+                "1d".to_string(),
             ],
         ),
         (
@@ -793,11 +797,14 @@ fn extract_watch_rows(snapshot_value: Option<&serde_json::Value>) -> Vec<ReportW
     let Some(value) = snapshot_value else {
         return out;
     };
-    let Some(rows) = value.get("snapshots").and_then(|v| v.as_array()) else {
+    // The "snapshot" job is now a thin `finance timeseries --range 5d --granularity 1d`
+    // call. Parse the series array, derive current price from the last candle close,
+    // and 1-day change from the previous candle.
+    let Some(series_arr) = value.get("series").and_then(|v| v.as_array()) else {
         return out;
     };
-    for row in rows {
-        let ticker = row
+    for series in series_arr {
+        let ticker = series
             .get("ticker")
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -805,20 +812,20 @@ fn extract_watch_rows(snapshot_value: Option<&serde_json::Value>) -> Vec<ReportW
         if ticker.is_empty() {
             continue;
         }
-        let name = row
-            .get("short_name")
-            .and_then(|v| v.as_str())
-            .or_else(|| row.get("long_name").and_then(|v| v.as_str()))
-            .unwrap_or(&ticker)
-            .to_string();
-        let price = row.get("current_price").and_then(|v| v.as_f64());
-        let change_pct = match (
-            row.get("current_price").and_then(|v| v.as_f64()),
-            row.get("previous_close").and_then(|v| v.as_f64()),
-        ) {
-            (Some(curr), Some(prev)) if prev > 0.0 => Some((curr / prev - 1.0) * 100.0),
+        let Some(candles) = series.get("candles").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let valid: Vec<f64> = candles
+            .iter()
+            .filter_map(|c| c.get("c").and_then(|v| v.as_f64()))
+            .filter(|x| x.is_finite() && *x > 0.0)
+            .collect();
+        let price = valid.last().copied();
+        let change_pct = match (valid.last(), valid.iter().rev().nth(1)) {
+            (Some(curr), Some(prev)) if *prev > 0.0 => Some((curr / prev - 1.0) * 100.0),
             _ => None,
         };
+        let name = ticker.clone();
         out.push(ReportWatchRow {
             ticker,
             name,

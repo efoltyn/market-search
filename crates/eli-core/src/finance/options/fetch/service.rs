@@ -262,7 +262,6 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
         let mut snapshots: Vec<ExpirySnapshot> = Vec::new();
         let mut aggregate_volume: u64 = 0;
         let mut weighted_pc_sum: f64 = 0.0;
-        let mut first_pc_ratio: Option<f64> = None;
 
         for exp_ts in expiration_timestamps {
             let url = format!(
@@ -389,10 +388,6 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
                                     .map(|dt| (dt - Utc::now()).num_days())
                                     .unwrap_or(0);
 
-                                if first_pc_ratio.is_none() && total_vol > 0 {
-                                    first_pc_ratio = Some(pc_vol);
-                                }
-
                                 aggregate_volume += total_vol;
                                 weighted_pc_sum += pc_vol * total_vol as f64;
 
@@ -434,12 +429,6 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             weighted_pc_sum / aggregate_volume as f64
         } else {
             0.0
-        };
-
-        let near_term_bias = match first_pc_ratio {
-            Some(pc) if pc < 0.7 => "bullish".to_string(),
-            Some(pc) if pc > 1.3 => "bearish".to_string(),
-            _ => "neutral".to_string(),
         };
 
         // Compute cross-expiry analytics
@@ -530,7 +519,6 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             aggregate_volume,
             aggregate_oi,
             weighted_put_call_ratio,
-            near_term_bias,
             oi_concentration,
             iv_term_structure,
             max_pain_range,
@@ -751,12 +739,16 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             .single()
             .map(|dt| dt.format("%Y-%m-%d").to_string())
             .unwrap_or_default();
-        // Keep IV even if very small — only discard truly zero / negative values.
-        // The previous 1e-4 threshold was discarding legitimate low-IV contracts
-        // (e.g. deep-ITM options), causing ATM IV lookups to return None.
+        // Validate IV range. Yahoo returns garbage IV (≈0) when markets are closed
+        // and bid/ask are 0.0 — the previous "v <= 0.0" gate let through values like
+        // 0.0001 (= 0.01% annualized, impossibly low for any liquid option). Discard
+        // anything below 0.005 (= 0.5% annualized) and anything above 5.0 (= 500%
+        // annualized, hyperinflation-tier or junk). Real liquid-option IV ranges
+        // 0.05 – 2.0 (5% to 200%) annualized; thinly-traded or far-OTM contracts
+        // can stretch the upper bound but rarely cross 5.0.
         let iv = c
             .implied_volatility
-            .and_then(|v| if v <= 0.0 { None } else { Some(v) });
+            .and_then(|v| if v >= 0.005 && v <= 5.0 { Some(v) } else { None });
 
         OptionContract {
             contract_symbol: c.contract_symbol,
@@ -772,6 +764,10 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             open_interest: c.open_interest.unwrap_or(0) as u64,
             implied_volatility: iv,
             in_the_money: c.in_the_money.unwrap_or(false),
+            delta: None,
+            gamma: None,
+            theta: None,
+            vega: None,
         }
     };
 

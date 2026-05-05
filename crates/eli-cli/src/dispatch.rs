@@ -242,7 +242,6 @@ fn is_quick_market_query(query: &str) -> bool {
 async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
     match cmd {
         FinanceCommand::Timeseries(args) => cmd_finance_timeseries(args).await,
-        FinanceCommand::Snapshot(args) => cmd_finance_snapshot(args).await,
         FinanceCommand::Fundamentals(args) => cmd_finance_fundamentals(args).await,
         FinanceCommand::Search(args) => cmd_finance_search(args).await,
         FinanceCommand::Filings(args) | FinanceCommand::Sec(args) => {

@@ -104,58 +104,11 @@ async fn fetch_schedule_window(
         let mut m_events = Vec::new();
         let mut warn = Vec::new();
 
-        if macro_profile == ScheduleMacroProfile::Major {
-            match timeout(
-                TokioDuration::from_secs(SCHEDULE_HTTP_TIMEOUT_SECS),
-                fetch_official_major_macro(start_date, end_date),
-            )
-            .await
-            {
-                Ok(Ok((rows, days, official_warn))) => {
-                    m_events = rows;
-                    m_days = days;
-                    warn.extend(official_warn);
-                }
-                Ok(Err(e)) => warn.push(format!("official macro major failed: {e}")),
-                Err(_) => warn.push("official macro major: timed out".to_string()),
-            }
-            // BEA JSON as supplementary source even for Major (exact times, more BEA releases).
-            match timeout(
-                TokioDuration::from_secs(SCHEDULE_HTTP_TIMEOUT_SECS),
-                fetch_bea_macro_events(start_date, end_date),
-            )
-            .await
-            {
-                Ok(Ok(bea_rows)) => {
-                    // Merge BEA events, preferring BEA for duplicates (has exact times).
-                    let existing: std::collections::BTreeSet<(String, String)> = m_events
-                        .iter()
-                        .map(|e| (e.date.clone(), e.title.clone()))
-                        .collect();
-                    for row in bea_rows {
-                        if !existing.contains(&(row.date.clone(), row.title.clone())) {
-                            m_events.push(row);
-                        } else {
-                            // Update existing event with BEA time if available.
-                            if let Some(existing_event) = m_events.iter_mut().find(|e| {
-                                e.date == row.date && e.title == row.title
-                            }) {
-                                if row.time.is_some() {
-                                    existing_event.time = row.time.clone();
-                                    existing_event.source = "bea".to_string();
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(Err(e)) => warn.push(format!("bea calendar: {e}")),
-                Err(_) => warn.push("bea calendar: timed out".to_string()),
-            }
-            return (m_events, m_days, warn);
-        }
-
-        // Non-major profiles: official major + BEA are the stable baseline.
-        // FRED is supplementary only, and only via the real API.
+        // All profiles (including Major) use the unified fetch path:
+        // official_major (Census PDF) + BEA (exact times) + FRED API (Claims, JOLTS, IP, etc.).
+        // The Major filter in service.rs::macro_profile_filter removes non-major events
+        // after fetch. This ensures Claims (FRED release_id 180, in MAJOR specs) is included.
+        // FRED API is supplementary only, gated on configured API key.
         let official_fut = timeout(
             TokioDuration::from_secs(SCHEDULE_HTTP_TIMEOUT_SECS),
             fetch_official_major_macro(start_date, end_date),

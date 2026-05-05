@@ -12,7 +12,16 @@ pub async fn fetch_timeseries(
     let max_points = req.max_points_per_ticker.map(|v| v.max(2));
 
     let now = Utc::now();
-    let mut end = req.as_of.unwrap_or(now);
+    // When `as_of` is unset, the request implicitly says "now" — but the actual fetch
+    // and the cache key both use this end timestamp. Without bucketing, every call
+    // gets a fresh `now()` → fresh cache key → cache never hits in default usage.
+    // Floor to the nearest granularity step so repeated calls within the same bucket
+    // share a cache key. Real fetch still uses precise data for the bucket window.
+    let mut end = if let Some(asof) = req.as_of {
+        asof
+    } else {
+        floor_to_bucket(now, req.granularity)
+    };
     if end > now {
         end = now;
     }
@@ -84,7 +93,6 @@ pub async fn fetch_timeseries(
         ProviderKind::Fred => fetch_fred_series(&tickers, start, end, req.granularity).await?,
         ProviderKind::Ibkr => crate::finance::fetch_ibkr_timeseries(&req).await?,
         ProviderKind::Pyth => fetch_pyth_series(&tickers, start, end, req.granularity).await?,
-        ProviderKind::Stooq => fetch_stooq_series(&tickers, start, end, req.granularity).await?,
         ProviderKind::Binance => fetch_binance_series(&tickers, start, end, req.granularity).await?,
         ProviderKind::Eia | ProviderKind::Ecb => {
             return Err(Error::InvalidInput(
@@ -136,6 +144,7 @@ pub async fn fetch_timeseries(
         };
         return Ok(TimeseriesResponse {
             provider: req.provider,
+            sources: Vec::new(),
             tickers: tickers.clone(),
             granularity: req.granularity,
             range: req.range,
@@ -158,6 +167,7 @@ pub async fn fetch_timeseries(
 
     let resp = TimeseriesResponse {
         provider: req.provider,
+        sources: Vec::new(),
         tickers: tickers.clone(),
         granularity: req.granularity,
         range: req.range,
@@ -188,6 +198,18 @@ pub async fn fetch_timeseries(
     Ok(resp)
 }
 
+/// Floor a timestamp to the nearest granularity bucket boundary.
+/// Caps bucket size at 1 day so weekly/monthly granularity still hits the cache
+/// once per day rather than once per week/month (which would be too coarse for
+/// freshness).
+fn floor_to_bucket(dt: DateTime<Utc>, granularity: Span) -> DateTime<Utc> {
+    let raw_secs = granularity.approx_duration().num_seconds();
+    let bucket_secs = raw_secs.clamp(60, 86400);
+    let ts = dt.timestamp();
+    let floored = (ts / bucket_secs) * bucket_secs;
+    DateTime::from_timestamp(floored, 0).unwrap_or(dt)
+}
+
 fn cache_key(
     req: &TimeseriesRequest,
     tickers: &[String],
@@ -212,7 +234,10 @@ fn cache_key(
     tickers_sorted.sort_unstable();
 
     let key = Key {
-        v: 1,
+        // v: bump when TickerSeries / Candle / response shape changes so cache
+        // entries from old binaries are invalidated. v=2 added source + upstream_id
+        // to TickerSeries. v=3 added kind field to Candle (point vs OHLC).
+        v: 3,
         provider: &req.provider,
         tickers: tickers_sorted,
         range: req.range.to_string_compact(),

@@ -242,11 +242,12 @@ pub(crate) async fn cmd_finance_cot(args: FinanceCotArgs) -> Result<()> {
         query: args.query.clone(),
         weeks: Some(args.weeks),
         report,
+        limit: args.limit,
     };
 
     // Cache: COT updates weekly (Fridays) — 6 hour TTL.
     // Key includes all params: query, weeks, report type.
-    let cache_input = format!("{}|{}|{:?}", args.query.as_deref().unwrap_or(""), args.weeks, req.report);
+    let cache_input = format!("{}|{}|{:?}|{:?}", args.query.as_deref().unwrap_or(""), args.weeks, req.report, args.limit);
     let cot_cache_path = cli_cache_path("cot", &cache_input);
     const COT_TTL: u64 = 6 * 3600; // 6 hours
 

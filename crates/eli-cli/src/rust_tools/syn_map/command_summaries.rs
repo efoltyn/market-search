@@ -136,8 +136,6 @@ fn command_summary_parts(
     let path = extract_eli_tool_path(command).unwrap_or_default();
     if path.len() >= 2 && path[0] == "finance" && path[1] == "timeseries" {
         out.extend(timeseries_summary_parts(value));
-    } else if path.len() >= 2 && path[0] == "finance" && path[1] == "snapshot" {
-        out.extend(snapshot_summary_parts(value));
     } else if path.len() >= 2 && path[0] == "finance" && path[1] == "fundamentals" {
         out.extend(fundamentals_summary_parts(value));
     } else if path.len() >= 2 && path[0] == "finance" && (path[1] == "filings" || path[1] == "sec")
@@ -247,43 +245,6 @@ fn timeseries_summary_parts(value: &serde_json::Value) -> Vec<String> {
         }
     }
 
-    out
-}
-
-fn snapshot_summary_parts(value: &serde_json::Value) -> Vec<String> {
-    let mut out = Vec::new();
-    let Some(map) = value.as_object() else {
-        return out;
-    };
-    if let Some(weights) = map
-        .get("analytics")
-        .and_then(|a| a.get("market_cap_weights"))
-        .and_then(|v| v.as_object())
-    {
-        let mut w: Vec<(String, f64)> = weights
-            .iter()
-            .filter_map(|(k, v)| v.as_f64().map(|x| (k.clone(), x)))
-            .collect();
-        if !w.is_empty() {
-            w.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top3 = w.iter().take(3).map(|x| x.1).sum::<f64>();
-            out.push(format!("top_weight={}:{}", w[0].0, fmt_pct(w[0].1)));
-            out.push(format!("top3_weight={}", fmt_pct(top3)));
-        }
-    }
-    if let Some(snaps) = map.get("snapshots").and_then(|v| v.as_array()) {
-        let mut caps: Vec<(String, f64)> = Vec::new();
-        for s in snaps {
-            let t = s.get("ticker").and_then(|v| v.as_str()).unwrap_or("?");
-            if let Some(cap) = s.get("market_cap").and_then(|v| v.as_f64()) {
-                caps.push((t.to_string(), cap));
-            }
-        }
-        if !caps.is_empty() {
-            caps.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            out.push(format!("largest_cap={}", caps[0].0));
-        }
-    }
     out
 }
 

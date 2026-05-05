@@ -9,6 +9,8 @@ fn generate_mock_series(
         .map(|ticker| TickerSeries {
             ticker: ticker.clone(),
             candles: generate_mock_candles(ticker, start, end, step),
+            source: Some("mock".to_string()),
+            upstream_id: Some(ticker.clone()),
         })
         .collect()
 }
@@ -42,6 +44,7 @@ fn generate_mock_candles(
             l: round_4(low),
             c: round_4(close),
             v: vol,
+            kind: None,
         });
 
         match t.checked_add_signed(step) {

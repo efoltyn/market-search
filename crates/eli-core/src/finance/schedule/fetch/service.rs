@@ -148,9 +148,13 @@ pub async fn fetch_schedule(req: ScheduleRequest) -> Result<ScheduleResponse> {
             is_fomc_decision_day(d)
         });
     }
+    // Major profile previously skipped this backfill, leaving the response with only the
+    // small Claims-only FRED API list. The official_major path (Census PDF) covers
+    // CPI/PPI/PCE/GDP/Retail/Housing/NFP — all of which belong in --major.
     let needs_official_major_backfill = matches!(req.kind, ScheduleKind::Macro | ScheduleKind::All)
-        && macro_profile != ScheduleMacroProfile::Major
-        && (macro_events.is_empty() || macro_events.iter().all(|e| e.source == "bea"));
+        && (macro_profile == ScheduleMacroProfile::Major
+            || macro_events.is_empty()
+            || macro_events.iter().all(|e| e.source == "bea"));
     if needs_official_major_backfill {
         match fetch_official_major_macro(start_date, end_date).await {
             Ok((rows, days, official_warn)) if !rows.is_empty() => {

@@ -218,7 +218,7 @@ pub async fn fetch_snapshot(req: SnapshotRequest) -> Result<SnapshotResponse> {
                     .to_string(),
             ))
         }
-        ProviderKind::Stooq | ProviderKind::Binance | ProviderKind::Eia | ProviderKind::Ecb => {
+        ProviderKind::Binance | ProviderKind::Eia | ProviderKind::Ecb => {
             return Err(Error::InvalidInput(format!(
                 "{:?} provider does not support snapshot (use timeseries)",
                 provider

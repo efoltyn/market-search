@@ -39,12 +39,16 @@ pub async fn fetch(
                         l: q.low,
                         c: q.close,
                         v: Some(q.volume as f64),
+                        kind: None,
                     }
                 }).collect();
 
+                let upstream = ticker.clone();
                 results.push(TickerSeries {
                     ticker,
                     candles,
+                    source: Some("yahoo".to_string()),
+                    upstream_id: Some(upstream),
                 });
             },
             Err(e) => {

@@ -1,35 +1,17 @@
 [
         {
-            "name": "finance_snapshot",
-            "description": "Point-in-time market snapshot: price, market cap, shares outstanding, daily/trailing returns, relative strength. Works for stocks, ETFs (SPY, QQQ, GLD), futures (CL=F, GC=F, SI=F), and crypto (BTC-USD, ETH-USD — correctly marked 24/7). Weekend/holiday daily_return will be 0.0.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "tickers": {
-                        "type": "string",
-                        "description": "Comma-separated symbols (e.g. NVDA,AAPL,SPY,CL=F,BTC-USD)"
-                    },
-                    "returns": {
-                        "type": ["string", "boolean"],
-                        "description": "Optional trailing return windows. Pass a comma-separated string like 1mo,3mo,6mo,1y, or true to use the default set."
-                    }
-                },
-                "required": ["tickers"]
-            }
-        },
-        {
             "name": "finance_timeseries",
-            "description": "Universal data spine: OHLCV time series with cross-asset correlation analytics. Auto-detects provider from ticker pattern: stocks/ETFs/futures→Yahoo, FRED macro series→FRED, KX*→Kalshi candlesticks, numeric 6+digit→Polymarket price history, PYTH:→24/7 oracle, STOOQ:→historical equity OHLCV+PE ratios (10yr+ depth), BN:→Binance crypto (2019+ depth). Mix sources freely in one call. Presets expand to curated groups.",
+            "description": "Universal data spine: OHLCV time series with cross-asset correlation analytics. 8 providers auto-detected from ticker pattern: stocks/ETFs/futures→Yahoo, FRED macro series→FRED (also FRED: prefix), IBKR:→Interactive Brokers 15-min delayed futures/FX/equities (e.g. IBKR:FUT:CL:NYMEX, IBKR:CASH:EUR:IDEALPRO), CLEV:→Cleveland Fed daily inflation nowcast (CLEV:CPI, CLEV:COREPCE), KX*→Kalshi candlesticks, numeric 6+digit→Polymarket price history, PYTH:→24/7 oracle, BN:→Binance crypto (2019+ depth). Mix sources freely in one call — top-level `sources` field lists distinct providers actually returned. Every candle has a 't' timestamp — check it for data freshness. Presets expand to curated groups.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "preset": {
                         "type": "string",
-                        "description": "14 presets: macro, yield_curve, liquidity, credit (ICE BofA OAS), financial_conditions (NFCI/STLFSI4/VIX), recession (Sahm/spreads/claims), fed_balance_sheet (QE/QT), housing (Case-Shiller/starts/mortgage), labor (NFP/JOLTS/wages), inflation (CPI/PCE/sticky/median), real_rates (TIPS), consumer_credit (delinquency/SLOOS), forex_majors, crypto."
+                        "description": "17 presets: macro, yield_curve, liquidity, credit (ICE BofA OAS), financial_conditions (NFCI/STLFSI4/VIX), recession (Sahm/spreads/claims), fed_balance_sheet (QE/QT), housing (Case-Shiller/starts/mortgage), labor (NFP/JOLTS/wages), inflation (CPI/PCE/sticky/median), real_rates (TIPS), consumer_credit (delinquency/SLOOS), forex_majors, crypto, energy (WTI/Brent/NG/RBOB/HO/Gasoil via IBKR), commodities (CL/GC/SI/HG/grains/softs via IBKR), treasuries (ZT/ZF/ZN/ZB/VIX futures via IBKR)."
                     },
                     "tickers": {
                         "type": "string",
-                        "description": "Comma-separated. Stocks: AAPL,SPY,CL=F. FRED: UNRATE,T10Y2Y. Pyth: PYTH:OIL,PYTH:BTC. Kalshi: KXNBERRECESSQ-Q1-2026. Polymarket: 609655. Mix freely."
+                        "description": "Comma-separated. Stocks: AAPL,SPY,CL=F. FRED: UNRATE,T10Y2Y. IBKR futures: IBKR:FUT:CL:NYMEX, IBKR:FUT:GC:COMEX. IBKR FX: IBKR:CASH:EUR:IDEALPRO. IBKR equities: IBKR:STK:2222:TADAWUL. Cleveland Fed: CLEV:CPI,CLEV:COREPCE. Pyth: PYTH:OIL,PYTH:BTC. Kalshi: KXNBERRECESSQ-Q1-2026. Polymarket: 609655. Binance: BN:BTCUSDT. Mix freely in one call."
                     },
                     "range": {
                         "type": "string",
@@ -44,7 +26,7 @@
         },
         {
             "name": "finance_rate_path",
-            "description": "Implied Fed policy trajectory from prediction market data. Returns hold/cut/hike probabilities per FOMC meeting with coverage warnings when data is sparse. Use finance_odds for raw market prices; this tool does the per-meeting probability decomposition.",
+            "description": "Aggregated Polymarket+Kalshi probabilities per FOMC meeting (hold/cut/hike buckets). DERIVED — combines multiple prediction markets per meeting via volume-weighted average. Returns probabilities, volume_total, and n_markets per meeting so caller can see what was aggregated. For raw individual markets use finance_odds.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -96,7 +78,7 @@
         },
         {
             "name": "finance_fundamentals",
-            "description": "Quarterly financial statements: income statement, balance sheet, cash flow. Not for ETFs — use finance_snapshot instead.",
+            "description": "Quarterly financial statements: income statement, balance sheet, cash flow. Not for ETFs — use finance_timeseries instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -195,7 +177,7 @@
         },
         {
             "name": "finance_auctions",
-            "description": "US Treasury auction results: bid-to-cover, direct/indirect bidder breakdown, high yield. Reveals foreign demand strength and fiscal stress signals.",
+            "description": "Recent US Treasury auction results: bid-to-cover, direct/indirect bidder pct, high yield, total accepted, total tendered, CUSIP, security type, security term, auction/issue/maturity dates.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -212,7 +194,7 @@
         },
         {
             "name": "finance_cot",
-            "description": "CFTC Commitment of Traders: speculator vs commercial net positioning with week-over-week changes. Natural query matching — use 'crude', 'gold', '10-year', 'spx', 'yen', 'treasury'. Auto-detects financial vs disaggregated report. Shows historical percentile and direction signal (COVERING/ADDING_SHORTS).",
+            "description": "CFTC Commitment of Traders weekly positions (specs vs commercials, longs/shorts/net, OI, week-over-week change). Released Friday for prior Tuesday. Natural query matching — use 'crude', 'gold', '10-year', 'spx', 'yen', 'treasury'. Auto-detects financial vs disaggregated report. Includes historical percentile rank across the requested window.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -227,6 +209,10 @@
                     "report": {
                         "type": "string",
                         "description": "disaggregated (commodities) or financial (rates/FX/equity). Auto-detected if omitted"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max distinct contracts to return (default: 15). Use higher for broad queries"
                     }
                 }
             }
@@ -246,7 +232,7 @@
         },
         {
             "name": "finance_volsurface",
-            "description": "CBOE volatility indices and term-structure data: VIX (30-day), VIX9D (9-day), VIX3M (3-month), VIX6M (6-month), VIX1Y (1-year), plus VVIX (vol-of-vol), OVX (oil volatility), GVZ (gold volatility), and SKEW (tail risk). This is not a per-underlying strike/expiry implied-vol surface.",
+            "description": "CBOE volatility indices: VIX (30-day), VIX9D (9-day), VIX3M (3-month), VIX6M (6-month), VIX1Y (1-year), VVIX (vol-of-vol), OVX (oil), GVZ (gold), SKEW. Returns latest OHLC + optional history. Not a per-underlying strike/expiry implied-vol surface.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -263,7 +249,7 @@
         },
         {
             "name": "finance_stress",
-            "description": "OFR Financial Stress Index: composite stress measure decomposed into credit, equity valuation, funding, safe assets, and volatility sub-indices. Positive values = stress above historical average, negative = below average. Updated daily.",
+            "description": "OFR Financial Stress Index (composite + credit/equity/funding/safe-assets/volatility components). Daily, updated T+1. Index is z-scored vs OFR's own historical baseline; raw values returned without categorical labeling.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -390,6 +376,24 @@
                         "description": "Start date DD/Mon/YYYY (e.g. 01/Jan/2025). Default: 01/Jan/2025"
                     }
                 }
+            }
+        },
+        {
+            "name": "finance_curve",
+            "description": "Futures forward curve for commodities. Returns every contract month's price, front month price, back month price, raw spread (back-front), spread_pct, and structure label (contango if back>front, backwardation if back<front). Supported: oil/wti, brent, gold, silver, natgas, copper, platinum, palladium, gasoline/rbob, heating/ho.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "commodity": {
+                        "type": "string",
+                        "description": "Commodity to chart: oil, brent, gold, silver, natgas, copper, platinum, palladium, gasoline, heating"
+                    },
+                    "months": {
+                        "type": "integer",
+                        "description": "Number of forward months to include (default 12, max 24)"
+                    }
+                },
+                "required": ["commodity"]
             }
         }
     ]

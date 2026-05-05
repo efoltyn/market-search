@@ -43,7 +43,7 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
         || qt_str.eq_ignore_ascii_case("INDEX");
     let note = if is_etf {
         Some(format!(
-            "{ticker} is an {qt} — financial statements are not available. Use `eli finance snapshot` for price data instead.",
+            "{ticker} is an {qt} — financial statements are not available. Use `eli finance timeseries` for price data instead.",
             qt = qt_str
         ))
     } else if fin.is_none() {

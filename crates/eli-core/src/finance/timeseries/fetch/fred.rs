@@ -22,13 +22,20 @@ pub(crate) async fn fetch_fred_series(
     use futures::stream::{self as fstream, StreamExt as _};
     let results: Vec<std::result::Result<TickerSeries, TimeseriesError>> =
         fstream::iter(tickers.iter().map(|series_id| {
+            // Preserve original ticker (with FRED: prefix if present) for error / response keying,
+            // but strip the prefix before constructing the upstream URL.
             let series_id = series_id.clone();
+            let series_id_url = series_id
+                .strip_prefix("FRED:")
+                .or_else(|| series_id.strip_prefix("fred:"))
+                .unwrap_or(&series_id)
+                .to_string();
             let start_date = start_date.clone();
             let end_date = end_date.clone();
             async move {
                 let url = format!(
                     "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}&cosd={}&coed={}",
-                    series_id, start_date, end_date
+                    series_id_url, start_date, end_date
                 );
                 // Don't use --fail; some Akamai 4xx responses cause CURLE_RECV_ERROR (exit 56)
                 // before the HTTP status fully arrives. Capture status via -w and inspect body.
@@ -173,6 +180,7 @@ pub(crate) async fn fetch_fred_series(
                         l: v,
                         c: v,
                         v: None,
+                        kind: None,
                     });
                 }
 
@@ -194,6 +202,8 @@ pub(crate) async fn fetch_fred_series(
                 Ok(TickerSeries {
                     ticker: series_id.clone(),
                     candles,
+                    source: Some("fred".to_string()),
+                    upstream_id: Some(series_id_url.clone()),
                 })
             }
         }))
@@ -285,6 +295,7 @@ fn aggregate_bucket(bucket_ts: i64, step_seconds: i64, bucket: &[&Candle]) -> Op
         l: low,
         c: last.c,
         v: saw_vol.then_some(vol_sum),
+        kind: first.kind.clone(),
     })
 }
 

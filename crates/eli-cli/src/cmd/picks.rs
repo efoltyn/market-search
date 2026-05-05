@@ -176,28 +176,38 @@ pub async fn picks_fetch_snapshot_prices(
 ) -> anyhow::Result<std::collections::HashMap<String, f64>> {
     let exe = std::env::current_exe()?;
     let output = tokio::process::Command::new(&exe)
-        .args(["finance", "snapshot", "--ticker", &tickers.join(",")])
+        .args([
+            "finance",
+            "timeseries",
+            "--tickers",
+            &tickers.join(","),
+            "--range",
+            "7d",
+            "--granularity",
+            "5m",
+        ])
         .output()
         .await?;
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let mut map = std::collections::HashMap::new();
 
-    // Current snapshot output shape: { "snapshots": [{ "ticker": "...", "current_price": ... }] }.
-    // Keep a top-level-array fallback for compatibility with older payloads.
-    let entries = json
-        .get("snapshots")
-        .and_then(|v| v.as_array())
-        .or_else(|| json.as_array());
-    if let Some(arr) = entries {
-        for snap in arr {
-            if let Some(ticker) = snap.get("ticker").and_then(|v| v.as_str()) {
-                let price = snap
-                    .get("current_price")
-                    .and_then(|v| v.as_f64())
-                    .or_else(|| snap.get("price").and_then(|v| v.as_f64()));
-                if let Some(price) = price {
-                    map.insert(ticker.to_string(), price);
-                }
+    // Timeseries output shape: { "series": [{ "ticker": "...", "candles": [{ "c": ... }] }] }.
+    // Use the last candle's close as the current price (replacement for the
+    // deleted finance snapshot subcommand).
+    if let Some(arr) = json.get("series").and_then(|v| v.as_array()) {
+        for series in arr {
+            let Some(ticker) = series.get("ticker").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(candles) = series.get("candles").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let last_close = candles
+                .iter()
+                .rev()
+                .find_map(|c| c.get("c").and_then(|v| v.as_f64()).filter(|x| x.is_finite() && *x > 0.0));
+            if let Some(price) = last_close {
+                map.insert(ticker.to_string(), price);
             }
         }
     }

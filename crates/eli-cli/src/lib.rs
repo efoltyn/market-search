@@ -15,7 +15,6 @@ include!("cmd/finance/odds.rs");
 include!("cmd/finance/options.rs");
 include!("cmd/finance/paper.rs");
 include!("cmd/finance/ibkr.rs");
-include!("cmd/finance/snapshot.rs");
 include!("cmd/finance/misc.rs");
 include!("cmd/finance/timeseries.rs");
 include!("cmd/finance/curve.rs");

@@ -28,13 +28,9 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
                         .into_iter()
                         .filter(|(date_key, _)| *date_key >= current_month_start)
                         .map(|(_date_key, (meta, agg))| {
+                            let (h, c25, c50, hk) = agg.weighted();
                             let (hold_prob, cut_25bp_prob, cut_50bp_plus_prob, hike_prob) =
-                                normalize_bucket_probs(
-                                    agg.hold_prob,
-                                    agg.cut_25bp_prob,
-                                    agg.cut_50bp_plus_prob,
-                                    agg.hike_prob,
-                                );
+                                normalize_bucket_probs(h, c25, c50, hk);
                             RatePathMeeting {
                                 date: meta.date.to_string(),
                                 label: meta.label,
@@ -152,20 +148,14 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
             if mode != RatePathSourceMode::Fallback {
                 if let Some(meeting) = parse_meeting_from_title(&row.title) {
                     if let Some(bucket) = classify_bucket(&row.title, current_rate) {
+                        // Skip thin/junk markets — see MIN_MARKET_VOLUME comment.
+                        if vol < MIN_MARKET_VOLUME {
+                            continue;
+                        }
                         let entry = meetings
                             .entry(meeting.date)
                             .or_insert_with(|| (meeting.clone(), MeetingAgg::default()));
-                        entry.1.volume += vol;
-                        match bucket {
-                            FedBucket::Hold => entry.1.hold_prob = entry.1.hold_prob.max(prob),
-                            FedBucket::Cut25 => {
-                                entry.1.cut_25bp_prob = entry.1.cut_25bp_prob.max(prob)
-                            }
-                            FedBucket::Cut50Plus => {
-                                entry.1.cut_50bp_plus_prob = entry.1.cut_50bp_plus_prob.max(prob)
-                            }
-                            FedBucket::Hike => entry.1.hike_prob = entry.1.hike_prob.max(prob),
-                        }
+                        entry.1.add(bucket, prob, vol);
                     }
                 }
             }
@@ -214,19 +204,13 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
             continue;
         };
 
+        if vol < MIN_MARKET_VOLUME {
+            continue;
+        }
         let entry = meetings
             .entry(meeting.date)
             .or_insert_with(|| (meeting.clone(), MeetingAgg::default()));
-
-        entry.1.volume += vol;
-        match bucket {
-            FedBucket::Hold => entry.1.hold_prob = entry.1.hold_prob.max(prob),
-            FedBucket::Cut25 => entry.1.cut_25bp_prob = entry.1.cut_25bp_prob.max(prob),
-            FedBucket::Cut50Plus => {
-                entry.1.cut_50bp_plus_prob = entry.1.cut_50bp_plus_prob.max(prob)
-            }
-            FedBucket::Hike => entry.1.hike_prob = entry.1.hike_prob.max(prob),
-        }
+        entry.1.add(bucket, prob, vol);
     }
 
     // Extract cumulative "hike/cut by date X" signals from Kalshi titles.
@@ -307,12 +291,9 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
         .into_iter()
         .filter(|(date_key, _)| *date_key >= current_month_start)
         .map(|(_date_key, (meta, agg))| {
-            let (hold_prob, cut_25bp_prob, cut_50bp_plus_prob, hike_prob) = normalize_bucket_probs(
-                agg.hold_prob,
-                agg.cut_25bp_prob,
-                agg.cut_50bp_plus_prob,
-                agg.hike_prob,
-            );
+            let (h, c25, c50, hk) = agg.weighted();
+            let (hold_prob, cut_25bp_prob, cut_50bp_plus_prob, hike_prob) =
+                normalize_bucket_probs(h, c25, c50, hk);
             RatePathMeeting {
                 date: meta.date.to_string(),
                 label: meta.label,

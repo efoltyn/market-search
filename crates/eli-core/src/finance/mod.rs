@@ -78,8 +78,6 @@ pub use timeseries::build_timeseries_analytics;
 pub use timeseries::fetch_timeseries;
 pub use timeseries::is_binance_ticker;
 pub use timeseries::is_pyth_ticker;
-pub use timeseries::is_stooq_pe_ticker;
-pub use timeseries::is_stooq_ticker;
 pub use timeseries::resample_candles;
 
 mod options;

@@ -118,6 +118,10 @@ struct OptionQuoteAccumulator {
     iv_ask: Option<f64>,
     iv_last: Option<f64>,
     iv_model: Option<f64>,
+    delta: Option<f64>,
+    gamma: Option<f64>,
+    theta: Option<f64>,
+    vega: Option<f64>,
 }
 
 pub fn resolve_ibkr_connection(
@@ -135,6 +139,101 @@ pub async fn invoke_ibkr_bridge(
     dispatch_ibkr_action(action, payload, &connection).await
 }
 
+/// Parse an IBKR ticker spec.  Supports rich syntax:
+///   `FUT:CL:NYMEX:202506`   → sec_type=FUT, symbol=CL, exchange=NYMEX, expiry=202506
+///   `CASH:EUR:IDEALPRO:USD`  → sec_type=CASH, symbol=EUR, exchange=IDEALPRO, currency=USD
+///   `FUT:ES:CME`             → sec_type=FUT, symbol=ES, exchange=CME (front month)
+///   `AAPL`                   → sec_type=STK, symbol=AAPL, exchange=SMART (default)
+/// Map well-known international exchanges to their default currency so that
+/// `build_contract` doesn't fall back to USD for non-US listings.
+fn exchange_default_currency(exchange: &str) -> Option<&'static str> {
+    match exchange {
+        // Gulf / Middle-East
+        "TADAWUL" => Some("SAR"),
+        "DFM" => Some("AED"),
+        "ADX" => Some("AED"),
+        "QSE" => Some("QAR"),
+        "BHB" => Some("BHD"),
+        "MSM" => Some("OMR"),
+        "KSE" => Some("KWD"),
+        // Major international (add as needed)
+        "SEHK" | "HKEX" => Some("HKD"),
+        "TSE" => Some("JPY"),
+        "LSE" | "LSEETF" => Some("GBP"),
+        "SBF" | "IBIS" | "AEB" => Some("EUR"),
+        "ASX" => Some("AUD"),
+        "SGX" => Some("SGD"),
+        "JSE" => Some("ZAR"),
+        "BMF" | "BOVESPA" => Some("BRL"),
+        "NSE" | "BSE" => Some("INR"),
+        "KSE2" | "KRX" => Some("KRW"),
+        "TWSE" => Some("TWD"),
+        _ => None,
+    }
+}
+
+fn parse_ibkr_ticker(raw: &str) -> (String, ContractInput) {
+    let parts: Vec<&str> = raw.split(':').collect();
+    let known_sec_types = [
+        "STK", "FUT", "OPT", "CASH", "IND", "BOND", "CMDTY", "FOP", "WAR", "CFD", "CRYPTO",
+    ];
+    if parts.len() >= 2 && known_sec_types.contains(&parts[0].to_ascii_uppercase().as_str()) {
+        let sec_type = parts[0].to_ascii_uppercase();
+        let symbol = parts.get(1).unwrap_or(&"").to_ascii_uppercase();
+        let exchange = parts.get(2).map(|s| s.to_string());
+        let fourth = parts.get(3).map(|s| s.to_string());
+
+        // Field 4 semantics vary by sec_type:
+        //   CASH  → currency (counter currency)
+        //   STK   → currency override (e.g. STK:EMAAR:DFM:AED)
+        //   other → expiry
+        let (expiry, currency) = if sec_type == "CASH" {
+            // CASH requires a quote (counter) currency.  4-field form
+            // provides it explicitly (e.g. CASH:EUR:IDEALPRO:USD).
+            // 3-field form (CASH:EUR:IDEALPRO) defaults to USD — the
+            // overwhelmingly common counter currency for FX pairs.
+            (None, Some(fourth.unwrap_or_else(|| "USD".to_string())))
+        } else if sec_type == "STK" {
+            // 4th field = explicit currency; if absent, infer from exchange
+            let cur = fourth.or_else(|| {
+                exchange
+                    .as_deref()
+                    .and_then(|ex| exchange_default_currency(ex))
+                    .map(|c| c.to_string())
+            });
+            (None, cur)
+        } else {
+            (fourth, None)
+        };
+
+        // Display name preserves the original spec
+        let display = raw.to_string();
+        (
+            display,
+            ContractInput {
+                symbol,
+                sec_type: Some(sec_type),
+                exchange,
+                currency,
+                expiry,
+                ..ContractInput::default()
+            },
+        )
+    } else {
+        // Plain ticker — default to STK on SMART
+        let symbol = raw.to_ascii_uppercase();
+        (
+            symbol.clone(),
+            ContractInput {
+                symbol,
+                sec_type: Some("STK".to_string()),
+                exchange: Some("SMART".to_string()),
+                ..ContractInput::default()
+            },
+        )
+    }
+}
+
 pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnapshot>> {
     let connection = resolve_ibkr_connection(req.ibkr.as_ref())?;
     let client = connect_client(&connection).await?;
@@ -145,15 +244,13 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
 
     normalize_tickers(&req.tickers)
         .into_iter()
-        .map(|ticker| async {
+        .map(|ticker| {
+            let (display_name, contract_input) = parse_ibkr_ticker(&ticker);
+            let client = &client;
+            async move {
             let detail = resolve_contract_detail(
-                &client,
-                &ContractInput {
-                    symbol: ticker.clone(),
-                    sec_type: Some("STK".to_string()),
-                    exchange: Some("SMART".to_string()),
-                    ..ContractInput::default()
-                },
+                client,
+                &contract_input,
                 timeout_secs,
             )
             .await?;
@@ -164,7 +261,7 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
                         if msg == "timeout waiting for ibkr snapshot ticks".to_string() =>
                     {
                         Error::Provider(format!(
-                            "timeout waiting for ibkr snapshot ticks for {ticker}"
+                            "timeout waiting for ibkr snapshot ticks for {display_name}"
                         ))
                     }
                     other => other,
@@ -184,12 +281,23 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
             let used_market_closed_fallback =
                 data.current_price.is_none() && data.previous_close.is_some();
 
+            // Enrich the name with contract month/local symbol so the output
+            // shows WHICH contract was resolved (e.g. "Light Sweet Crude Oil CLK6 202505")
+            let local_sym = detail.contract.local_symbol.to_string();
+            let expiry = detail.contract.last_trade_date_or_contract_month.clone();
+            let enriched_name = {
+                let base = &detail.long_name;
+                let mut parts = vec![base.clone()];
+                if !local_sym.is_empty() { parts.push(local_sym.clone()); }
+                if !expiry.is_empty() { parts.push(expiry); }
+                parts.join(" ")
+            };
             Ok(TickerSnapshot {
-                ticker,
+                ticker: display_name,
                 currency: non_empty(detail.contract.currency.to_string()),
                 exchange: non_empty(detail.contract.exchange.to_string()),
                 short_name: non_empty(detail.long_name.clone()),
-                long_name: non_empty(detail.long_name),
+                long_name: Some(enriched_name),
                 current_price: fallback_price,
                 previous_close: data.previous_close,
                 open: data.open,
@@ -222,7 +330,7 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
                 clock_status: None,
                 integrity_note: None,
             })
-        })
+        }})
         .collect::<futures::stream::FuturesOrdered<_>>()
         .collect::<Vec<_>>()
         .await
@@ -250,14 +358,10 @@ pub async fn fetch_ibkr_timeseries(
     let mut errors = Vec::new();
 
     for ticker in normalize_tickers(&req.tickers) {
+        let (display_name, contract_input) = parse_ibkr_ticker(&ticker);
         let detail = match resolve_contract_detail(
             &client,
-            &ContractInput {
-                symbol: ticker.clone(),
-                sec_type: Some("STK".to_string()),
-                exchange: Some("SMART".to_string()),
-                ..ContractInput::default()
-            },
+            &contract_input,
             timeout_secs,
         )
         .await
@@ -265,7 +369,7 @@ pub async fn fetch_ibkr_timeseries(
             Ok(detail) => detail,
             Err(err) => {
                 errors.push(TimeseriesError {
-                    ticker,
+                    ticker: display_name,
                     stage: Some("ibkr".to_string()),
                     message: err.to_string(),
                 });
@@ -280,8 +384,11 @@ pub async fn fetch_ibkr_timeseries(
                 Some(end_date),
                 duration,
                 bar_size,
-                Some(HistoricalWhatToShow::Trades),
-                TradingHours::Regular,
+                Some(match contract_input.sec_type.as_deref() {
+                    Some("CASH") | Some("IND") => HistoricalWhatToShow::MidPoint,
+                    _ => HistoricalWhatToShow::Trades,
+                }),
+                TradingHours::Extended,
             ),
         )
         .await
@@ -289,7 +396,7 @@ pub async fn fetch_ibkr_timeseries(
             Ok(Ok(history)) => history,
             Ok(Err(err)) => {
                 errors.push(TimeseriesError {
-                    ticker,
+                    ticker: display_name,
                     stage: Some("ibkr".to_string()),
                     message: map_ibapi_error(err),
                 });
@@ -297,7 +404,7 @@ pub async fn fetch_ibkr_timeseries(
             }
             Err(_) => {
                 errors.push(TimeseriesError {
-                    ticker,
+                    ticker: display_name,
                     stage: Some("ibkr".to_string()),
                     message: format!(
                         "timeout retrieving ibkr history for {}",
@@ -320,11 +427,18 @@ pub async fn fetch_ibkr_timeseries(
                     l: bar.low,
                     c: bar.close,
                     v: Some(bar.volume),
+                    kind: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
 
-        series_out.push(TickerSeries { ticker, candles });
+        let upstream = display_name.clone();
+        series_out.push(TickerSeries {
+            ticker: display_name,
+            candles,
+            source: Some("ibkr".to_string()),
+            upstream_id: Some(upstream),
+        });
     }
 
     Ok((series_out, errors))
@@ -823,7 +937,20 @@ fn apply_option_computation_tick(
             quote.iv_last = computation.implied_volatility
         }
         TickType::ModelOption | TickType::DelayedModelOption => {
-            quote.iv_model = computation.implied_volatility
+            quote.iv_model = computation.implied_volatility;
+            // Model tick carries the most reliable Greeks
+            if computation.delta.is_some() {
+                quote.delta = computation.delta;
+            }
+            if computation.gamma.is_some() {
+                quote.gamma = computation.gamma;
+            }
+            if computation.theta.is_some() {
+                quote.theta = computation.theta;
+            }
+            if computation.vega.is_some() {
+                quote.vega = computation.vega;
+            }
         }
         _ => {}
     }
@@ -872,6 +999,10 @@ fn build_option_contract_row(
         open_interest: quote.open_interest.unwrap_or(0),
         implied_volatility: implied_volatility_from_quote(&quote),
         in_the_money,
+        delta: quote.delta,
+        gamma: quote.gamma,
+        theta: quote.theta,
+        vega: quote.vega,
     }
 }
 
@@ -1379,7 +1510,15 @@ async fn connect_client(connection: &IbkrConnectionConfig) -> Result<Client> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("127.0.0.1");
-    let client_id = connection.client_id.unwrap_or(0);
+    let client_id = match connection.client_id {
+        Some(id) if id > 0 => id,
+        _ => {
+            // Pool of 32 client IDs (1-32) — the IB Gateway maximum.
+            // PID mod 32 ensures parallel subagents spread across all slots
+            // for maximum concurrent throughput while capping tab accumulation.
+            (std::process::id() % 32 + 1) as i32
+        }
+    };
 
     let candidate_ports = if let Some(port) = connection.port {
         vec![port]
@@ -1436,14 +1575,31 @@ async fn resolve_contract_detail(
     .map_err(map_ibapi_error)
     .map_err(Error::Provider)?;
 
-    if let Some(detail) = details.into_iter().next() {
-        Ok(detail)
-    } else {
-        Err(Error::Provider(format!(
+    let mut all: Vec<ContractDetails> = details.into_iter().collect();
+    if all.is_empty() {
+        return Err(Error::Provider(format!(
             "no contract details found for {}",
             input.symbol
-        )))
+        )));
     }
+    // For futures without an explicit expiry, pick the true front month:
+    // the contract with the nearest expiry that is still tradeable.
+    // IBKR may return them in any order, so sort by last_trade_date ascending
+    // and take the first.
+    if all.len() > 1
+        && matches!(
+            input.sec_type.as_deref(),
+            Some("FUT") | Some("FOP")
+        )
+        && input.expiry.as_ref().map_or(true, |e| e.is_empty())
+    {
+        all.sort_by(|a, b| {
+            a.contract
+                .last_trade_date_or_contract_month
+                .cmp(&b.contract.last_trade_date_or_contract_month)
+        });
+    }
+    Ok(all.into_iter().next().unwrap())
 }
 
 async fn resolve_target_account(client: &Client, preferred: Option<String>) -> Result<String> {
@@ -1469,9 +1625,19 @@ async fn drain_snapshot_ticks(
     timeout_secs: u64,
 ) -> Result<()> {
     let deadline = Instant::now() + StdDuration::from_secs(timeout_secs);
+    // Delayed data (market_data_type 3) never sends SnapshotEnd, so the full
+    // timeout_secs would be burned on every call.  Instead, once we have at
+    // least one observation we switch to a short idle timeout: if no new ticks
+    // arrive within 500ms we assume the burst is over and return what we have.
+    let idle_timeout = StdDuration::from_millis(500);
     loop {
         let remaining = remaining_time(deadline)?;
-        match timeout(remaining, subscription.next()).await {
+        let wait = if data.has_observation() {
+            remaining.min(idle_timeout)
+        } else {
+            remaining
+        };
+        match timeout(wait, subscription.next()).await {
             Ok(Some(Ok(TickTypes::Price(price)))) => {
                 apply_tick_price(data, price.tick_type, price.price)
             }

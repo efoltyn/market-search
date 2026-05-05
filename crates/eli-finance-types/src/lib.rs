@@ -29,8 +29,6 @@ pub enum ProviderKind {
     Kalshi,
     /// Polymarket prediction market — probability history via CLOB API.
     Polymarket,
-    /// Stooq.com — historical OHLCV (US equities, indices, forex, gold) + PE ratios.
-    Stooq,
     /// Binance — crypto OHLCV with depth back to 2017/2019.
     Binance,
     /// EIA — U.S. Energy Information Administration (petroleum inventories, nat gas storage).
@@ -371,12 +369,29 @@ pub struct Candle {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub v: Option<f64>,
+
+    /// Optional candle kind. None = standard OHLC. Some("point") = single
+    /// data point projected onto OHLC fields (o == h == l == c) — typically
+    /// nowcast/forecast series like CLEV:CPI. Downstream chart/vol code should
+    /// avoid candlestick rendering and skip volatility calc when kind == "point".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TickerSeries {
     pub ticker: String,
     pub candles: Vec<Candle>,
+    /// Upstream data source identifier ("yahoo", "fred", "pyth", "ibkr", "binance",
+    /// "cleveland_fed", "fed_h15", "polymarket", "kalshi", "mock").
+    /// Lets callers tell which provider served each series in mixed-source responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Upstream identifier (post-prefix-strip): for `FRED:DGS10` source="fred",
+    /// upstream_id="DGS10". For `IBKR:FUT:CL:NYMEX` source="ibkr",
+    /// upstream_id="FUT:CL:NYMEX". Lets callers reconstruct the upstream URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -411,7 +426,17 @@ pub struct TimeseriesError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeseriesResponse {
+    /// Dispatch-time provider choice. On mixed-source calls (Yahoo + Pyth +
+    /// Polymarket etc.) this only reflects the first / "main" bucket and
+    /// is misleading on its own — see `sources` for the actual provider mix
+    /// across returned series.
     pub provider: ProviderKind,
+    /// Distinct upstream sources actually represented in `series` after merge.
+    /// `["yahoo"]` for a single-source call, `["yahoo","pyth","polymarket"]`
+    /// for a mixed call, `["mixed"]` shorthand never used here — the array
+    /// is the truth.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
     pub tickers: Vec<String>,
     pub granularity: Span,
     pub range: Span,
@@ -1679,6 +1704,14 @@ pub struct OptionContract {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub implied_volatility: Option<f64>,
     pub in_the_money: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gamma: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vega: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1769,8 +1802,6 @@ pub struct MultiExpirySummary {
     pub aggregate_volume: u64,
     pub aggregate_oi: u64,
     pub weighted_put_call_ratio: f64,
-    /// "bullish" if near-term P/C < 0.7, "bearish" if > 1.3, else "neutral"
-    pub near_term_bias: String,
     /// Top 3 expirations by OI — where the action concentrates
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oi_concentration: Option<Vec<OiConcentration>>,
@@ -2734,6 +2765,9 @@ pub struct CotRequest {
     /// Report type: "disaggregated" (commodities) or "financial" (rates/FX/equity index). Default "disaggregated".
     #[serde(default)]
     pub report: Option<String>,
+    /// Max number of distinct contracts to return. Default 15.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2774,6 +2808,18 @@ pub struct CotResponse {
     pub contracts_found: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
+    /// The date of the latest position data (CFTC reports as-of Tuesday)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_as_of: Option<String>,
+    /// When this data was released by CFTC (typically the following Friday 3:30 PM ET)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub released_on: Option<String>,
+    /// When the next CFTC report is expected
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_release: Option<String>,
+    /// How stale the data is in human-readable form
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staleness: Option<String>,
 }
 
 // ──────────────────────────────────────────────────────────────

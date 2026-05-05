@@ -100,6 +100,22 @@ pub(crate) async fn fetch_pyth_series(
 
     for ticker in tickers {
         let pyth_symbol = parse_pyth_ticker(ticker);
+
+        // PYTH:OIL is a multi-source aggregate, not CME WTI. It typically
+        // tracks ~$3 below the CME WTI front-month due to basket composition.
+        // Attach a non-fatal warning so callers don't silently substitute it
+        // for WTI in commentary or charts.
+        if ticker.trim().eq_ignore_ascii_case("PYTH:OIL") {
+            errors.push(TimeseriesError {
+                ticker: ticker.clone(),
+                stage: Some("data_quality".to_string()),
+                message: "PYTH:OIL is a multi-source aggregate, not CME WTI \
+                    \u{2014} typically ~$3 below CL=F due to basket composition. \
+                    Use CL=F for WTI front month."
+                    .to_string(),
+            });
+        }
+
         let url = format!(
             "https://benchmarks.pyth.network/v1/shims/tradingview/history?symbol={}&resolution={}&from={}&to={}",
             urlencoding::encode(&pyth_symbol),
@@ -219,6 +235,7 @@ pub(crate) async fn fetch_pyth_series(
                 l: *tv.l.get(i).unwrap_or(&0.0),
                 c: *tv.c.get(i).unwrap_or(&0.0),
                 v: tv.v.get(i).copied().filter(|&v| v > 0.0),
+                kind: None,
             });
         }
 
@@ -226,9 +243,16 @@ pub(crate) async fn fetch_pyth_series(
 
         // Use the original ticker (with PYTH: prefix) as the series label
         // so downstream analytics can distinguish it
+        let upstream = ticker
+            .strip_prefix("PYTH:")
+            .or_else(|| ticker.strip_prefix("pyth:"))
+            .unwrap_or(ticker)
+            .to_string();
         out.push(TickerSeries {
             ticker: ticker.clone(),
             candles,
+            source: Some("pyth".to_string()),
+            upstream_id: Some(upstream),
         });
     }
 

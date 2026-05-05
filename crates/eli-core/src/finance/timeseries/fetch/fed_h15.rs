@@ -77,8 +77,10 @@ pub(crate) async fn fetch_h15_yield_curve(
             continue;
         }
         out.push(TickerSeries {
-            ticker: requested_ticker,
+            ticker: requested_ticker.clone(),
             candles,
+            source: Some("fed_h15".to_string()),
+            upstream_id: Some(requested_ticker),
         });
     }
 
@@ -138,6 +140,7 @@ fn parse_h15_csv(body: &str) -> Result<Vec<TickerSeries>> {
                 l: val,
                 c: val,
                 v: None,
+                kind: None,
             });
         }
     }
@@ -150,6 +153,8 @@ fn parse_h15_csv(body: &str) -> Result<Vec<TickerSeries>> {
         out.push(TickerSeries {
             ticker: ticker_name.to_string(),
             candles: std::mem::take(&mut series_map[i]),
+            source: Some("fed_h15".to_string()),
+            upstream_id: Some(ticker_name.to_string()),
         });
     }
 

@@ -153,9 +153,7 @@ struct ServeArgs {
 enum FinanceCommand {
     /// Fetch OHLCV time-series for one or more tickers.
     Timeseries(FinanceTimeseriesArgs),
-    /// Fetch a point-in-time snapshot (market cap, shares, price, etc.) for one or more tickers.
-    Snapshot(FinanceSnapshotArgs),
-    /// Fetch quarterly financial statements (Income Statement, Balance Sheet, Cash Flow).
+    /// Current snapshot of income/balance/cashflow + 32 trailing ratios + company profile (sector, industry, employees). Single ticker returns object; multi-ticker returns array.
     Fundamentals(FinanceFundamentalsArgs),
     /// Search for ticker symbols or macro series IDs.
     Search(FinanceSearchArgs),
@@ -1072,6 +1070,9 @@ pub struct FinanceCotArgs {
     /// Report type: auto (detect from query), disaggregated (commodities), or financial (rates/FX/equity).
     #[arg(long, default_value = "auto")]
     pub report: String,
+    /// Max number of distinct contracts to return (default 15).
+    #[arg(long)]
+    pub limit: Option<usize>,
     /// Output format (json only).
     #[arg(long, default_value = "json")]
     pub format: String,
@@ -1266,57 +1267,6 @@ struct FinanceNewsArgs {
     /// Policy mode: observe | assist | enforce.
     #[arg(long = "policy-mode", default_value = "observe")]
     policy_mode: String,
-
-    /// Write full JSON output to a file instead of stdout.
-    #[arg(long)]
-    out: Option<PathBuf>,
-}
-
-#[derive(clap::Args, Debug)]
-struct FinanceSnapshotArgs {
-    /// Tickers to fetch (repeatable or comma-separated).
-    #[arg(long, visible_alias = "ticker", value_delimiter = ',')]
-    tickers: Vec<String>,
-
-    /// Optional file with tickers (one per line).
-    #[arg(long)]
-    tickers_file: Option<PathBuf>,
-
-    /// Data provider (mock | yahoo | ibkr).
-    #[arg(long, default_value = "yahoo")]
-    provider: String,
-
-    /// Optional IBKR account code (e.g. U1234567). Used when --provider ibkr.
-    #[arg(long)]
-    ibkr_account: Option<String>,
-
-    /// Optional IBKR host override.
-    #[arg(long)]
-    ibkr_host: Option<String>,
-
-    /// Optional IBKR port override.
-    #[arg(long)]
-    ibkr_port: Option<u16>,
-
-    /// Optional IBKR client id override.
-    #[arg(long)]
-    ibkr_client_id: Option<i32>,
-
-    /// Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.
-    #[arg(long)]
-    ibkr_market_data_type: Option<i32>,
-
-    /// Optional trailing return windows (comma-separated): 1mo,3mo,6mo,1y.
-    #[arg(long, value_delimiter = ',')]
-    returns: Vec<String>,
-
-    /// End timestamp for the snapshot reconstruction (RFC3339 or YYYY-MM-DD).
-    #[arg(long)]
-    as_of: Option<String>,
-
-    /// Output format (currently: json).
-    #[arg(long, default_value = "json")]
-    format: String,
 
     /// Write full JSON output to a file instead of stdout.
     #[arg(long)]
@@ -1787,7 +1737,7 @@ struct FinanceTimeseriesArgs {
     #[arg(long)]
     as_of: Option<String>,
 
-    /// Data provider (auto | mock | yahoo | fred | ibkr). "auto" tries Yahoo first, then FRED for failures.
+    /// Data provider (auto | yahoo | fred | ibkr | pyth | binance). "auto" routes by ticker prefix: PYTH:/CLEV:/IBKR:/BN:/FRED: → matching provider; numeric (Polymarket) and KX*-prefix (Kalshi) auto-detected; bare names → Yahoo, with FRED fallback for macro-style IDs.
     #[arg(long, default_value = "auto")]
     provider: String,
 

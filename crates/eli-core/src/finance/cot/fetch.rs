@@ -103,6 +103,34 @@ fn contract_priority_score(query: Option<&str>, contract_name: &str) -> i32 {
         }
     }
 
+    // Natural gas: prefer Henry Hub (NYMEX) and ICE LD1 over regional basis/NGL contracts
+    if ["nat gas", "natural gas", "ng", "natgas"]
+        .iter()
+        .any(|needle| q == *needle || q.contains(needle))
+    {
+        // ICE LD1 (Henry Hub financial) — largest OI nat gas contract globally
+        if name.contains("nat gas ice ld1") {
+            return 100;
+        }
+        // NYMEX Henry Hub benchmark (physical) — "NAT GAS NYME" or "HENRY HUB"
+        if (name.contains("nat gas") || name.contains("henry hub"))
+            && name.contains("new york mercantile exchange")
+        {
+            return 95;
+        }
+        // ICE penultimate (Henry Hub financial variant)
+        if name.contains("nat gas ice pen") {
+            return 80;
+        }
+        // Penalize basis/regional/NGL contracts that match "natural gas" broadly
+        if name.contains("basis") || name.contains("differential") || name.contains("swing")
+            || name.contains("propane") || name.contains("butane") || name.contains("ethane")
+            || name.contains("gasoline")
+        {
+            return -50;
+        }
+    }
+
     0
 }
 
@@ -303,12 +331,68 @@ pub async fn fetch_cot(req: CotRequest) -> Result<CotResponse> {
         });
     }
 
+    // Cap to top N contracts by priority+OI to avoid flooding results with regional noise.
+    let max_contracts = req.limit.unwrap_or(15);
+    if contracts_found > max_contracts {
+        // Collect the top N contract names from the already-sorted order.
+        let mut seen = std::collections::HashSet::new();
+        let mut top_names = Vec::new();
+        for p in &all_positions {
+            if seen.insert(p.contract_name.clone()) {
+                top_names.push(p.contract_name.clone());
+                if top_names.len() >= max_contracts {
+                    break;
+                }
+            }
+        }
+        let top_set: std::collections::HashSet<&str> =
+            top_names.iter().map(|s| s.as_str()).collect();
+        all_positions.retain(|p| top_set.contains(p.contract_name.as_str()));
+        contracts_found = top_names.len();
+    }
+
+    // Compute freshness metadata from the latest position date.
+    // CFTC reports positions as-of Tuesday, released the following Friday at 3:30 PM ET.
+    let (data_as_of, released_on, next_release, staleness) = if let Some(latest) = all_positions.first() {
+        let as_of = &latest.report_date;
+        // Parse the as-of date to compute release dates
+        if let Ok(as_of_date) = chrono::NaiveDate::parse_from_str(&as_of[..10], "%Y-%m-%d") {
+            let now = Utc::now().date_naive();
+            // Released Friday after the as-of Tuesday (3 days later)
+            let released = as_of_date + chrono::Duration::days(3);
+            // Next release is the following Friday (10 days after as-of, i.e. 7 days after released)
+            let next = released + chrono::Duration::days(7);
+            let days_stale = (now - as_of_date).num_days();
+            let stale_str = if days_stale <= 3 {
+                format!("{}d old (current — released this week)", days_stale)
+            } else if days_stale <= 7 {
+                format!("{}d old (last week's positions)", days_stale)
+            } else {
+                format!("{}d old (stale — multiple weeks behind)", days_stale)
+            };
+            (
+                Some(as_of_date.format("%Y-%m-%d").to_string()),
+                Some(released.format("%Y-%m-%d (Fri 3:30 PM ET)").to_string()),
+                Some(next.format("%Y-%m-%d (Fri 3:30 PM ET)").to_string()),
+                Some(stale_str),
+            )
+        } else {
+            (Some(as_of[..10].to_string()), None, None, None)
+        }
+    } else {
+        (None, None, None, None)
+    };
+
     Ok(CotResponse {
         generated_at: Utc::now(),
         report_type: report.to_string(),
         positions: all_positions,
         contracts_found,
         query: req.query,
+        data_as_of,
+        released_on,
+        next_release,
+        staleness,
     })
 }
 

@@ -424,6 +424,7 @@ async fn fetch_yahoo_series(
                         l: q.low,
                         c: q.close,
                         v: Some(q.volume as f64),
+                        kind: None,
                     });
                 }
 
@@ -453,6 +454,8 @@ async fn fetch_yahoo_series(
                 Ok(TickerSeries {
                     ticker: ticker.clone(),
                     candles,
+                    source: Some("yahoo".to_string()),
+                    upstream_id: Some(ticker.clone()),
                 })
             }
         }))

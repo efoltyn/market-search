@@ -37,16 +37,13 @@ async fn fetch_rate_path_live(
                 let bucket = classify_bucket(&source_text, current_rate);
                 let Some(bucket) = bucket else { continue };
 
+                if m.volume < MIN_MARKET_VOLUME {
+                    continue;
+                }
                 let entry = meetings
                     .entry(meeting.date)
                     .or_insert_with(|| (meeting.clone(), MeetingAgg::default()));
-                entry.1.volume += m.volume;
-                match bucket {
-                    FedBucket::Hold => entry.1.hold_prob = entry.1.hold_prob.max(m.probability),
-                    FedBucket::Cut25 => entry.1.cut_25bp_prob = entry.1.cut_25bp_prob.max(m.probability),
-                    FedBucket::Cut50Plus => entry.1.cut_50bp_plus_prob = entry.1.cut_50bp_plus_prob.max(m.probability),
-                    FedBucket::Hike => entry.1.hike_prob = entry.1.hike_prob.max(m.probability),
-                }
+                entry.1.add(bucket, m.probability, m.volume);
             }
 
             // Extract cumulative signals from Kalshi.
@@ -84,15 +81,11 @@ async fn fetch_rate_path_live(
                 // Per-meeting parsing
                 if let Some(meeting) = parse_meeting_from_title(&m.title) {
                     if let Some(bucket) = classify_bucket(&m.title, current_rate) {
-                        let entry = meetings
-                            .entry(meeting.date)
-                            .or_insert_with(|| (meeting.clone(), MeetingAgg::default()));
-                        entry.1.volume += m.volume;
-                        match bucket {
-                            FedBucket::Hold => entry.1.hold_prob = entry.1.hold_prob.max(m.probability),
-                            FedBucket::Cut25 => entry.1.cut_25bp_prob = entry.1.cut_25bp_prob.max(m.probability),
-                            FedBucket::Cut50Plus => entry.1.cut_50bp_plus_prob = entry.1.cut_50bp_plus_prob.max(m.probability),
-                            FedBucket::Hike => entry.1.hike_prob = entry.1.hike_prob.max(m.probability),
+                        if m.volume >= MIN_MARKET_VOLUME {
+                            let entry = meetings
+                                .entry(meeting.date)
+                                .or_insert_with(|| (meeting.clone(), MeetingAgg::default()));
+                            entry.1.add(bucket, m.probability, m.volume);
                         }
                     }
                 }

@@ -46,46 +46,28 @@ async fn cmd_finance_fundamentals(args: FinanceFundamentalsArgs) -> Result<()> {
         .map(|r| r.map_err(|e| anyhow::anyhow!(e)))
         .collect::<Result<Vec<_>>>()?;
 
-    if resps.len() == 1 {
-        if let Some(out_path) = args.out {
-            let wr = write_json_out_with_meta(
-                out_path,
-                &resps[0],
-                "finance.fundamentals",
-                &[format!("ticker={}", tickers[0])],
-            )?;
-            println!(
-                "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
-                serde_json::to_string(&wr.out_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-                serde_json::to_string(&wr.meta_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-            );
-            return Ok(());
-        }
-        let json = serde_json::to_string_pretty(&resps[0]).context("serialize response")?;
-        println!("{json}");
-    } else {
-        if let Some(out_path) = args.out {
-            let tickers_str = tickers.join(",");
-            let wr = write_json_out_with_meta(
-                out_path,
-                &resps,
-                "finance.fundamentals",
-                &[format!("tickers={tickers_str}")],
-            )?;
-            println!(
-                "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
-                serde_json::to_string(&wr.out_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-                serde_json::to_string(&wr.meta_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-            );
-            return Ok(());
-        }
-        let json = serde_json::to_string_pretty(&resps).context("serialize response")?;
-        println!("{json}");
+    // Always emit an array — single-ticker callers see a 1-element array,
+    // multi-ticker callers see N-element. Downstream `jq` consumers can
+    // assume `.[]` works regardless of arity.
+    if let Some(out_path) = args.out {
+        let tickers_str = tickers.join(",");
+        let wr = write_json_out_with_meta(
+            out_path,
+            &resps,
+            "finance.fundamentals",
+            &[format!("tickers={tickers_str}")],
+        )?;
+        println!(
+            "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
+            serde_json::to_string(&wr.out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+            serde_json::to_string(&wr.meta_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
     }
+    let json = serde_json::to_string_pretty(&resps).context("serialize response")?;
+    println!("{json}");
 
     Ok(())
 }

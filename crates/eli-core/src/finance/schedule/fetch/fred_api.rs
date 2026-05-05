@@ -87,10 +87,20 @@ fn curated_fred_api_release_specs(
             time_et: "08:15 ET",
         },
     ];
+    // Major: weekly Claims is the only "true major" release that's NOT in the Census
+    // PDF parsed by fetch_official_major_macro (which covers CPI/PPI/PCE/GDP/Retail/Housing/NFP).
+    // Without this list, --major silently drops Jobless Claims — a top-tier rates indicator.
+    const MAJOR: &[FredApiReleaseSpec] = &[
+        FredApiReleaseSpec {
+            release_id: 180,
+            title: "Unemployment Insurance Weekly Claims Report",
+            time_et: "08:30 ET",
+        },
+    ];
     match macro_profile {
         ScheduleMacroProfile::Broad => BROAD,
         ScheduleMacroProfile::Market => MARKET,
-        ScheduleMacroProfile::Major => &[],
+        ScheduleMacroProfile::Major => MAJOR,
     }
 }
 

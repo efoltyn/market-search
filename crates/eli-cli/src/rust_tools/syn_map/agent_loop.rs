@@ -34,8 +34,6 @@ async fn run_agent_steps(
     let synthesis_title = format_synthesis_title(&initial_user_message);
     let mut task_had_actions = false;
     let mut task_insights: Vec<String> = Vec::new();
-    let mut saw_finance_timeseries = false;
-    let mut saw_finance_snapshot = false;
     let mut plan_confirmed = !matches!(state.auto_mode, AutoMode::Plan);
     let mut current_message = initial_user_message;
     let mut current_images = initial_images;
@@ -847,23 +845,6 @@ async fn run_agent_steps(
                             })
                             .collect();
                     }
-                }
-            }
-
-            if profile == AgentProfile::Research {
-                if command_results.iter().any(|r| {
-                    r.allowed
-                        && r.returncode == 0
-                        && r.command.trim_start().starts_with("eli finance timeseries")
-                }) {
-                    saw_finance_timeseries = true;
-                }
-                if command_results.iter().any(|r| {
-                    r.allowed
-                        && r.returncode == 0
-                        && r.command.trim_start().starts_with("eli finance snapshot")
-                }) {
-                    saw_finance_snapshot = true;
                 }
             }
 
