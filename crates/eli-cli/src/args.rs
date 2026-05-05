@@ -1030,8 +1030,10 @@ pub struct FinanceRatePathArgs {
     /// Optional cache directory for prediction-market CSVs.
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
-    /// Source mode: auto | meeting | fallback.
-    #[arg(long, default_value = "auto")]
+    /// DEPRECATED: accepted for backwards compatibility but ignored. The live
+    /// API path always dominates; the CSV cache is only used when the live
+    /// fetch fails. The auto/meeting/fallback distinction was a no-op.
+    #[arg(long, default_value = "auto", hide = true)]
     pub source_mode: String,
     /// Output format (json only).
     #[arg(long, default_value = "json")]

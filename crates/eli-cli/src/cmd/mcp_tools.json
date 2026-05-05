@@ -46,16 +46,10 @@
         },
         {
             "name": "finance_rate_path",
-            "description": "Aggregated Polymarket+Kalshi probabilities per FOMC meeting (hold/cut/hike buckets). DERIVED — combines multiple prediction markets per meeting via volume-weighted average. Returns probabilities, volume_total, and n_markets per meeting so caller can see what was aggregated. For raw individual markets use finance_odds.",
+            "description": "Aggregated Polymarket+Kalshi probabilities per FOMC meeting (hold/cut/hike buckets). DERIVED — combines multiple prediction markets per meeting via volume-weighted average. Returns: meetings[] (per-meeting hold/cut/hike + n_markets + volume_total, dates snapped to actual FOMC decision day), year_view (cuts_distribution, eoy_rate_distribution, cut_by_meeting_distribution from cardinality markets), compound_paths[] (joint multi-meeting Pause-Pause-Pause paths). For raw individual markets use finance_odds.",
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "source_mode": {
-                        "type": "string",
-                        "enum": ["auto", "meeting", "fallback"],
-                        "description": "Selection mode. auto=meeting if local cache fresh else fallback. meeting=per-FOMC-meeting probabilities. fallback=cumulative-by-date signals when meeting data is sparse."
-                    }
-                }
+                "properties": {}
             }
         },
         {

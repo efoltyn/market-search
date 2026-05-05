@@ -82,6 +82,13 @@ impl MeetingAgg {
 /// real consensus. $10K USD chosen as a conservative liquidity floor.
 const MIN_MARKET_VOLUME: i64 = 10_000;
 
+/// Lower threshold specifically for Kalshi KXFEDDECISION binaries. Each
+/// per-meeting event has 5 outcome contracts (H0/H25/H26/C25/C26); individual
+/// binary volumes are naturally small even when the meeting-event total is
+/// healthy. $500 keeps out one-off junk pins without hiding Sep/Oct/Dec
+/// meetings whose binaries trade in the $1-7K range each.
+const KALSHI_FED_MIN_MARKET_VOLUME: i64 = 500;
+
 #[derive(Debug, Clone, Copy)]
 enum FedBucket {
     Hold,

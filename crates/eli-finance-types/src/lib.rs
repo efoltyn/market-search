@@ -1257,6 +1257,47 @@ pub struct RatePathResponse {
     /// NOT per-meeting — represents P(any hike/cut occurs by deadline).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub cumulative_signals: Vec<CumulativeFedSignal>,
+
+    /// Year-end aggregates: cardinality markets ("How many cuts in 2026?",
+    /// "What will rate be at end of 2026?", "Cut by which meeting?"). Separate
+    /// epistemic layer from per-meeting hold/cut probabilities.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub year_view: Option<YearView>,
+
+    /// Joint multi-meeting compound probabilities (e.g. "Pause-Pause-Pause"
+    /// across Mar-Jun). Kept separate from per-meeting buckets — these are
+    /// joint outcomes, not single-meeting marginals.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub compound_paths: Vec<CompoundPath>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct YearView {
+    pub year: i32,
+    /// "How many cuts in <year>?" market: {0: 0.59, 1: 0.17, 2: 0.13, ...}
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cuts_distribution: Option<std::collections::BTreeMap<i32, f64>>,
+    /// "What will rate be at end of <year>?" market: {"3.75%": 0.55, ...}
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub eoy_rate_distribution: Option<std::collections::BTreeMap<String, f64>>,
+    /// "Fed rate cut by ... meeting?" market: {"december": 0.46, ...}
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cut_by_meeting_distribution: Option<std::collections::BTreeMap<String, f64>>,
+    /// Total volume across the markets that contributed.
+    pub volume_total: i64,
+    pub n_markets: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompoundPath {
+    /// e.g. "Mar-Jun", "Apr-Jul", "Jun-Sep"
+    pub label: String,
+    /// e.g. "Pause-Pause-Pause", "Pause-Cut-Pause"
+    pub outcome: String,
+    pub probability: f64,
+    pub volume: i64,
+    /// "polymarket" / "kalshi"
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

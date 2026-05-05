@@ -747,9 +747,41 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             let effective_rate_str = effective_rate
                 .map(|value| format!(",\"effective_rate\":{value:.2}"))
                 .unwrap_or_default();
+            // Compact year_view summary: top cut count + top EOY rate.
+            let year_view_str = v
+                .get("year_view")
+                .map(|yv| {
+                    let top_cuts = yv.get("cuts_distribution")
+                        .and_then(|d| d.as_object())
+                        .and_then(|o| o.iter().max_by(|a, b| {
+                            let pa = a.1.as_f64().unwrap_or(0.0);
+                            let pb = b.1.as_f64().unwrap_or(0.0);
+                            pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+                        }))
+                        .map(|(k, v)| format!("{}={:.0}%", k, v.as_f64().unwrap_or(0.0) * 100.0))
+                        .unwrap_or_default();
+                    let top_eoy = yv.get("eoy_rate_distribution")
+                        .and_then(|d| d.as_object())
+                        .and_then(|o| o.iter().max_by(|a, b| {
+                            let pa = a.1.as_f64().unwrap_or(0.0);
+                            let pb = b.1.as_f64().unwrap_or(0.0);
+                            pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+                        }))
+                        .map(|(k, v)| format!("{}={:.0}%", k, v.as_f64().unwrap_or(0.0) * 100.0))
+                        .unwrap_or_default();
+                    let year = yv.get("year").and_then(|y| y.as_i64()).unwrap_or(0);
+                    format!(",\"year_view\":\"y={} top_cuts:{} top_eoy:{}\"", year, top_cuts, top_eoy)
+                })
+                .unwrap_or_default();
+            let compound_str = v
+                .get("compound_paths")
+                .and_then(|cp| cp.as_array())
+                .filter(|arr| !arr.is_empty())
+                .map(|arr| format!(",\"n_compound_paths\":{}", arr.len()))
+                .unwrap_or_default();
             format!(
-                "\"current_rate\":{:.2},\"current_rate_basis\":\"{}\"{}{}{},\"_note\":\"H/C/K are independently priced prediction markets — may not sum to 100%\",\"_schema\":\".meetings[].{{date,hold_prob,cut_prob,hike_prob,cut_25bp_prob,cut_50bp_plus_prob,volume}}\",\"meetings\":[{}]",
-                rate, rate_basis, target_range_str, effective_rate_str, first_cut_str,
+                "\"current_rate\":{:.2},\"current_rate_basis\":\"{}\"{}{}{}{}{},\"_note\":\"H/C/K are independently priced prediction markets — may not sum to 100%\",\"_schema\":\".meetings[].{{date,hold_prob,cut_prob,hike_prob,cut_25bp_prob,cut_50bp_plus_prob,volume,n_markets}};.year_view;.compound_paths[]\",\"meetings\":[{}]",
+                rate, rate_basis, target_range_str, effective_rate_str, first_cut_str, year_view_str, compound_str,
                 lines.iter().map(|l| format!("\"{}\"", l)).collect::<Vec<_>>().join(",")
             )
         }
@@ -1160,11 +1192,9 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             Ok(v)
         }
         "finance_rate_path" => {
-            let mut v = vec![s("finance"), s("rate-path")];
-            if let Some(mode) = args.get("source_mode").and_then(|m| m.as_str()) {
-                v.extend([s("--source-mode"), s(mode)]);
-            }
-            Ok(v)
+            // source_mode argument is accepted for backwards compatibility but
+            // ignored (no-op flag). Don't propagate it to the CLI.
+            Ok(vec![s("finance"), s("rate-path")])
         }
         "finance_odds" => {
             let mut v = vec![s("finance"), s("odds")];

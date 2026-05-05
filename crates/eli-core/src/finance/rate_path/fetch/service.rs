@@ -2,12 +2,15 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
     let cache_dir = odds_cache_dir(&req);
     let csv_path = cache_dir.join("all_markets.csv");
 
-    let mode = req.source_mode.clone().unwrap_or(RatePathSourceMode::Auto);
+    // NOTE: req.source_mode is accepted for backwards compatibility but the
+    // live path now ALWAYS dominates. The CSV cache fallback is preserved for
+    // disaster-recovery (no network), but the historical auto/meeting/fallback
+    // distinction was a no-op — kept the request field, dropped the branching.
+    let _mode_compat = req.source_mode.clone();
     let current_rates = fetch_current_fed_rates().await?;
     let current_rate = current_rates.classification_anchor_rate;
     let now = Utc::now();
 
-    // If CSV cache doesn't exist or is very stale (>24h), try live API directly.
     let csv_exists = csv_path.exists();
     let csv_stale = csv_exists
         && cache_as_of(&csv_path)
@@ -19,14 +22,27 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
     if !csv_exists || csv_stale {
         let live_label = if csv_exists { "stale CSV; using live API" } else { "no CSV cache; using live API" };
         match fetch_rate_path_live(current_rate).await {
-            Ok((meetings, cumulative_signals, mut live_warnings)) => {
+            Ok((meetings, cumulative_signals, mut live_warnings, extras)) => {
                 if !meetings.is_empty() {
                     live_warnings.push(live_label.to_string());
-                    let current_month_start =
-                        now.date_naive().with_day(1).unwrap_or(now.date_naive());
+                    // Filter out meetings whose date has passed. Also drop
+                    // pure-noise far-future meetings (single-binary <$3K vol
+                    // pins on 2027/2028 dates) — they have no information
+                    // value and just clutter the output. Keep anything in
+                    // 2026 or with reasonable depth.
+                    let today = now.date_naive();
+                    let near_horizon = chrono::NaiveDate::from_ymd_opt(today.year(), 12, 31)
+                        .unwrap_or(today);
                     let out: Vec<RatePathMeeting> = meetings
                         .into_iter()
-                        .filter(|(date_key, _)| *date_key >= current_month_start)
+                        .filter(|(date_key, (_meta, agg))| {
+                            if *date_key < today { return false; }
+                            // Always keep meetings in the current calendar year.
+                            if *date_key <= near_horizon { return true; }
+                            // For future-year meetings, require either ≥3
+                            // markets aggregated OR ≥$5K volume.
+                            agg.n_markets >= 3 || agg.volume >= 5_000
+                        })
                         .map(|(_date_key, (meta, agg))| {
                             let (h, c25, c50, hk) = agg.weighted();
                             let (hold_prob, cut_25bp_prob, cut_50bp_plus_prob, hike_prob) =
@@ -72,6 +88,8 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
                         coverage_ratio,
                         warnings: rate_warnings,
                         cumulative_signals,
+                        year_view: extras.year_view,
+                        compound_paths: extras.compound_paths,
                     });
                 }
                 // If live returned no meetings, fall through to CSV (if it exists).
@@ -147,10 +165,12 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
             }
             // Also extract per-meeting data from Polymarket titles like
             // "Will the Fed decrease interest rates by 25 bps after the March 2026 meeting?"
-            if mode != RatePathSourceMode::Fallback {
+            // Skip joint multi-meeting compound markets — they encode joint
+            // outcomes (e.g. "Pause-Pause-Pause") and would drag per-meeting
+            // marginals if added to the bucket aggregator.
+            if !is_compound_meeting_market(&row.title) {
                 if let Some(meeting) = parse_meeting_from_title(&row.title) {
                     if let Some(bucket) = classify_bucket(&row.title, current_rate) {
-                        // Skip thin/junk markets — see MIN_MARKET_VOLUME comment.
                         if vol < MIN_MARKET_VOLUME {
                             continue;
                         }
@@ -161,9 +181,6 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
                     }
                 }
             }
-            continue;
-        }
-        if mode == RatePathSourceMode::Fallback {
             continue;
         }
         if row.source.trim().to_ascii_lowercase() != "kalshi" {
@@ -259,11 +276,6 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
     }
 
     if meetings.is_empty() {
-        if mode == RatePathSourceMode::Meeting {
-            return Err(Error::Provider(
-                "no meeting-level fed decision markets found in local CSV cache".to_string(),
-            ));
-        }
         if let Some(m) = build_fallback_meeting(&annual_cuts, &mut warnings)? {
             return Ok(RatePathResponse {
                 generated_at: now,
@@ -277,6 +289,8 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
                 coverage_ratio: 1.0,
                 warnings,
                 cumulative_signals,
+                year_view: None,
+                compound_paths: Vec::new(),
             });
         }
         return Err(Error::Provider(
@@ -285,13 +299,12 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
     }
 
     // Filter out past meetings — their probabilities are stale from settled contracts.
-    // Meeting dates in the CSV are stored as the 1st of the month (e.g. 2026-03-01 for
-    // the March FOMC meeting on Mar 18-19). Only exclude a meeting if we're already in
-    // the NEXT month (the meeting has definitively passed).
-    let current_month_start = now.date_naive().with_day(1).unwrap_or(now.date_naive());
+    // Dates are now snapped to actual FOMC decision days (see fomc_decision_date)
+    // so we can exclude any meeting whose decision day has already passed.
+    let today = now.date_naive();
     let out: Vec<RatePathMeeting> = meetings
         .into_iter()
-        .filter(|(date_key, _)| *date_key >= current_month_start)
+        .filter(|(date_key, _)| *date_key >= today)
         .map(|(_date_key, (meta, agg))| {
             let (h, c25, c50, hk) = agg.weighted();
             let (hold_prob, cut_25bp_prob, cut_50bp_plus_prob, hike_prob) =
@@ -331,6 +344,8 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
         coverage_ratio,
         warnings,
         cumulative_signals,
+        year_view: None,
+        compound_paths: Vec::new(),
     })
 }
 
