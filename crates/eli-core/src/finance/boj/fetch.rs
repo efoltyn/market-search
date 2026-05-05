@@ -174,11 +174,14 @@ pub async fn fetch_boj(req: BojRequest) -> Result<BojResponse> {
 
             let mut observations = Vec::new();
             for (d, v) in dates.iter().zip(values.iter()) {
-                let period = match d {
+                let raw = match d {
                     serde_json::Value::Number(n) => n.to_string(),
                     serde_json::Value::String(s) => s.clone(),
                     _ => continue,
                 };
+                // Normalize BOJ date formats to YYYY-MM-DD / YYYY-MM / YYYY-Qn for
+                // cross-tool consistency (ECB / BIS / EIA all use ISO-style periods).
+                let period = normalize_boj_period(&raw);
                 let value: f64 = match v {
                     serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
                     serde_json::Value::String(s) => s.parse().unwrap_or(0.0),
@@ -217,4 +220,37 @@ pub async fn fetch_boj(req: BojRequest) -> Result<BojResponse> {
         series: all_series,
         warnings,
     })
+}
+
+/// Normalize BOJ raw date strings to ISO-style periods.
+/// BOJ emits dates in compact form: "20260505" (daily), "202604" (monthly),
+/// "20264" (quarterly Q4 2026). We reformat to "YYYY-MM-DD" / "YYYY-MM" /
+/// "YYYY-Qn" so the period field aligns with ECB/BIS/EIA conventions.
+/// Unrecognized shapes are passed through unchanged.
+fn normalize_boj_period(raw: &str) -> String {
+    let s = raw.trim();
+    let len = s.len();
+    let all_digits = !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    if !all_digits {
+        return s.to_string();
+    }
+    match len {
+        // YYYYMMDD → YYYY-MM-DD
+        8 => format!("{}-{}-{}", &s[0..4], &s[4..6], &s[6..8]),
+        // YYYYMM → YYYY-MM
+        6 => format!("{}-{}", &s[0..4], &s[4..6]),
+        // YYYYQ (e.g. 20264 = Q4 2026) → YYYY-Qn
+        5 => {
+            let year = &s[0..4];
+            let q = &s[4..5];
+            if matches!(q, "1" | "2" | "3" | "4") {
+                format!("{}-Q{}", year, q)
+            } else {
+                s.to_string()
+            }
+        }
+        // YYYY → leave alone (annual)
+        4 => s.to_string(),
+        _ => s.to_string(),
+    }
 }

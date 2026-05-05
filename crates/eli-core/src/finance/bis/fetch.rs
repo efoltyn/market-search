@@ -16,7 +16,10 @@ pub struct BisObservation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BisSeries {
     pub label: String,
-    pub key: String,
+    /// Synthesized identifier `"<REF_AREA>/<label_prefix>"` (e.g. `"GB/Policy Rate"`).
+    /// NOT a real BIS SDMX key — for that, use `--dataset` + `--key` directly with
+    /// dataflows like `WS_CBPOL`. Renamed from `key` to make the synthetic nature explicit.
+    pub composite_key: String,
     pub ref_area: String,
     pub frequency: String,
     pub unit: Option<String>,
@@ -267,7 +270,7 @@ fn parse_bis_csv(body: &str, label_prefix: &str, unit: &str) -> Vec<BisSeries> {
             obs.dedup_by(|a, b| a.period == b.period);
             BisSeries {
                 label: format!("{} {}", area, label_prefix),
-                key: format!("{}/{}", area, label_prefix),
+                composite_key: format!("{}/{}", area, label_prefix),
                 ref_area: area,
                 frequency: freq_label.clone(),
                 unit: if unit.is_empty() { None } else { Some(unit.to_string()) },

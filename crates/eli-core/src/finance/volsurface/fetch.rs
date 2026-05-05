@@ -8,11 +8,11 @@ const DEFAULT_SYMBOLS: &[&str] = &[
     "VIX", "VIX9D", "VIX3M", "VIX6M", "VIX1Y", "VVIX", "OVX", "GVZ", "SKEW",
 ];
 
-/// Parse a single CSV row into a VolSurfaceDataPoint.
+/// Parse a single CSV row into a (VolSurfaceDataPoint, is_point) tuple.
 /// Handles two formats:
-///   5-col: MM/DD/YYYY,open,high,low,close  (VIX, VIX9D, VIX3M, etc.)
-///   2-col: MM/DD/YYYY,value                 (VVIX, SKEW)
-fn parse_csv_row(line: &str) -> Option<VolSurfaceDataPoint> {
+///   5-col: MM/DD/YYYY,open,high,low,close  (VIX, VIX9D, VIX3M, etc.) — is_point=false
+///   2-col: MM/DD/YYYY,value                 (VVIX, OVX, GVZ, SKEW)   — is_point=true
+fn parse_csv_row(line: &str) -> Option<(VolSurfaceDataPoint, bool)> {
     let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
     if parts.len() < 2 {
         return None;
@@ -32,11 +32,26 @@ fn parse_csv_row(line: &str) -> Option<VolSurfaceDataPoint> {
         let high = parts[2].parse::<f64>().ok()?;
         let low = parts[3].parse::<f64>().ok()?;
         let close = parts[4].parse::<f64>().ok()?;
-        Some(VolSurfaceDataPoint { date, open, high, low, close })
+        Some((
+            VolSurfaceDataPoint { date, open, high, low, close, kind: None },
+            false,
+        ))
     } else {
-        // 2-column single-value format (VVIX, SKEW)
+        // 2-column single-value format (VVIX, OVX, GVZ, SKEW).
+        // OHLC fields are filled with the same value; we flag the row with
+        // kind:"point" so downstream code knows there is no wick to render.
         let val = parts[1].parse::<f64>().ok()?;
-        Some(VolSurfaceDataPoint { date, open: val, high: val, low: val, close: val })
+        Some((
+            VolSurfaceDataPoint {
+                date,
+                open: val,
+                high: val,
+                low: val,
+                close: val,
+                kind: Some("point".to_string()),
+            },
+            true,
+        ))
     }
 }
 
@@ -62,19 +77,25 @@ async fn fetch_one(
         Error::Provider(format!("CBOE body read failed for {symbol}: {e}"))
     })?;
 
-    // Parse CSV: skip header, skip empty lines
-    let rows: Vec<VolSurfaceDataPoint> = body
+    // Parse CSV: skip header, skip empty lines.
+    // Each row carries a flag indicating whether CBOE shipped 2-col point data
+    // (VVIX/OVX/GVZ/SKEW) versus full OHLC (VIX/VIX9D/VIX3M/etc.).
+    let parsed: Vec<(VolSurfaceDataPoint, bool)> = body
         .lines()
         .skip(1) // header row
         .filter(|line| !line.trim().is_empty())
         .filter_map(parse_csv_row)
         .collect();
 
-    if rows.is_empty() {
+    if parsed.is_empty() {
         return Err(Error::Provider(format!(
             "CBOE returned no valid data rows for {symbol}"
         )));
     }
+
+    // If any row was point-format, the symbol is a point series.
+    let is_point = parsed.iter().any(|(_, p)| *p);
+    let rows: Vec<VolSurfaceDataPoint> = parsed.into_iter().map(|(p, _)| p).collect();
 
     // Last row is the most recent
     let latest = rows.last().unwrap().clone();
@@ -95,6 +116,7 @@ async fn fetch_one(
         symbol: symbol.to_string(),
         latest,
         history,
+        kind: if is_point { Some("point".to_string()) } else { None },
     })
 }
 
@@ -139,9 +161,7 @@ pub async fn fetch_volsurface(req: VolSurfaceRequest) -> Result<VolSurfaceRespon
         generated_at: Utc::now(),
         indices,
         count,
-        note: Some(
-            "Returns CBOE volatility indices and term-structure data, not a per-underlying strike/expiry implied-vol surface."
-                .to_string(),
-        ),
+        // The MCP tool description already covers scope; per-response advisory removed.
+        note: None,
     })
 }

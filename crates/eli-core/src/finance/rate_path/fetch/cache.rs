@@ -62,6 +62,8 @@ fn build_fallback_meeting(
                 cut_50bp_plus_prob,
                 hike_prob,
                 volume: 0,
+                volume_total: 0,
+                n_markets: 0,
             }));
         }
     }

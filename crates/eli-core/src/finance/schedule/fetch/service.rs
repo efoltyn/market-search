@@ -1,11 +1,3 @@
-fn parse_nasdaq_market_cap(s: &str) -> Option<f64> {
-    let s = s.trim().trim_start_matches('$').replace(',', "");
-    if s.is_empty() || s.eq_ignore_ascii_case("n/a") {
-        return None;
-    }
-    s.parse::<f64>().ok()
-}
-
 pub async fn fetch_schedule(req: ScheduleRequest) -> Result<ScheduleResponse> {
     let mut macro_profile = req.macro_profile.clone();
     if req.major_only {
@@ -86,11 +78,8 @@ pub async fn fetch_schedule(req: ScheduleRequest) -> Result<ScheduleResponse> {
     // Market cap filter
     if let Some(min_cap) = req.min_market_cap {
         earnings.retain(|e| {
-            if let Some(ref cap_str) = e.market_cap {
-                parse_nasdaq_market_cap(cap_str).map_or(false, |cap| cap >= min_cap)
-            } else {
-                false
-            }
+            e.market_cap
+                .map_or(false, |cap| (cap as f64) >= min_cap)
         });
     }
 

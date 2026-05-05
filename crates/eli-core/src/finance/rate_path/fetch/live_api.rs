@@ -100,7 +100,7 @@ async fn fetch_rate_path_live(
         Err(e) => warnings.push(format!("polymarket live fetch failed: {e}")),
     }
 
-    cumulative_signals.sort_by(|a, b| a.by_date.cmp(&b.by_date));
+    sort_cumulative_signals_by_date(&mut cumulative_signals);
     cumulative_signals.dedup_by(|a, b| a.title == b.title);
 
     Ok((meetings, cumulative_signals, warnings))

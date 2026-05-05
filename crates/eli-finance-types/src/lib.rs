@@ -1226,8 +1226,14 @@ pub struct RatePathMeeting {
     pub cut_50bp_plus_prob: f64,
     /// P(hike)
     pub hike_prob: f64,
-    /// Total Kalshi volume across all contracts for this meeting (proxy for market conviction).
+    /// Total prediction-market volume across all contracts for this meeting (proxy for market conviction).
+    /// Kept under the `volume` name for backwards compatibility; `volume_total` is the canonical field.
     pub volume: i64,
+    /// Same as `volume` — exposed under the explicit name agents look for.
+    pub volume_total: i64,
+    /// Number of distinct markets aggregated into this meeting's probabilities.
+    /// 1 = single thin market (be skeptical), 5+ = deep volume-weighted consensus.
+    pub n_markets: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1494,18 +1500,26 @@ pub struct EarningsScheduleEvent {
     pub company_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
+    /// Market cap in USD (e.g. 587_802_343_381). Parsed from Nasdaq's
+    /// "$587,802,343,381"-style strings; null when source value is missing or
+    /// unparseable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub market_cap: Option<String>,
+    pub market_cap: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fiscal_quarter_ending: Option<String>,
+    /// EPS estimate in USD (e.g. 1.06). Parsed from "$1.06"-style strings;
+    /// null when source value is missing or unparseable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub eps_forecast: Option<String>,
+    pub eps_forecast: Option<f64>,
+    /// Number of analyst estimates (e.g. 11). Null when missing/unparseable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub no_of_estimates: Option<String>,
+    pub no_of_estimates: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_year_report_date: Option<String>,
+    /// Last-year EPS in USD. Parsed from "$0.78"-style strings; null when
+    /// source value is missing or unparseable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_year_eps: Option<String>,
+    pub last_year_eps: Option<f64>,
     pub source: String,
 }
 
@@ -1640,8 +1654,15 @@ pub struct OptionContract {
     pub bid: f64,
     pub ask: f64,
     pub last: f64,
-    pub change: f64,
-    pub pct_change: f64,
+    /// Absolute change from prior close. None when the upstream feed didn't
+    /// report it (e.g. weekend/holiday Yahoo response where the field is null).
+    /// Distinct from Some(0.0), which means "the contract genuinely didn't move".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<f64>,
+    /// Percent change from prior close. None when the upstream feed didn't
+    /// report it. Distinct from Some(0.0), which means "no movement".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pct_change: Option<f64>,
     pub volume: u64,
     pub open_interest: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2728,7 +2749,7 @@ pub struct CotPosition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_net_pct_oi: Option<f64>,
     /// Week-over-week change in spec net.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always serialized — emits `null` for the OLDEST returned week (no prior to diff against).
     pub spec_net_change: Option<i64>,
     /// Report family: "disaggregated" or "financial" (TFF).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2843,6 +2864,12 @@ pub struct VolSurfaceDataPoint {
     pub high: f64,
     pub low: f64,
     pub close: f64,
+    /// "point" when CBOE only ships a single value for this row (VVIX/OVX/GVZ/SKEW).
+    /// In that case open == high == low == close and downstream rendering should
+    /// skip candlestick wicks. Same convention as the Candle.kind field for
+    /// Cleveland Fed nowcast series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2851,6 +2878,11 @@ pub struct VolSurfaceIndex {
     pub latest: VolSurfaceDataPoint,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<VolSurfaceDataPoint>,
+    /// "point" when CBOE only ships a single value per day for this symbol
+    /// (VVIX, OVX, GVZ, SKEW). Absent for true OHLC series (VIX, VIX9D, etc.).
+    /// Same convention as Cleveland Fed nowcast point series.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

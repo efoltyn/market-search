@@ -119,30 +119,18 @@ pub(crate) async fn fetch_nasdaq_earnings_for_date(
                     symbol,
                     company_name,
                     time: parse_nasdaq_time(row.time.as_deref()),
-                    market_cap: row
-                        .market_cap
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
+                    market_cap: row.market_cap.as_deref().and_then(parse_money_u64),
                     fiscal_quarter_ending: row
                         .fiscal_quarter_ending
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty()),
-                    eps_forecast: row
-                        .eps_forecast
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
-                    no_of_estimates: row
-                        .no_of_estimates
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
+                    eps_forecast: row.eps_forecast.as_deref().and_then(parse_money_f64),
+                    no_of_estimates: row.no_of_estimates.as_deref().and_then(parse_u32_loose),
                     last_year_report_date: row
                         .last_year_report_date
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty()),
-                    last_year_eps: row
-                        .last_year_eps
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
+                    last_year_eps: row.last_year_eps.as_deref().and_then(parse_money_f64),
                     source: "nasdaq".to_string(),
                 })
             })

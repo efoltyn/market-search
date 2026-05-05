@@ -45,6 +45,18 @@
                     "live": {
                         "type": "boolean",
                         "description": "Fetch fresh prices from exchange APIs (default: true)"
+                    },
+                    "orderbook": {
+                        "type": "boolean",
+                        "description": "Include Polymarket orderbook depth in returned markets"
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Number of bid/ask levels per outcome. Defaults to 5 if orderbook=true. Polymarket only."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum markets to return. Default 12."
                     }
                 },
                 "required": ["search"]
@@ -71,6 +83,10 @@
                     "near_money": {
                         "type": "number",
                         "description": "Only return strikes within this % of the underlying (e.g. 5)"
+                    },
+                    "target_dte": {
+                        "type": "integer",
+                        "description": "Target days to expiry. If set without explicit expiry, picks the nearest listed expiry."
                     }
                 },
                 "required": ["ticker"]

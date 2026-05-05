@@ -1282,7 +1282,8 @@ fn cmd_finance_odds_search_fts(
     let response = serde_json::json!({
         "query": query,
         "source": "fts5",
-        "generated_at": generated_at.to_rfc3339(),
+        "generated_at": generated_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         "schema_version": "1.0",
         "freshness_summary": format!("FTS5 index | synced_at={} | {} total markets", synced_at, total),
         "total_matches": results.len(),

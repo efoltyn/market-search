@@ -350,7 +350,8 @@ async fn cmd_finance_curve(args: FinanceCurveArgs) -> Result<()> {
     let response = CurveResponse {
         commodity: spec.name.to_string(),
         unit: spec.unit.to_string(),
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: chrono::Utc::now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         front_month_price: Some(front_price),
         back_month_price: back_price,
         spread,

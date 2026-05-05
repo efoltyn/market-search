@@ -40,6 +40,8 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
                                 cut_50bp_plus_prob,
                                 hike_prob,
                                 volume: agg.volume,
+                                volume_total: agg.volume,
+                                n_markets: agg.n_markets,
                             }
                         })
                         .collect();
@@ -252,7 +254,7 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
                 }
             }
         }
-        cumulative_signals.sort_by(|a, b| a.by_date.cmp(&b.by_date));
+        sort_cumulative_signals_by_date(&mut cumulative_signals);
         cumulative_signals.dedup_by(|a, b| a.title == b.title);
     }
 
@@ -303,6 +305,8 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
                 cut_50bp_plus_prob,
                 hike_prob,
                 volume: agg.volume,
+                volume_total: agg.volume,
+                n_markets: agg.n_markets,
             }
         })
         .collect();
@@ -328,6 +332,21 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
         warnings,
         cumulative_signals,
     })
+}
+
+/// Sort cumulative_signals chronologically by parsed `by_date` ("June 30, 2026" → date).
+/// Falls back to alphabetical for entries that don't parse. Dedupes ties alphabetically by title.
+fn sort_cumulative_signals_by_date(signals: &mut Vec<CumulativeFedSignal>) {
+    signals.sort_by(|a, b| {
+        let pa = chrono::NaiveDate::parse_from_str(&a.by_date, "%B %d, %Y").ok();
+        let pb = chrono::NaiveDate::parse_from_str(&b.by_date, "%B %d, %Y").ok();
+        match (pa, pb) {
+            (Some(da), Some(db)) => da.cmp(&db).then_with(|| a.title.cmp(&b.title)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.by_date.cmp(&b.by_date).then_with(|| a.title.cmp(&b.title)),
+        }
+    });
 }
 
 fn normalize_bucket_probs(hold: f64, cut25: f64, cut50p: f64, hike: f64) -> (f64, f64, f64, f64) {

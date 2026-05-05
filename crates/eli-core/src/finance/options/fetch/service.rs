@@ -758,8 +758,11 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             bid: c.bid.unwrap_or(0.0),
             ask: c.ask.unwrap_or(0.0),
             last: c.last_price.unwrap_or(0.0),
-            change: c.change.unwrap_or(0.0),
-            pct_change: c.percent_change.unwrap_or(0.0),
+            // Preserve null vs 0.0 distinction. Yahoo returns null for these
+            // fields when markets are closed; collapsing to 0.0 fakes a real
+            // "no movement" datapoint.
+            change: c.change,
+            pct_change: c.percent_change,
             volume: c.volume.unwrap_or(0) as u64,
             open_interest: c.open_interest.unwrap_or(0) as u64,
             implied_volatility: iv,
@@ -942,17 +945,9 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
     // summary_only now keeps the chains (metrics + chains together is more useful)
     let (final_calls, final_puts) = (calls, puts);
 
-    let note = if note.is_some() {
-        note
-    } else if selected_expiry.is_none() {
-        Some("No options chain returned for the requested expiry. Use `--expirations` to see valid dates.".to_string())
-    } else if req.summary_only && total_call_oi == 0 && total_put_oi == 0 {
-        Some("Open interest was unavailable for the selected expiry, so OI-based metrics like max pain and put/call OI ratio are undefined.".to_string())
-    } else if req.summary_only && !has_liquid_near_money {
-        Some("Selected expiry returned a chain, but near-money liquidity was sparse after filters. Try a wider --near-money window or a later expiry.".to_string())
-    } else {
-        None
-    };
+    // Advisory `note` prose dropped — numeric fields (total_call_oi,
+    // has_liquid_near_money, expirations) already convey the same info.
+    let note: Option<String> = note;
 
     Ok(OptionsResponse {
         ticker,

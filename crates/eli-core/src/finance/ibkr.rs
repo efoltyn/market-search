@@ -347,17 +347,10 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
                 if !expiry.is_empty() { parts.push(expiry); }
                 parts.join(" ")
             };
-            let (clock_status, integrity_note) = if fallback_used {
-                (
-                    Some("delayed_frozen_fallback".to_string()),
-                    Some(
-                        "retried with delayed-frozen after live entitlement failure"
-                            .to_string(),
-                    ),
-                )
-            } else {
-                (None, None)
-            };
+            // Fallback synthesized prose dropped — `session_state` (populated
+            // via market_data_type_name) already conveys "delayed_frozen".
+            let (clock_status, integrity_note): (Option<String>, Option<String>) = (None, None);
+            let _ = fallback_used;
             Ok(TickerSnapshot {
                 ticker: display_name,
                 currency: non_empty(detail.contract.currency.to_string()),
@@ -1059,8 +1052,10 @@ fn build_option_contract_row(
         bid: quote.bid.unwrap_or(0.0),
         ask: quote.ask.unwrap_or(0.0),
         last: quote.last.or(quote.bid).or(quote.ask).unwrap_or(0.0),
-        change: 0.0,
-        pct_change: 0.0,
+        // IBKR's options snapshot doesn't include change-from-prior-close in the
+        // current accumulator, so emit null rather than fake a 0.0 datapoint.
+        change: None,
+        pct_change: None,
         volume: quote.volume.unwrap_or(0),
         open_interest: quote.open_interest.unwrap_or(0),
         implied_volatility: implied_volatility_from_quote(&quote),

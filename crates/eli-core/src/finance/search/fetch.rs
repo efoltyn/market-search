@@ -4,7 +4,6 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
     if matches!(req.provider, ProviderKind::Ibkr) {
         return crate::finance::fetch_ibkr_search(&req).await;
     }
-    let started = std::time::Instant::now();
     let generated_at = chrono::Utc::now();
     let query = req.query.trim().to_string();
     if query.is_empty() {
@@ -73,9 +72,9 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
     // Route by intent.
     let preferred_provider = determine_preferred_provider(&query, &yahoo_results, &fred_results);
 
-    let latency_ms = started.elapsed().as_millis() as u64;
-
-    let mut decision_trace = vec![format!("latency_ms={}", latency_ms)];
+    // decision_trace carries only meaningful routing decisions (suppressions, overrides).
+    // latency_ms used to be emitted on every response — it was debug noise, removed.
+    let mut decision_trace: Vec<String> = Vec::new();
     if suppressed_fred_count > 0 {
         decision_trace.push(format!(
             "suppressed_fred_results={} reason=common_noun_ambiguous yahoo_top_score={:.0}",

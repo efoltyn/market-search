@@ -615,15 +615,7 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             if let Some(r) = pc_oi { parts.push(format!("\"pc_oi_ratio\":{:.2}", r)); }
             if let Some(mp) = max_pain {
                 parts.push(format!("\"max_pain\":{:.2}", mp));
-                let gap = mp - price;
-                let gravity = if gap > 1.0 {
-                    format!("price ${:.0} below pain ${:.0} (gap +{:.0})", price, mp, gap)
-                } else if gap < -1.0 {
-                    format!("price ${:.0} above pain ${:.0} (gap -{:.0})", price, mp, gap.abs())
-                } else {
-                    format!("price ≈ pain ${:.0}", mp)
-                };
-                parts.push(format!("\"max_pain_gap\":\"{}\"", gravity));
+                parts.push(format!("\"max_pain_gap\":{:+.2}", mp - price));
             }
             if let Some(i) = iv { parts.push(format!("\"iv_pct\":{:.1}", i * 100.0)); }
             if let Some(oi) = total_oi { parts.push(format!("\"total_oi\":{}", oi)); }
@@ -767,25 +759,43 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             let total_earnings;
             if let Some(earnings) = v.get("earnings").and_then(|e| e.as_array()) {
                 total_earnings = earnings.len();
-                // Parse market cap strings like "$28,611,802,485" → f64 for sorting
-                let parse_mcap = |s: &str| -> f64 {
-                    s.chars().filter(|c| c.is_ascii_digit()).collect::<String>()
-                        .parse::<f64>().unwrap_or(0.0)
+                // market_cap is now a typed u64 in the JSON. Fall back to string
+                // parsing only as belt-and-suspenders for any cached payloads
+                // produced before the schema cleanup.
+                let read_mcap = |val: &serde_json::Value| -> f64 {
+                    match val.get("market_cap") {
+                        Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+                        Some(serde_json::Value::String(s)) => s
+                            .chars()
+                            .filter(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                            .parse::<f64>()
+                            .unwrap_or(0.0),
+                        _ => 0.0,
+                    }
                 };
                 // Sort by market cap descending, show top 30
                 let mut sorted: Vec<&serde_json::Value> = earnings.iter().collect();
                 sorted.sort_by(|a, b| {
-                    let ma = a.get("market_cap").and_then(|m| m.as_str()).map(parse_mcap).unwrap_or(0.0);
-                    let mb = b.get("market_cap").and_then(|m| m.as_str()).map(parse_mcap).unwrap_or(0.0);
+                    let ma = read_mcap(a);
+                    let mb = read_mcap(b);
                     mb.partial_cmp(&ma).unwrap_or(std::cmp::Ordering::Equal)
                 });
                 for e in sorted.iter().take(30) {
                     let sym = e.get("symbol").and_then(|s| s.as_str()).unwrap_or("?");
                     let date = e.get("date").and_then(|d| d.as_str()).unwrap_or("?");
                     let time = e.get("time").and_then(|t| t.as_str()).unwrap_or("?");
-                    let eps = e.get("eps_forecast").and_then(|f| f.as_str()).unwrap_or("?");
-                    let mcap_raw = e.get("market_cap").and_then(|m| m.as_str()).unwrap_or("");
-                    let mcap_val = parse_mcap(mcap_raw);
+                    // eps_forecast is now a typed f64. Fall back to string only for
+                    // legacy/cached payloads.
+                    let eps = match e.get("eps_forecast") {
+                        Some(serde_json::Value::Number(n)) => n
+                            .as_f64()
+                            .map(|v| format!("{v:.2}"))
+                            .unwrap_or_else(|| "?".to_string()),
+                        Some(serde_json::Value::String(s)) => s.clone(),
+                        _ => "?".to_string(),
+                    };
+                    let mcap_val = read_mcap(e);
                     let mcap_str = if mcap_val >= 1e12 { format!("${:.1}T", mcap_val / 1e12) }
                         else if mcap_val >= 1e9 { format!("${:.0}B", mcap_val / 1e9) }
                         else { String::new() };
@@ -883,7 +893,6 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
         "finance_curve" => {
             // Futures forward curve: contracts[].{contract, price, change_from_front_pct}
             let commodity = v.get("commodity").and_then(|c| c.as_str()).unwrap_or("?");
-            let structure = v.get("structure").and_then(|s| s.as_str()).unwrap_or("?");
             let front = v.get("front_month_price").and_then(|p| p.as_f64()).unwrap_or(0.0);
             let back = v.get("back_month_price").and_then(|p| p.as_f64()).unwrap_or(0.0);
             let spread_pct = v.get("spread_pct").and_then(|s| s.as_f64()).unwrap_or(0.0);
@@ -898,8 +907,8 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 }
             }
             format!(
-                "\"commodity\":\"{}\",\"structure\":\"{}\",\"unit\":\"{}\",\"front\":{:.2},\"back\":{:.2},\"spread_pct\":{:.1},\"contracts\":[{}]",
-                commodity, structure, unit, front, back, spread_pct,
+                "\"commodity\":\"{}\",\"unit\":\"{}\",\"front\":{:.2},\"back\":{:.2},\"spread_pct\":{:.1},\"contracts\":[{}]",
+                commodity, unit, front, back, spread_pct,
                 contracts_str.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(",")
             )
         }
@@ -1149,6 +1158,20 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if live {
                 v.push(s("--live"));
             }
+            // Polymarket orderbook depth pass-through.
+            if args
+                .get("orderbook")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                v.push(s("--orderbook"));
+            }
+            if let Some(d) = args.get("depth").and_then(|n| n.as_u64()) {
+                v.extend([s("--depth"), d.to_string()]);
+            }
+            if let Some(limit) = args.get("limit").and_then(|n| n.as_u64()) {
+                v.extend([s("--limit"), limit.to_string()]);
+            }
             Ok(v)
         }
         "finance_options" => {
@@ -1175,6 +1198,11 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             } else {
                 // Default near-money to 10% to prevent oversized chain output
                 v.extend([s("--near-money"), s("10")]);
+            }
+            // Target days-to-expiry pass-through. CLI picks nearest listed expiry
+            // when set without an explicit --expiry.
+            if let Some(dte) = args.get("target_dte").and_then(|n| n.as_i64()) {
+                v.extend([s("--target-dte"), dte.to_string()]);
             }
             if args.get("all").and_then(|b| b.as_bool()).unwrap_or(false) {
                 v.push(s("--all"));

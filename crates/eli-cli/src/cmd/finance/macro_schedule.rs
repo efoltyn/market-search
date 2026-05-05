@@ -74,7 +74,7 @@ async fn cmd_finance_schedule(args: FinanceScheduleArgs) -> Result<()> {
 
     let min_market_cap = args.min_cap.map(|s| parse_market_cap_threshold(&s)).transpose()?;
     let time_filter = args.time;
-    const SCHEDULE_CACHE_SCHEMA_VERSION: &str = "v4-official-bea-fred-attachment";
+    const SCHEDULE_CACHE_SCHEMA_VERSION: &str = "v5-numeric-earnings-fields";
 
     // Cache: schedule data is static per day — 1 hour TTL.
     // Key must include ALL params that change the output.

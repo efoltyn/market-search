@@ -13,7 +13,9 @@ const BOE_BASE: &str = "https://www.bankofengland.co.uk/boeapps/database/_iadb-f
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BoeObservation {
-    pub date: String,
+    /// Observation date in YYYY-MM-DD format. Renamed from `date` to `period` to
+    /// match ECB / BIS / BOJ / EIA observation field naming.
+    pub period: String,
     pub value: f64,
 }
 
@@ -21,8 +23,8 @@ pub struct BoeObservation {
 pub struct BoeSeries {
     pub code: String,
     /// Provider-side identifier — the BOE Statistical Interactive Database series
-    /// code (e.g. "IUDBEDR" for Bank Rate). Mirrors the `key` shape exposed by
-    /// EcbSeries / BisSeries so callers can reconstruct queries downstream.
+    /// code (e.g. "IUDBEDR" for Bank Rate). This IS the canonical BOE identifier
+    /// (kept as `key` per the cross-tool naming convention for round-trippable IDs).
     pub key: Option<String>,
     pub label: String,
     pub observations: Vec<BoeObservation>,
@@ -173,8 +175,8 @@ pub async fn fetch_boe(req: BoeRequest) -> Result<BoeResponse> {
 
         // BOE date in response: "DD Mon YYYY" (e.g. "02 Jan 2025")
         let date_raw = fields[0].trim();
-        let date = parse_boe_date(date_raw).unwrap_or_default();
-        if date.is_empty() { continue; }
+        let period = parse_boe_date(date_raw).unwrap_or_default();
+        if period.is_empty() { continue; }
 
         for &(idx, ref code) in &code_indices {
             let val_raw = fields.get(idx).map(|s| s.trim()).unwrap_or("");
@@ -188,7 +190,7 @@ pub async fn fetch_boe(req: BoeRequest) -> Result<BoeResponse> {
             by_code
                 .entry(code.clone())
                 .or_default()
-                .push(BoeObservation { date: date.clone(), value });
+                .push(BoeObservation { period: period.clone(), value });
         }
     }
 

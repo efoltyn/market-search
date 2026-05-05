@@ -20,10 +20,10 @@ pub struct EiaObservation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EiaSeries {
     pub label: String,
-    /// Provider-side identifier — the EIA v2 API route used to fetch this series
-    /// (e.g. "petroleum/stoc/wstk/data/"). Mirrors the `key` shape exposed by
-    /// EcbSeries / BisSeries so callers can reconstruct queries downstream.
-    pub key: Option<String>,
+    /// EIA v2 API route used to fetch this series (e.g. `"petroleum/stoc/wstk/data/"`).
+    /// This is a URL fragment, NOT a series identifier — renamed from `key` to
+    /// `route` to make that explicit and avoid being conflated with ECB SDMX keys.
+    pub route: Option<String>,
     pub observations: Vec<EiaObservation>,
 }
 
@@ -357,7 +357,7 @@ pub async fn fetch_eia(req: EiaRequest) -> Result<EiaResponse> {
 
         all_series.push(EiaSeries {
             label: spec.label.to_string(),
-            key: Some(spec.route.to_string()),
+            route: Some(spec.route.to_string()),
             observations,
         });
 
