@@ -218,6 +218,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     let mut binance_tickers = Vec::new();
     let mut ibkr_tickers = Vec::new();
     let mut cleveland_tickers = Vec::new();
+    let mut ratepath_tickers = Vec::new();
     let mut yahoo_tickers = Vec::new();
     for t in &preset_stock_tickers {
         match classify_timeseries_ticker(t, &provider_str, fred_preset) {
@@ -226,6 +227,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             TimeseriesTickerBucket::Binance => binance_tickers.push(t.clone()),
             TimeseriesTickerBucket::Ibkr => ibkr_tickers.push(t.clone()),
             TimeseriesTickerBucket::ClevelandFed => cleveland_tickers.push(t.clone()),
+            TimeseriesTickerBucket::RatePath => ratepath_tickers.push(t.clone()),
             TimeseriesTickerBucket::Main => yahoo_tickers.push(t.clone()),
         }
     }
@@ -236,6 +238,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             TimeseriesTickerBucket::Binance => binance_tickers.push(t.clone()),
             TimeseriesTickerBucket::Ibkr => ibkr_tickers.push(t.clone()),
             TimeseriesTickerBucket::ClevelandFed => cleveland_tickers.push(t.clone()),
+            TimeseriesTickerBucket::RatePath => ratepath_tickers.push(t.clone()),
             TimeseriesTickerBucket::Main => yahoo_tickers.push(t.clone()),
         }
     }
@@ -244,6 +247,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     let has_binance = !binance_tickers.is_empty();
     let has_ibkr = !ibkr_tickers.is_empty();
     let has_cleveland = !cleveland_tickers.is_empty();
+    let has_ratepath = !ratepath_tickers.is_empty();
 
     let provider = match provider_str.as_str() {
         "auto" | "yahoo" => eli_core::finance::ProviderKind::Yahoo,
@@ -274,7 +278,8 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         && fred_tickers.is_empty()
         && pyth_tickers.is_empty()
         && binance_tickers.is_empty()
-        && ibkr_tickers.is_empty();
+        && ibkr_tickers.is_empty()
+        && !has_ratepath;
     if only_cleveland {
         let now = chrono::Utc::now();
         let end = as_of.unwrap_or(now).min(now);
@@ -326,6 +331,86 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 &[
                     format!("provider=cleveland_fed"),
                     format!("tickers={}", cleveland_tickers.join(",")),
+                ],
+            )?;
+            println!(
+                "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
+                serde_json::to_string(&wr.out_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+                serde_json::to_string(&wr.meta_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+            );
+        } else {
+            let json = serde_json::to_string_pretty(&resp)?;
+            println!("{json}");
+        }
+        return Ok(());
+    }
+
+    // Standalone RATEPATH path: only RATEPATH: tickers (+ optional prediction markets).
+    let only_ratepath = has_ratepath
+        && yahoo_tickers.is_empty()
+        && fred_tickers.is_empty()
+        && pyth_tickers.is_empty()
+        && binance_tickers.is_empty()
+        && ibkr_tickers.is_empty()
+        && !has_cleveland;
+    if only_ratepath {
+        let now = chrono::Utc::now();
+        let end = as_of.unwrap_or(now).min(now);
+        let start = end
+            .checked_sub_signed(range.approx_duration())
+            .ok_or_else(|| anyhow::anyhow!("range underflow"))?;
+
+        let (rp_series, rp_errors) =
+            fetch_ratepath_series_batch(&ratepath_tickers, start, end, granularity).await;
+        if rp_series.is_empty() {
+            let err_msg = rp_errors
+                .first()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "no usable RATEPATH series found".to_string());
+            anyhow::bail!("{err_msg}");
+        }
+
+        let mut all_series = rp_series;
+
+        // Merge prediction market series if present.
+        if !prediction_markets.is_empty() {
+            let (market_series, _market_errors) =
+                fetch_prediction_market_series_batch(&prediction_markets, start, end, granularity)
+                    .await;
+            all_series.extend(market_series);
+        }
+
+        let analytics =
+            eli_core::finance::build_timeseries_analytics(&all_series, granularity);
+        let tickers_out: Vec<String> = all_series.iter().map(|s| s.ticker.clone()).collect();
+        let resp = eli_core::finance::TimeseriesResponse {
+            provider: eli_core::finance::ProviderKind::Yahoo, // closest match (no rate_path enum variant)
+            sources: vec!["rate_path".to_string()],
+            tickers: tickers_out,
+            granularity,
+            range,
+            start,
+            end,
+            generated_at: now,
+            series: all_series,
+            status: if rp_errors.is_empty() { None } else { Some("partial".to_string()) },
+            error: None,
+            errors: if rp_errors.is_empty() { None } else { Some(rp_errors) },
+            valid_tickers: None,
+            analytics: Some(analytics),
+            cache: None,
+        };
+
+        if let Some(out_path) = args.out {
+            let wr = write_json_out_with_meta(
+                out_path,
+                &resp,
+                "finance.timeseries",
+                &[
+                    format!("provider=rate_path"),
+                    format!("tickers={}", ratepath_tickers.join(",")),
                 ],
             )?;
             println!(
@@ -765,6 +850,36 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
     }
 
+    // RATEPATH merge: aggregate per-meeting rate-path probability buckets across
+    // Polymarket + Kalshi constituents (same shape as prediction_markets merge).
+    if has_ratepath {
+        let (rp_series, rp_errors) =
+            fetch_ratepath_series_batch(&ratepath_tickers, resp.start, resp.end, granularity).await;
+        let mut existing_series: HashSet<String> =
+            resp.series.iter().map(|s| s.ticker.clone()).collect();
+        for series in rp_series {
+            if existing_series.insert(series.ticker.clone()) {
+                resp.tickers.push(series.ticker.clone());
+                resp.series.push(series);
+            }
+        }
+        if !rp_errors.is_empty() {
+            resp.errors.get_or_insert_with(Vec::new).extend(rp_errors);
+        }
+        if !resp.series.is_empty() {
+            resp.error = None;
+            resp.valid_tickers = None;
+            resp.status = match resp.errors.as_ref() {
+                Some(errors) if !errors.is_empty() => Some("partial".to_string()),
+                _ => None,
+            };
+            resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+                &resp.series,
+                resp.granularity,
+            ));
+        }
+    }
+
     // Populate top-level `sources` with distinct providers actually present in series.
     // The legacy `provider` field reflects only the dispatch-time main bucket and lies
     // on mixed calls; `sources` is the truth.
@@ -895,6 +1010,7 @@ enum TimeseriesTickerBucket {
     Binance,
     Ibkr,
     ClevelandFed,
+    RatePath,
     Main,
 }
 
@@ -903,6 +1019,12 @@ fn classify_timeseries_ticker(
     provider_str: &str,
     auto_prefers_fred: bool,
 ) -> TimeseriesTickerBucket {
+    // RATEPATH: virtual provider — matched BEFORE other prefixes so per-meeting
+    // rate-path probability paths flow through the same multi-asset surface as
+    // Polymarket/Kalshi/Pyth/etc.
+    if ticker.starts_with("RATEPATH:") || ticker.starts_with("ratepath:") {
+        return TimeseriesTickerBucket::RatePath;
+    }
     if ticker.starts_with("CLEV:") || ticker.starts_with("clev:") {
         return TimeseriesTickerBucket::ClevelandFed;
     }
@@ -2260,6 +2382,531 @@ fn is_fred_ticker(ticker: &str) -> bool {
     looks_fred
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// RATEPATH virtual provider
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `RATEPATH:<MONTH><YEAR>:<bucket>` — historical probability path for a per-FOMC
+// meeting outcome bucket, aggregated across constituent Polymarket+Kalshi
+// markets and returned as a TickerSeries on the same multi-asset surface as
+// stocks/FRED/Pyth/etc.
+//
+// Buckets: hold | cut | cut25 | cut50plus | hike
+//
+// Pipeline per ticker:
+//   1. Parse → (year, month, bucket).
+//   2. Resolve constituents at the live API (Kalshi event KXFEDDECISION-{YY}{MON}
+//      and Polymarket event slug fed-decision-in-{month}{-suffix}).
+//   3. For each constituent, fetch historical price candles with the existing
+//      fetch_kalshi_market_series / fetch_polymarket_market_series helpers.
+//   4. Filter constituents to the requested bucket (Kalshi by ticker suffix,
+//      Polymarket by title classification).
+//   5. Volume-weighted aggregate at each timestamp on the union grid; constituent
+//      candle samples carry forward at each grid point until superseded by a
+//      newer sample for that constituent, then mixed with weight = current vol.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RatePathBucket {
+    Hold,
+    Cut,        // Cut25 + Cut50Plus combined
+    Cut25,
+    Cut50Plus,
+    Hike,
+}
+
+impl RatePathBucket {
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "hold" => Some(Self::Hold),
+            "cut" => Some(Self::Cut),
+            "cut25" | "cut_25" | "cut25bp" | "cut_25bp" => Some(Self::Cut25),
+            "cut50plus" | "cut50p" | "cut50_plus" | "cut_50plus" | "cut50bp" | "cut50bp+" => {
+                Some(Self::Cut50Plus)
+            }
+            "hike" => Some(Self::Hike),
+            _ => None,
+        }
+    }
+
+    /// Does the constituent's individual bucket contribute to the requested
+    /// aggregate bucket? "Cut" rolls up Cut25 + Cut50Plus.
+    fn includes(self, leaf: RatePathBucket) -> bool {
+        match self {
+            Self::Cut => matches!(leaf, Self::Cut25 | Self::Cut50Plus),
+            other => other == leaf,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RatePathTicker {
+    raw: String,
+    year_short: String, // "26"
+    year_full: i32,     // 2026
+    month_token: String, // "JUN"
+    month_word_lower: String, // "june"
+    bucket: RatePathBucket,
+}
+
+fn parse_ratepath_ticker(raw: &str) -> Option<RatePathTicker> {
+    let trimmed = raw.trim();
+    let body = trimmed
+        .strip_prefix("RATEPATH:")
+        .or_else(|| trimmed.strip_prefix("ratepath:"))?;
+    let parts: Vec<&str> = body.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let meeting = parts[0].to_ascii_uppercase();
+    let bucket = RatePathBucket::parse(parts[1])?;
+    if meeting.len() != 7 {
+        return None;
+    }
+    let month_token = &meeting[..3];
+    let year_str = &meeting[3..];
+    let year_full: i32 = year_str.parse().ok()?;
+    let month_word_lower = match month_token {
+        "JAN" => "january",
+        "FEB" => "february",
+        "MAR" => "march",
+        "APR" => "april",
+        "MAY" => "may",
+        "JUN" => "june",
+        "JUL" => "july",
+        "AUG" => "august",
+        "SEP" => "september",
+        "OCT" => "october",
+        "NOV" => "november",
+        "DEC" => "december",
+        _ => return None,
+    };
+    let year_short = format!("{:02}", year_full % 100);
+    Some(RatePathTicker {
+        raw: trimmed.to_string(),
+        year_short,
+        year_full,
+        month_token: month_token.to_string(),
+        month_word_lower: month_word_lower.to_string(),
+        bucket,
+    })
+}
+
+/// Suffix codes encoded in Kalshi KXFEDDECISION-<YYMON>-<SUFFIX> tickers.
+fn kalshi_suffix_to_bucket(suffix: &str) -> Option<RatePathBucket> {
+    match suffix.to_ascii_uppercase().as_str() {
+        "H0" => Some(RatePathBucket::Hold),
+        "C25" => Some(RatePathBucket::Cut25),
+        "C26" => Some(RatePathBucket::Cut50Plus),
+        "H25" => Some(RatePathBucket::Hike),
+        // H26 / H50 etc — anything that codes as "hike by >25bp" is still a Hike
+        // for our 5-bucket mapping (we don't split hike granularity).
+        s if s.starts_with('H') && s != "H0" => Some(RatePathBucket::Hike),
+        _ => None,
+    }
+}
+
+/// Title-based bucket classifier for Polymarket per-meeting markets.
+/// Mirrors the logic in `eli-core/src/finance/rate_path/fetch/parse.rs::classify_bucket`
+/// but suffix-free (Polymarket markets carry text titles, not suffix codes).
+fn classify_polymarket_title(title: &str) -> Option<RatePathBucket> {
+    let t = title.to_ascii_lowercase();
+    if t.contains("hold") || t.contains("no change") || t.contains("maintain") {
+        return Some(RatePathBucket::Hold);
+    }
+    if t.contains("hike") || t.contains("raise") || t.contains("increase") {
+        return Some(RatePathBucket::Hike);
+    }
+    if t.contains("cut") || t.contains("decrease") || t.contains("lower") {
+        // Polymarket variants: "50+ bps", "50 bp", "50bp", "0.50%", ">25bps", "half"
+        if t.contains("50bp") || t.contains("50 bp") || t.contains("50+") || t.contains("0.50%")
+            || t.contains(">25bps") || t.contains(">25 bps") || t.contains("half")
+        {
+            return Some(RatePathBucket::Cut50Plus);
+        }
+        return Some(RatePathBucket::Cut25);
+    }
+    None
+}
+
+#[derive(Clone, Debug)]
+struct RatePathConstituent {
+    request: PredictionMarketRequest,
+    /// Constituent's leaf bucket (e.g. Cut25 for a -C25 Kalshi market). Kept on
+    /// the struct for diagnostic round-trips even though aggregation only needs
+    /// the (already-filtered) `request` + `volume`.
+    #[allow(dead_code)]
+    bucket: RatePathBucket,
+    volume: i64,
+}
+
+const RATEPATH_KALSHI_MIN_VOLUME: i64 = 500;
+const RATEPATH_POLYMARKET_MIN_VOLUME: i64 = 10_000;
+
+async fn fetch_ratepath_constituents(
+    client: &reqwest::Client,
+    ticker: &RatePathTicker,
+) -> Result<Vec<RatePathConstituent>> {
+    let mut out: Vec<RatePathConstituent> = Vec::new();
+
+    // ── Kalshi: KXFEDDECISION-{YY}{MON} ──
+    let event_ticker = format!("KXFEDDECISION-{}{}", ticker.year_short, ticker.month_token);
+    let kalshi_url = "https://api.elections.kalshi.com/trade-api/v2/markets";
+    let kalshi_resp = client
+        .get(kalshi_url)
+        .query(&[
+            ("event_ticker", event_ticker.as_str()),
+            ("status", "open"),
+            ("limit", "20"),
+        ])
+        .send()
+        .await
+        .with_context(|| format!("kalshi event lookup {event_ticker}"))?;
+    if kalshi_resp.status().is_success() {
+        let body: serde_json::Value = kalshi_resp
+            .json()
+            .await
+            .with_context(|| format!("kalshi event parse {event_ticker}"))?;
+        if let Some(markets) = body.get("markets").and_then(|v| v.as_array()) {
+            for m in markets {
+                let market_ticker = m
+                    .get("ticker")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if market_ticker.is_empty() {
+                    continue;
+                }
+                let suffix = market_ticker.rsplit('-').next().unwrap_or("");
+                let Some(leaf_bucket) = kalshi_suffix_to_bucket(suffix) else {
+                    continue;
+                };
+                if !ticker.bucket.includes(leaf_bucket) {
+                    continue;
+                }
+                let volume = m
+                    .get("volume_fp")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0) as i64;
+                if volume < RATEPATH_KALSHI_MIN_VOLUME {
+                    continue;
+                }
+                out.push(RatePathConstituent {
+                    request: PredictionMarketRequest {
+                        provider: PredictionMarketProvider::Kalshi,
+                        market: market_ticker,
+                        side: PredictionMarketSide::Yes,
+                    },
+                    bucket: leaf_bucket,
+                    volume,
+                });
+            }
+        }
+    }
+
+    // ── Polymarket: fed-decision-in-{month}[-N] ──
+    // The exact slug suffix depends on Polymarket's internal discriminator; the
+    // simplest reliable path is to iterate likely candidates.  June 2026 is
+    // currently `fed-decision-in-june-825`, July 2026 is `fed-decision-in-july-181`,
+    // others are bare `fed-decision-in-<month>`.  Try the slug list in order;
+    // first hit with markets wins.
+    let poly_slugs: Vec<String> = if ticker.month_word_lower == "june" {
+        vec!["fed-decision-in-june-825".to_string(), "fed-decision-in-june".to_string()]
+    } else if ticker.month_word_lower == "july" {
+        vec!["fed-decision-in-july-181".to_string(), "fed-decision-in-july".to_string()]
+    } else {
+        vec![format!("fed-decision-in-{}", ticker.month_word_lower)]
+    };
+
+    for slug in &poly_slugs {
+        let url = format!("{}/events?slug={}", POLYMARKET_GAMMA_URL, slug);
+        let resp = match client.get(&url).send().await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(body) = resp.json::<serde_json::Value>().await else {
+            continue;
+        };
+        let event = match body.as_array().and_then(|a| a.first()) {
+            Some(e) => e,
+            None => continue,
+        };
+        let markets = event
+            .get("markets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if markets.is_empty() {
+            continue;
+        }
+        let mut added_any = false;
+        for m in &markets {
+            let title = m
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // Skip joint multi-meeting compound markets.
+            let lower = title.to_ascii_lowercase();
+            if lower.contains("next three decisions")
+                || lower.contains("pause–pause") || lower.contains("pause-pause")
+                || lower.contains("cut–pause") || lower.contains("cut-pause")
+            {
+                continue;
+            }
+            // Title must reference the target meeting year (avoid 2027 contracts
+            // sharing a slug).
+            if !title.contains(&ticker.year_full.to_string()) {
+                continue;
+            }
+            let Some(leaf_bucket) = classify_polymarket_title(&title) else {
+                continue;
+            };
+            if !ticker.bucket.includes(leaf_bucket) {
+                continue;
+            }
+            let volume = m
+                .get("volumeNum")
+                .and_then(|v| v.as_f64())
+                .or_else(|| {
+                    m.get("volume")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<f64>().ok())
+                })
+                .unwrap_or(0.0) as i64;
+            if volume < RATEPATH_POLYMARKET_MIN_VOLUME {
+                continue;
+            }
+            let market_id = m
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| m.get("conditionId").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
+            if market_id.is_empty() {
+                continue;
+            }
+            out.push(RatePathConstituent {
+                request: PredictionMarketRequest {
+                    provider: PredictionMarketProvider::Polymarket,
+                    market: market_id,
+                    side: PredictionMarketSide::Yes,
+                },
+                bucket: leaf_bucket,
+                volume,
+            });
+            added_any = true;
+        }
+        if added_any {
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
+async fn fetch_ratepath_series_batch(
+    tickers: &[String],
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    granularity: eli_core::finance::Span,
+) -> (
+    Vec<eli_core::finance::TickerSeries>,
+    Vec<eli_core::finance::TimeseriesError>,
+) {
+    let results = join_all(
+        tickers
+            .iter()
+            .map(|t| fetch_ratepath_single_series(t, start, end, granularity)),
+    )
+    .await;
+
+    let mut series = Vec::new();
+    let mut errors = Vec::new();
+    for (raw, result) in tickers.iter().zip(results) {
+        match result {
+            Ok(s) => series.push(s),
+            Err(err) => errors.push(eli_core::finance::TimeseriesError {
+                ticker: raw.clone(),
+                stage: Some("rate_path".to_string()),
+                message: err.to_string(),
+            }),
+        }
+    }
+    (series, errors)
+}
+
+async fn fetch_ratepath_single_series(
+    raw: &str,
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    granularity: eli_core::finance::Span,
+) -> Result<eli_core::finance::TickerSeries> {
+    let parsed = parse_ratepath_ticker(raw)
+        .ok_or_else(|| anyhow::anyhow!("invalid RATEPATH ticker '{raw}' (expected RATEPATH:<MON><YYYY>:<bucket>)"))?;
+
+    // Constituent enumeration is one-shot; reuse the standard prediction-market
+    // history fetchers for per-constituent candle pulls.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("init rate_path http client")?;
+
+    let constituents = fetch_ratepath_constituents(&client, &parsed).await?;
+    if constituents.is_empty() {
+        anyhow::bail!(
+            "no usable constituents for {raw} (event KXFEDDECISION-{}{} or fed-decision-in-{} returned no markets above volume floor)",
+            parsed.year_short, parsed.month_token, parsed.month_word_lower
+        );
+    }
+
+    // Fetch every constituent's history in parallel.
+    let series_results = join_all(constituents.iter().map(|c| {
+        // Each fetch returns a `TickerSeries` containing one constituent's
+        // candle series.  We use Yes-side throughout — bucket aggregation is
+        // additive on Yes probabilities.
+        fetch_constituent_history(&c.request, start, end, granularity)
+    }))
+    .await;
+
+    // Pair each successful fetch with its constituent metadata.
+    let mut alive: Vec<(RatePathConstituent, eli_core::finance::TickerSeries)> = Vec::new();
+    for (cons, res) in constituents.into_iter().zip(series_results.into_iter()) {
+        if let Ok(s) = res {
+            if !s.candles.is_empty() {
+                alive.push((cons, s));
+            }
+        }
+    }
+    if alive.is_empty() {
+        anyhow::bail!(
+            "no constituent history available for {raw} in requested window"
+        );
+    }
+
+    // Build union timestamp grid across all constituents.
+    let mut ts_set: std::collections::BTreeSet<chrono::DateTime<chrono::Utc>> =
+        std::collections::BTreeSet::new();
+    for (_, s) in &alive {
+        for c in &s.candles {
+            ts_set.insert(c.t);
+        }
+    }
+    let grid: Vec<chrono::DateTime<chrono::Utc>> = ts_set.into_iter().collect();
+    if grid.is_empty() {
+        anyhow::bail!("no timestamps in union grid for {raw}");
+    }
+
+    // For each constituent, build a sorted (ts, close) vector for forward-fill.
+    struct ConsHistory {
+        volume: i64,
+        samples: Vec<(chrono::DateTime<chrono::Utc>, f64)>,
+    }
+    let mut cons_hist: Vec<ConsHistory> = Vec::with_capacity(alive.len());
+    for (cons, s) in &alive {
+        let mut samples: Vec<(chrono::DateTime<chrono::Utc>, f64)> = s
+            .candles
+            .iter()
+            .map(|c| (c.t, c.c))
+            .collect();
+        samples.sort_by_key(|(t, _)| *t);
+        cons_hist.push(ConsHistory {
+            volume: cons.volume.max(0),
+            samples,
+        });
+    }
+
+    // For each grid timestamp, compute volume-weighted Yes probability.
+    // Forward-fill: a constituent contributes its most-recent candle close at or
+    // before the grid timestamp; constituents with no candle at-or-before are
+    // excluded from that grid point.
+    let mut candles: Vec<eli_core::finance::Candle> = Vec::with_capacity(grid.len());
+    let mut indices: Vec<usize> = vec![0usize; cons_hist.len()];
+    for grid_ts in &grid {
+        let mut weighted_sum: f64 = 0.0;
+        let mut weight_total: f64 = 0.0;
+        for (i, h) in cons_hist.iter().enumerate() {
+            // Advance index forward while the next sample is still <= grid_ts.
+            while indices[i] + 1 < h.samples.len() && h.samples[indices[i] + 1].0 <= *grid_ts {
+                indices[i] += 1;
+            }
+            // Skip constituents whose first sample is strictly after grid_ts.
+            if h.samples[indices[i]].0 > *grid_ts {
+                continue;
+            }
+            let p = h.samples[indices[i]].1;
+            let w = h.volume as f64;
+            if w <= 0.0 || !p.is_finite() {
+                continue;
+            }
+            weighted_sum += p * w;
+            weight_total += w;
+        }
+        if weight_total <= 0.0 {
+            continue;
+        }
+        let p = (weighted_sum / weight_total).clamp(0.0, 1.0);
+        candles.push(eli_core::finance::Candle {
+            t: *grid_ts,
+            o: p,
+            h: p,
+            l: p,
+            c: p,
+            v: None,
+            kind: Some("point".to_string()),
+        });
+    }
+
+    if candles.is_empty() {
+        anyhow::bail!("rate_path aggregate empty for {raw}");
+    }
+
+    let upstream_id = format!(
+        "{}{}:{}",
+        parsed.month_token,
+        parsed.year_full,
+        match parsed.bucket {
+            RatePathBucket::Hold => "hold",
+            RatePathBucket::Cut => "cut",
+            RatePathBucket::Cut25 => "cut25",
+            RatePathBucket::Cut50Plus => "cut50plus",
+            RatePathBucket::Hike => "hike",
+        }
+    );
+
+    Ok(eli_core::finance::TickerSeries {
+        ticker: parsed.raw.clone(),
+        candles,
+        source: Some("rate_path".to_string()),
+        upstream_id: Some(upstream_id),
+    })
+}
+
+/// Thin wrapper that routes a `PredictionMarketRequest` to the right fetch
+/// helper. Lives next to `fetch_ratepath_constituents` so RATEPATH stays
+/// independent of the higher-level `fetch_prediction_market_series` path
+/// (which expects a slightly different ticker round-trip).
+async fn fetch_constituent_history(
+    req: &PredictionMarketRequest,
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    granularity: eli_core::finance::Span,
+) -> Result<eli_core::finance::TickerSeries> {
+    match req.provider {
+        PredictionMarketProvider::Kalshi => {
+            fetch_kalshi_market_series(req, start, end, granularity).await
+        }
+        PredictionMarketProvider::Polymarket => {
+            fetch_polymarket_market_series(req, start, end, granularity).await
+        }
+    }
+}
+
 #[cfg(test)]
 mod timeseries_tests {
     use super::*;
@@ -2295,4 +2942,75 @@ mod timeseries_tests {
         );
     }
 
+    #[test]
+    fn ratepath_prefix_classifies_to_ratepath_bucket() {
+        assert_eq!(
+            classify_timeseries_ticker("RATEPATH:JUN2026:hold", "auto", false),
+            TimeseriesTickerBucket::RatePath
+        );
+        assert_eq!(
+            classify_timeseries_ticker("ratepath:dec2026:cut", "auto", false),
+            TimeseriesTickerBucket::RatePath
+        );
+    }
+
+    #[test]
+    fn parse_ratepath_ticker_extracts_meeting_and_bucket() {
+        let p = parse_ratepath_ticker("RATEPATH:JUN2026:hold").expect("parse");
+        assert_eq!(p.year_short, "26");
+        assert_eq!(p.year_full, 2026);
+        assert_eq!(p.month_token, "JUN");
+        assert_eq!(p.month_word_lower, "june");
+        assert_eq!(p.bucket, RatePathBucket::Hold);
+
+        let p2 = parse_ratepath_ticker("RATEPATH:DEC2027:cut50plus").expect("parse2");
+        assert_eq!(p2.year_short, "27");
+        assert_eq!(p2.month_token, "DEC");
+        assert_eq!(p2.bucket, RatePathBucket::Cut50Plus);
+
+        assert!(parse_ratepath_ticker("RATEPATH:invalid").is_none());
+        assert!(parse_ratepath_ticker("RATEPATH:JUN2026:bogus").is_none());
+        assert!(parse_ratepath_ticker("not_a_ratepath_ticker").is_none());
+    }
+
+    #[test]
+    fn ratepath_bucket_cut_includes_cut25_and_cut50plus() {
+        assert!(RatePathBucket::Cut.includes(RatePathBucket::Cut25));
+        assert!(RatePathBucket::Cut.includes(RatePathBucket::Cut50Plus));
+        assert!(!RatePathBucket::Cut.includes(RatePathBucket::Hold));
+        assert!(!RatePathBucket::Cut.includes(RatePathBucket::Hike));
+        assert!(RatePathBucket::Hold.includes(RatePathBucket::Hold));
+        assert!(!RatePathBucket::Hold.includes(RatePathBucket::Cut25));
+    }
+
+    #[test]
+    fn kalshi_suffix_maps_to_correct_bucket() {
+        assert_eq!(kalshi_suffix_to_bucket("H0"), Some(RatePathBucket::Hold));
+        assert_eq!(kalshi_suffix_to_bucket("C25"), Some(RatePathBucket::Cut25));
+        assert_eq!(kalshi_suffix_to_bucket("C26"), Some(RatePathBucket::Cut50Plus));
+        assert_eq!(kalshi_suffix_to_bucket("H25"), Some(RatePathBucket::Hike));
+        assert_eq!(kalshi_suffix_to_bucket("H26"), Some(RatePathBucket::Hike));
+        assert_eq!(kalshi_suffix_to_bucket("UNKNOWN"), None);
+    }
+
+    #[test]
+    fn polymarket_title_classifier_handles_50_plus_variants() {
+        // The "50+ bps" pattern from Polymarket June 2026 markets.
+        assert_eq!(
+            classify_polymarket_title("Will the Fed decrease interest rates by 50+ bps after the June 2026 meeting?"),
+            Some(RatePathBucket::Cut50Plus)
+        );
+        assert_eq!(
+            classify_polymarket_title("Will the Fed decrease interest rates by 25 bps after the June 2026 meeting?"),
+            Some(RatePathBucket::Cut25)
+        );
+        assert_eq!(
+            classify_polymarket_title("Will there be no change in Fed interest rates after the June 2026 meeting?"),
+            Some(RatePathBucket::Hold)
+        );
+        assert_eq!(
+            classify_polymarket_title("Will the Fed increase interest rates by 25 bps after the June 2026 meeting?"),
+            Some(RatePathBucket::Hike)
+        );
+    }
 }
