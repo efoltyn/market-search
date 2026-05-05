@@ -67,6 +67,9 @@ impl From<eli_finance_types::FinanceTypesError> for Error {
 
 mod providers;
 pub use providers::odds::fetch_odds;
+pub use providers::odds::{
+    fetch_polymarket_orderbooks, PolymarketBookLevel, PolymarketOrderbook,
+};
 
 mod filings;
 pub use filings::fetch_filings;

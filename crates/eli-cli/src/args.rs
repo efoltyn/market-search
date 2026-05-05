@@ -169,7 +169,7 @@ enum FinanceCommand {
     Odds(FinanceOddsArgs),
     /// Listed options chains with IV/skew summaries (Yahoo Finance).
     Options(FinanceOptionsArgs),
-    /// Sync prediction markets (Kalshi + Polymarket) with rate limiting to local CSV cache.
+    /// Deprecated alias for `finance odds sync` (canonical). Same flags, same backend; kept for cron compatibility.
     Sync(FinanceSyncArgs),
     /// Local paper trading sandbox using live Kalshi/Polymarket prices.
     Paper(FinancePaperArgs),
@@ -1531,15 +1531,15 @@ struct FinanceSyncArgs {
     sources: Vec<String>,
 
     /// Debug only: frontier-sample page cap per source. Hides coverage and is not a normal sync control.
-    #[arg(long, hide = true)]
+    #[arg(long)]
     max_pages: Option<usize>,
 
     /// Fail if pagination/coverage checks indicate incomplete source exhaustion.
-    #[arg(long, hide = true)]
+    #[arg(long)]
     strict: bool,
 
     /// Include sports markets/events in sync output (default: false).
-    #[arg(long, hide = true)]
+    #[arg(long)]
     include_sports: bool,
 
     /// Include Kalshi historical markets (archived/settled tier). Default: false.
@@ -1547,7 +1547,7 @@ struct FinanceSyncArgs {
     include_historical: bool,
 
     /// Fast refresh from Kalshi websocket ticker stream using cached baseline (no full re-pagination).
-    #[arg(long, hide = true)]
+    #[arg(long)]
     stream_refresh: bool,
 
     /// Breadth heartbeat in hours for stream refresh mode. If cached baseline is older, force strict REST anchor sync (default: 6).
@@ -1558,8 +1558,8 @@ struct FinanceSyncArgs {
     #[arg(long, hide = true)]
     stream_refresh_timeout_secs: Option<u64>,
 
-    /// Cache directory for CSV files.
-    #[arg(long, hide = true)]
+    /// Cache directory for CSV files (defaults to platform cache dir).
+    #[arg(long)]
     cache_dir: Option<PathBuf>,
 
     /// Output format (currently: json).

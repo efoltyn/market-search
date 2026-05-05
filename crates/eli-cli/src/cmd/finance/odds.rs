@@ -64,6 +64,9 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         let has_db = db_path.exists();
 
         if args.live {
+            // --orderbook: pass depth (1+) to live paths so Polymarket books
+            // get attached. None disables. --depth defaults to 5.
+            let orderbook_depth = args.orderbook.then(|| args.depth.unwrap_or(5).max(1));
             // --live: if FTS5 DB exists, use discovery+hydration (fast).
             // Otherwise fall back to full catalog download (slow).
             if has_db {
@@ -74,6 +77,7 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
                     args.out.as_deref(),
                     &search_opts,
                     provider.as_deref(),
+                    orderbook_depth,
                 )
                 .await;
             }
@@ -84,6 +88,7 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
                 args.out.as_deref(),
                 &search_opts,
                 provider.as_deref(),
+                orderbook_depth,
             )
             .await;
         }
@@ -108,6 +113,7 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         }
 
         // No local index — fall back to live API search with the same response shape.
+        // (No --live here, so orderbook never makes sense.)
         eprintln!("hint: run `eli finance sync` for instant FTS5 search");
         return cmd_finance_odds_search_live_no_csv(
             args.search.as_deref().unwrap_or(""),
@@ -116,6 +122,7 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
             args.out.as_deref(),
             &search_opts,
             provider.as_deref(),
+            None,
         )
         .await;
     }
@@ -1311,6 +1318,101 @@ fn cmd_finance_odds_search_fts(
     Ok(())
 }
 
+/// Attach Polymarket orderbook depth (per-outcome bids/asks ladders, plus
+/// `outcome_best_bids` / `outcome_best_asks` / `orderbook_timestamp` for
+/// downstream compatibility) to every Polymarket market in `markets` that
+/// carries `clob_token_ids`. One batch REST `/books` call covers them all.
+/// Errors are swallowed into `api_errors` so a flaky orderbook fetch never
+/// blanks the rest of the search response.
+async fn attach_polymarket_orderbooks_to_live_markets(
+    markets: &mut [serde_json::Value],
+    depth: usize,
+    api_errors: &mut Vec<serde_json::Value>,
+) {
+    let mut token_ids = Vec::new();
+    for market in markets.iter() {
+        if market.get("source").and_then(|v| v.as_str()) != Some("polymarket") {
+            continue;
+        }
+        let Some(tokens) = market.get("clob_token_ids").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for token in tokens {
+            if let Some(s) = token.as_str() {
+                if !s.is_empty() && !token_ids.iter().any(|t: &String| t == s) {
+                    token_ids.push(s.to_string());
+                }
+            }
+        }
+    }
+    if token_ids.is_empty() {
+        return;
+    }
+    let books = match eli_core::finance::fetch_polymarket_orderbooks(&token_ids, depth).await {
+        Ok(b) => b,
+        Err(e) => {
+            api_errors.push(serde_json::json!({
+                "phase": "orderbook",
+                "source": "polymarket",
+                "error": e.to_string(),
+            }));
+            return;
+        }
+    };
+    for market in markets.iter_mut() {
+        if market.get("source").and_then(|v| v.as_str()) != Some("polymarket") {
+            continue;
+        }
+        let Some(tokens) = market
+            .get("clob_token_ids")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect::<Vec<_>>())
+        else {
+            continue;
+        };
+        if tokens.is_empty() {
+            continue;
+        }
+        let mut best_bids = Vec::with_capacity(tokens.len());
+        let mut best_asks = Vec::with_capacity(tokens.len());
+        let mut ladders = Vec::with_capacity(tokens.len());
+        let mut timestamp: Option<String> = None;
+        for token in &tokens {
+            let book = books.get(token);
+            best_bids.push(
+                book.and_then(|b| b.bids.last().map(|l| l.price.clone()))
+                    .unwrap_or_default(),
+            );
+            best_asks.push(
+                book.and_then(|a| a.asks.last().map(|l| l.price.clone()))
+                    .unwrap_or_default(),
+            );
+            ladders.push(serde_json::json!({
+                "asset_id": token,
+                "bids": book.map(|b| b.bids.clone()).unwrap_or_default(),
+                "asks": book.map(|b| b.asks.clone()).unwrap_or_default(),
+            }));
+            if timestamp.is_none() {
+                timestamp = book.and_then(|b| b.timestamp.clone());
+            }
+        }
+        if let Some(obj) = market.as_object_mut() {
+            obj.insert("outcome_best_bids".to_string(), serde_json::json!(best_bids));
+            obj.insert("outcome_best_asks".to_string(), serde_json::json!(best_asks));
+            obj.insert(
+                "orderbook_timestamp".to_string(),
+                timestamp
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            obj.insert("orderbook".to_string(), serde_json::json!({
+                "depth": depth,
+                "outcomes": ladders,
+            }));
+        }
+    }
+}
+
 /// FTS5 discovery + live hydration: instant local discovery, then targeted API calls.
 /// Replaces the full-catalog Kalshi download with FTS5 lookup + per-event hydration.
 async fn cmd_finance_odds_search_live_fts(
@@ -1320,6 +1422,7 @@ async fn cmd_finance_odds_search_live_fts(
     out_path: Option<&std::path::Path>,
     opts: &CsvSearchOptions,
     provider: Option<&str>,
+    orderbook_depth: Option<usize>,
 ) -> Result<()> {
     let started = std::time::Instant::now();
     let generated_at = chrono::Utc::now();
@@ -1618,6 +1721,13 @@ async fn cmd_finance_odds_search_live_fts(
         }
     }
 
+    // --orderbook: attach Polymarket book depth to the limited slice the user
+    // sees (cheaper than running it across every ranked candidate).
+    if let Some(depth) = orderbook_depth {
+        attach_polymarket_orderbooks_to_live_markets(&mut live_markets, depth, &mut api_errors)
+            .await;
+    }
+
     let mut decision_trace = vec![
         "search_mode=fts5_live".to_string(),
         format!("fts_query={fts_query_used}"),
@@ -1627,6 +1737,7 @@ async fn cmd_finance_odds_search_live_fts(
         format!("kalshi_series_hints={}", hinted_kalshi_series.len()),
         format!("polymarket_exact_tag={}", polymarket_exact_tag.clone().unwrap_or_else(|| "-".to_string())),
         format!("returned={}", total_markets_found.min(final_limit)),
+        format!("orderbook={}", orderbook_depth.map(|d| d.to_string()).unwrap_or_else(|| "off".to_string())),
     ];
     decision_trace.extend(live_search_provider_trace(
         provider,
@@ -3473,6 +3584,7 @@ async fn cmd_finance_odds_search_live_no_csv(
     out_path: Option<&std::path::Path>,
     opts: &CsvSearchOptions,
     provider: Option<&str>,
+    orderbook_depth: Option<usize>,
 ) -> Result<()> {
     let started = std::time::Instant::now();
     let generated_at = chrono::Utc::now();
@@ -3851,6 +3963,12 @@ async fn cmd_finance_odds_search_live_no_csv(
         }
     }
 
+    // --orderbook: same as the FTS path — only attach to the slice the user sees.
+    if let Some(depth) = orderbook_depth {
+        attach_polymarket_orderbooks_to_live_markets(&mut live_markets, depth, &mut api_errors)
+            .await;
+    }
+
     let mut decision_trace = vec![
         "policy_driven_live_search=true".to_string(),
         "csv_cache_search=false".to_string(),
@@ -3862,6 +3980,7 @@ async fn cmd_finance_odds_search_live_no_csv(
         "direct_match_priority=true".to_string(),
         "event_diversification=true".to_string(),
         format!("returned={}", total_markets_found.min(final_limit)),
+        format!("orderbook={}", orderbook_depth.map(|d| d.to_string()).unwrap_or_else(|| "off".to_string())),
     ];
     decision_trace.extend(live_search_provider_trace(
         provider,

@@ -73,20 +73,10 @@ async fn fetch_yahoo_snapshots_as_of(
     for snapshot in &mut snapshots {
         let Some(series) = intraday_map.get(&snapshot.ticker) else {
             snapshot.effective_at = Some(snapshot.freshness.observed_at);
-            snapshot.clock_status = Some("live_fallback".to_string());
-            snapshot.integrity_note = Some(format!(
-                "historical reconstruction unavailable at {}; live/static Yahoo snapshot retained",
-                as_of.to_rfc3339()
-            ));
             continue;
         };
         let Some(latest) = series.candles.last() else {
             snapshot.effective_at = Some(snapshot.freshness.observed_at);
-            snapshot.clock_status = Some("live_fallback".to_string());
-            snapshot.integrity_note = Some(format!(
-                "historical reconstruction returned no candles at {}; live/static Yahoo snapshot retained",
-                as_of.to_rfc3339()
-            ));
             continue;
         };
 
@@ -126,7 +116,6 @@ async fn fetch_yahoo_snapshots_as_of(
             .or(previous_daily_close)
             .or(snapshot.previous_close);
         let current_price = Some(latest.c);
-        let age_seconds = (as_of - latest.t).num_seconds().max(0);
 
         snapshot.current_price = current_price;
         snapshot.price = current_price;
@@ -154,15 +143,6 @@ async fn fetch_yahoo_snapshots_as_of(
         snapshot.session_state = "historical_locked".to_string();
         snapshot.market_closed_fallback = false;
         snapshot.effective_at = Some(latest.t);
-        snapshot.clock_status = Some(if age_seconds <= 60 {
-            "synced".to_string()
-        } else {
-            "nearest_prior".to_string()
-        });
-        snapshot.integrity_note = Some(format!(
-            "price fields reconstructed from Yahoo 5min bars anchored at {}",
-            as_of.to_rfc3339()
-        ));
     }
 
     Ok((snapshots, errors))
