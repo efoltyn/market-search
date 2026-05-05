@@ -148,12 +148,13 @@ pub async fn fetch_schedule(req: ScheduleRequest) -> Result<ScheduleResponse> {
             is_fomc_decision_day(d)
         });
     }
-    // Major profile previously skipped this backfill, leaving the response with only the
-    // small Claims-only FRED API list. The official_major path (Census PDF) covers
-    // CPI/PPI/PCE/GDP/Retail/Housing/NFP — all of which belong in --major.
+    // Safety net: window.rs already calls fetch_official_major_macro for all profiles, so
+    // the unified path normally produces CPI/PPI/PCE/GDP/Retail/Housing/NFP via the Census
+    // PDF. Only re-fetch here if the filtered set somehow ended up empty or BEA-only — that
+    // means the upstream call failed. Don't trigger this purely on `--major` (the unified
+    // path covers Major correctly and re-running just emits a misleading warning).
     let needs_official_major_backfill = matches!(req.kind, ScheduleKind::Macro | ScheduleKind::All)
-        && (macro_profile == ScheduleMacroProfile::Major
-            || macro_events.is_empty()
+        && (macro_events.is_empty()
             || macro_events.iter().all(|e| e.source == "bea"));
     if needs_official_major_backfill {
         match fetch_official_major_macro(start_date, end_date).await {

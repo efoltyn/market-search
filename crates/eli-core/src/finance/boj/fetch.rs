@@ -17,6 +17,10 @@ pub struct BojObservation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BojSeries {
     pub code: String,
+    /// Provider-side identifier — the BOJ "{db}'{code}" pair needed to round-trip
+    /// the series (e.g. "BS01'MABS1AN11"). Mirrors the `key` shape exposed by
+    /// EcbSeries / BisSeries so callers can reconstruct queries downstream.
+    pub key: Option<String>,
     pub name: String,
     pub unit: String,
     pub frequency: String,
@@ -185,8 +189,14 @@ pub async fn fetch_boj(req: BojRequest) -> Result<BojResponse> {
             }
 
             if !observations.is_empty() {
+                let key = if code.is_empty() {
+                    None
+                } else {
+                    Some(format!("{db}'{code}"))
+                };
                 all_series.push(BojSeries {
                     code,
+                    key,
                     name,
                     unit,
                     frequency: freq,

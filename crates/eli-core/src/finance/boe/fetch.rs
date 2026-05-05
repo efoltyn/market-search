@@ -20,6 +20,10 @@ pub struct BoeObservation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BoeSeries {
     pub code: String,
+    /// Provider-side identifier — the BOE Statistical Interactive Database series
+    /// code (e.g. "IUDBEDR" for Bank Rate). Mirrors the `key` shape exposed by
+    /// EcbSeries / BisSeries so callers can reconstruct queries downstream.
+    pub key: Option<String>,
     pub label: String,
     pub observations: Vec<BoeObservation>,
 }
@@ -197,7 +201,8 @@ pub async fn fetch_boe(req: BoeRequest) -> Result<BoeResponse> {
         .into_iter()
         .map(|(code, obs)| {
             let label = label_map.get(&code).cloned().unwrap_or_else(|| code.clone());
-            BoeSeries { code, label, observations: obs }
+            let key = if code.is_empty() { None } else { Some(code.clone()) };
+            BoeSeries { code, key, label, observations: obs }
         })
         .collect();
 
