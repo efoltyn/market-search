@@ -160,12 +160,13 @@ pub async fn fetch_snapshot(req: SnapshotRequest) -> Result<SnapshotResponse> {
     let generated_at = Utc::now();
     let resolved_policy = crate::finance::policy::load_policy(None, PolicyMode::Observe)?;
     let provider = req.provider.clone();
-    let mut decision_trace = vec!["policy_driven_freshness=true".to_string()];
+    // decision_trace records CHOICES that altered the response (partial_results,
+    // fallbacks, etc.). Empty by default; populated only when something noteworthy fired.
+    let mut decision_trace: Vec<String> = Vec::new();
     let (snapshots, snapshot_errors) = match provider {
         ProviderKind::Mock => (generate_mock_snapshots(&tickers), Vec::new()),
         ProviderKind::Yahoo => match req.as_of {
             Some(as_of) => {
-                decision_trace.push(format!("research_anchor_at={}", as_of.to_rfc3339()));
                 fetch_yahoo_snapshots_as_of(
                     &tickers,
                     as_of,

@@ -160,13 +160,14 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
                 "sources": resolved_policy.sources,
             }),
         );
-        obj.insert(
-            "decision_trace".to_string(),
-            serde_json::json!([
-                "policy_driven_metadata=true",
-                "sync_delta_enrichment=best_effort",
-            ]),
-        );
+        // decision_trace stays as the upstream response set it. The enrichment
+        // step does not record itself unless it actually altered the payload.
+        if !obj.contains_key("decision_trace") {
+            obj.insert(
+                "decision_trace".to_string(),
+                serde_json::Value::Array(Vec::new()),
+            );
+        }
     }
 
     if let Some(out_path) = args.out {
@@ -215,13 +216,14 @@ fn emit_odds_response(
                 "sources": resolved_policy.sources,
             }),
         );
-        obj.insert(
-            "decision_trace".to_string(),
-            serde_json::json!([
-                "policy_driven_metadata=true",
-                "sync_delta_enrichment=best_effort",
-            ]),
-        );
+        // decision_trace stays as the upstream response set it. The enrichment
+        // step does not record itself unless it actually altered the payload.
+        if !obj.contains_key("decision_trace") {
+            obj.insert(
+                "decision_trace".to_string(),
+                serde_json::Value::Array(Vec::new()),
+            );
+        }
     }
 
     if let Some(out_path) = out_path {
@@ -1291,12 +1293,7 @@ fn cmd_finance_odds_search_fts(
         "limit": final_limit,
         "top": top,
         "markets": markets,
-        "decision_trace": [
-            "search_mode=fts5",
-            format!("db_path={}", db_path.display()),
-            format!("fts_query={}", query),
-            format!("duration_ms={}", duration_ms),
-        ],
+        "decision_trace": serde_json::Value::Array(Vec::new()),
         "run_meta": {
             "duration_ms": duration_ms,
             "db_markets": total,
@@ -1457,7 +1454,7 @@ async fn cmd_finance_odds_search_live_fts(
             .map(str::to_string),
         exclude_mentions: !opts.include_mentions,
     };
-    let mut fts_query_used = query.to_string();
+    let mut fallback_query_used: Option<String> = None;
     let mut fts_results =
         eli_core::finance::odds_db::search_markets(&fts_conn, query, 50, &fts_filters)
             .map_err(|e| anyhow::anyhow!("FTS search: {e}"))?;
@@ -1467,7 +1464,7 @@ async fn cmd_finance_odds_search_live_fts(
                 eli_core::finance::odds_db::search_markets(&fts_conn, &fallback_query, 50, &fts_filters)
                     .map_err(|e| anyhow::anyhow!("FTS search fallback: {e}"))?;
             if !fallback_results.is_empty() {
-                fts_query_used = fallback_query;
+                fallback_query_used = Some(fallback_query);
                 fts_results = fallback_results;
                 break;
             }
@@ -1662,11 +1659,9 @@ async fn cmd_finance_odds_search_live_fts(
     let mut live_markets: Vec<serde_json::Value> = Vec::new();
 
     // Merge Polymarket results.
-    let mut polymarket_exact_tag = None;
     match poly_result {
-        Ok((events, markets, _expansion_terms, mut poly_errors, exact_tag)) => {
+        Ok((events, markets, _expansion_terms, mut poly_errors, _exact_tag)) => {
             api_errors.append(&mut poly_errors);
-            polymarket_exact_tag = exact_tag;
             all_events.extend(events);
             live_markets.extend(markets);
         }
@@ -1729,22 +1724,15 @@ async fn cmd_finance_odds_search_live_fts(
             .await;
     }
 
-    let mut decision_trace = vec![
-        "search_mode=fts5_live".to_string(),
-        format!("fts_query={fts_query_used}"),
-        format!("fts_discovery_ms={fts_ms}"),
-        format!("fts_candidates={}", fts_results.len()),
-        format!("kalshi_series_hydrated={}", kalshi_series_vec.len()),
-        format!("kalshi_series_hints={}", hinted_kalshi_series.len()),
-        format!("polymarket_exact_tag={}", polymarket_exact_tag.clone().unwrap_or_else(|| "-".to_string())),
-        format!("returned={}", total_markets_found.min(final_limit)),
-        format!("orderbook={}", orderbook_depth.map(|d| d.to_string()).unwrap_or_else(|| "off".to_string())),
-    ];
-    decision_trace.extend(live_search_provider_trace(
-        provider,
-        hydrate_kalshi,
-        hydrate_polymarket,
-    ));
+    // decision_trace records CHOICES that altered the response, not execution narration.
+    // Empty by default; populated only when the system did something noteworthy
+    // (suppression, fallback, dedupe, granularity downgrade, partial results).
+    let mut decision_trace: Vec<String> = Vec::new();
+    if let Some(used) = fallback_query_used.as_ref() {
+        decision_trace.push(format!(
+            "fts_query_fallback={used} reason=primary_query_no_results"
+        ));
+    }
 
     let resp = serde_json::json!({
         "schema_version": "finance.odds.search_live_fts.v1",
@@ -2428,18 +2416,6 @@ fn live_search_fallback_queries(query: &str) -> Vec<String> {
     }
     fallbacks.retain(|candidate| candidate != query);
     fallbacks
-}
-
-fn live_search_provider_trace(
-    provider: Option<&str>,
-    kalshi_enabled: bool,
-    polymarket_enabled: bool,
-) -> Vec<String> {
-    vec![
-        format!("kalshi_live_search={kalshi_enabled}"),
-        format!("polymarket_public_search={polymarket_enabled}"),
-        format!("provider_filter={}", provider.unwrap_or("auto")),
-    ]
 }
 
 fn live_shared_prefix_len(a: &str, b: &str) -> usize {
@@ -3660,7 +3636,6 @@ async fn cmd_finance_odds_search_live_no_csv(
     };
 
     api_errors.extend(kalshi_discovery.api_errors);
-    let kalshi_discovery_mode = kalshi_discovery.mode;
     let kalshi_matched_tags = kalshi_discovery.matched_tags;
 
     let mut ranked_series: Vec<RankedKalshiSeries> = kalshi_discovery
@@ -3970,24 +3945,9 @@ async fn cmd_finance_odds_search_live_no_csv(
             .await;
     }
 
-    let mut decision_trace = vec![
-        "policy_driven_live_search=true".to_string(),
-        "csv_cache_search=false".to_string(),
-        format!(
-            "polymarket_exact_tag={}",
-            polymarket_exact_tag.clone().unwrap_or_else(|| "-".to_string())
-        ),
-        format!("kalshi_series_discovery={kalshi_discovery_mode}"),
-        "direct_match_priority=true".to_string(),
-        "event_diversification=true".to_string(),
-        format!("returned={}", total_markets_found.min(final_limit)),
-        format!("orderbook={}", orderbook_depth.map(|d| d.to_string()).unwrap_or_else(|| "off".to_string())),
-    ];
-    decision_trace.extend(live_search_provider_trace(
-        provider,
-        fetch_kalshi,
-        fetch_polymarket,
-    ));
+    // decision_trace records CHOICES that altered the response, not execution narration.
+    // Empty by default; populated only when the system did something noteworthy.
+    let decision_trace: Vec<String> = Vec::new();
 
     let resp = serde_json::json!({
         "schema_version": "finance.odds.search_live.v3",

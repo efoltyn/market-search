@@ -139,29 +139,8 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
         mode: resolved_policy.mode,
         sources: resolved_policy.sources.clone(),
     };
-    resp.decision_trace
-        .push("policy_driven_compaction=true".to_string());
-    let sync_mode_trace = match resp.sync_mode {
-        eli_core::finance::OddsSyncMode::Exhaustive => "sync_mode=exhaustive",
-        eli_core::finance::OddsSyncMode::FrontierSample => "sync_mode=frontier_sample",
-        eli_core::finance::OddsSyncMode::StreamRefresh => "sync_mode=stream_refresh",
-    };
-    if !resp
-        .decision_trace
-        .iter()
-        .any(|item| item == sync_mode_trace)
-    {
-        resp.decision_trace.push(sync_mode_trace.to_string());
-    }
-    if args.max_pages.is_some()
-        && !resp
-            .decision_trace
-            .iter()
-            .any(|item| item == "max_pages_is_debug_only=true")
-    {
-        resp.decision_trace
-            .push("max_pages_is_debug_only=true".to_string());
-    }
+    // decision_trace stays as run_sync set it; the CLI does not annotate the response
+    // with mode/policy noise that already appears in the request or response shape.
 
     if let Some(out_path) = args.out {
         let mut meta_bits: Vec<String> = Vec::new();

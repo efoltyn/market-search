@@ -591,9 +591,7 @@ pub async fn fetch_ibkr_search(req: &SearchRequest) -> Result<SearchResponse> {
         preferred_provider: "yahoo".to_string(), // IBKR results are instrument-like
         yahoo_results: results,
         fred_results: suggestions,
-        decision_trace: vec![
-            "provider=ibkr".to_string(),
-        ],
+        decision_trace: vec![],
     })
 }
 

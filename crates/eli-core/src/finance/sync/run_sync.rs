@@ -619,14 +619,10 @@ pub async fn sync_odds(req: OddsSyncRequest) -> Result<OddsSyncResponse> {
             stale_count: 0,
         },
         applied_policy: AppliedPolicy::default(),
-        decision_trace: match sync_mode {
-            OddsSyncMode::Exhaustive => vec!["sync_mode=exhaustive".to_string()],
-            OddsSyncMode::FrontierSample => vec![
-                "sync_mode=frontier_sample".to_string(),
-                "max_pages_is_debug_only=true".to_string(),
-            ],
-            OddsSyncMode::StreamRefresh => vec!["sync_mode=stream_refresh".to_string()],
-        },
+        // decision_trace records CHOICES that altered the response, not execution
+        // narration. sync_mode is already in the request/response (`sync_mode` field);
+        // empty here unless a real choice fired (none currently).
+        decision_trace: Vec::new(),
         run_meta: RunMeta {
             latency_ms: 0,
             stdout_chars: 0,
