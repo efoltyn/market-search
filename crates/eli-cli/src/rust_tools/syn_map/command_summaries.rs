@@ -141,8 +141,6 @@ fn command_summary_parts(
     } else if path.len() >= 2 && path[0] == "finance" && (path[1] == "filings" || path[1] == "sec")
     {
         out.extend(filings_summary_parts(value));
-    } else if path.len() >= 2 && path[0] == "finance" && path[1] == "news" {
-        out.extend(news_summary_parts(value));
     } else if path.len() >= 2 && path[0] == "finance" && path[1] == "macro" {
         out.extend(macro_summary_parts(value));
     } else if path.len() >= 2 && path[0] == "finance" && path[1] == "forex" {
@@ -297,24 +295,6 @@ fn filings_summary_parts(value: &serde_json::Value) -> Vec<String> {
             .and_then(|v| v.as_str())
             .unwrap_or("?");
         out.push(format!("latest={form}@{date}"));
-    }
-    out
-}
-
-fn news_summary_parts(value: &serde_json::Value) -> Vec<String> {
-    let mut out = Vec::new();
-    let Some(map) = value.as_object() else {
-        return out;
-    };
-    let Some(news) = map.get("news").and_then(|v| v.as_array()) else {
-        return out;
-    };
-    out.push(format!("articles={}", news.len()));
-    if let Some(first) = news.first() {
-        let t = first.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        if !t.is_empty() {
-            out.push(format!("top_headline={}", truncate_line(t, 50)));
-        }
     }
     out
 }

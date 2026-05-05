@@ -702,6 +702,23 @@ fn enrich_odds_response_with_sync_delta(
 ) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(resp).context("serialize odds response")?;
 
+    // Skip the 444MB sync_state.json load when there are no markets to enrich
+    // (list_series / list_events / list_tags responses have no per-market price data
+    // for delta computation). Saves ~3s on every list-* call.
+    let has_markets = value
+        .get("markets")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    let has_available_markets = value
+        .get("available_markets")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if !has_markets && !has_available_markets {
+        return Ok(value);
+    }
+
     let cache_dir = directories::ProjectDirs::from("", "", "eli")
         .map(|d| d.cache_dir().join("odds"))
         .unwrap_or_else(|| std::env::temp_dir().join("eli-odds-cache"));

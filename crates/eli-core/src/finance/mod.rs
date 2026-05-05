@@ -17,7 +17,7 @@ pub(crate) mod shared_client {
     use std::sync::LazyLock;
 
     /// General-purpose client (rustls TLS, no proxy, tcp_nodelay).
-    /// Used by auctions, options, news, search, COT, odds, filings, etc.
+    /// Used by auctions, options, search, COT, odds, filings, etc.
     pub(crate) static GENERAL: LazyLock<reqwest::Client> = LazyLock::new(|| {
         reqwest::Client::builder()
             .tcp_nodelay(true)
@@ -82,9 +82,6 @@ pub use timeseries::resample_candles;
 
 mod options;
 pub use options::fetch_options;
-
-mod news;
-pub use news::fetch_news;
 
 mod schedule;
 pub use schedule::fetch_schedule;

@@ -71,25 +71,12 @@ pub fn build_snapshot_analytics(snapshots: &[TickerSnapshot]) -> SnapshotAnalyti
         Some(rs)
     });
 
-    // Detect when market is likely closed (all returns exactly 0.0)
-    let market_note = daily_returns.as_ref().and_then(|dr| {
-        if dr.len() >= 2 && dr.values().all(|r| *r == 0.0) {
-            Some(
-                "market may be closed — all daily returns are 0.0 (current_price == previous_close)"
-                    .to_string(),
-            )
-        } else {
-            None
-        }
-    });
-
     SnapshotAnalytics {
         market_caps,
         total_market_cap,
         market_cap_weights,
         daily_returns,
         relative_strength,
-        market_note,
     }
 }
 

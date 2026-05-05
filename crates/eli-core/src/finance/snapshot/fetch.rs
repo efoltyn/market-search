@@ -271,8 +271,6 @@ pub async fn fetch_snapshot(req: SnapshotRequest) -> Result<SnapshotResponse> {
         None
     };
 
-    let market_note = analytics.market_note.clone();
-
     Ok(SnapshotResponse {
         provider,
         tickers,
@@ -314,7 +312,6 @@ pub async fn fetch_snapshot(req: SnapshotRequest) -> Result<SnapshotResponse> {
             None
         },
         analytics: Some(analytics),
-        market_note,
         trailing_returns: None,
     })
 }

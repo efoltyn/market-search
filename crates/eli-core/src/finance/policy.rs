@@ -34,9 +34,6 @@ pub struct FilteringPolicy {
     pub macro_offtopic_keywords: Vec<String>,
     pub us_hint_keywords: Vec<String>,
     pub policy_action_keywords: Vec<String>,
-    pub news_finance_keywords: Vec<String>,
-    pub news_noise_domain_blocklist: Vec<String>,
-    pub news_short_ticker_min_filtered_results: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

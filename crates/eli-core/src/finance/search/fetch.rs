@@ -52,12 +52,36 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
     // FRED search — macro series discovery.
     // Live API if key available (800K+ series), else hardcoded catalog.
     // Preserve FRED's native ordering. Don't stuff popularity into score.
-    let fred_results = search_fred_live_or_catalog(&query).await;
+    let mut fred_results = search_fred_live_or_catalog(&query).await;
+
+    // Suppress weak FRED matches on common-noun ambiguous queries when Yahoo dominates.
+    // FRED's search_rank misfires on words like "apple" → returns bananas/avocados/orange juice
+    // commodity series while Yahoo correctly surfaces AAPL with a high score.
+    const COMMON_NOUN_AMBIGUOUS: &[&str] = &[
+        "apple", "orange", "peach", "cotton", "sugar", "butter",
+        "lemon", "berry", "wheat", "corn", "rice", "salt",
+    ];
+    let q_lower = query.to_ascii_lowercase();
+    let is_ambiguous = COMMON_NOUN_AMBIGUOUS.contains(&q_lower.as_str());
+    let yahoo_top_score = yahoo_results.first().and_then(|r| r.score).unwrap_or(0.0);
+    let mut suppressed_fred_count = 0usize;
+    if is_ambiguous && yahoo_top_score > 25_000.0 {
+        suppressed_fred_count = fred_results.len();
+        fred_results.clear();
+    }
 
     // Route by intent.
     let preferred_provider = determine_preferred_provider(&query, &yahoo_results, &fred_results);
 
     let latency_ms = started.elapsed().as_millis() as u64;
+
+    let mut decision_trace = vec![format!("latency_ms={}", latency_ms)];
+    if suppressed_fred_count > 0 {
+        decision_trace.push(format!(
+            "suppressed_fred_results={} reason=common_noun_ambiguous yahoo_top_score={:.0}",
+            suppressed_fred_count, yahoo_top_score
+        ));
+    }
 
     Ok(SearchResponse {
         query,
@@ -66,9 +90,7 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
         preferred_provider,
         yahoo_results,
         fred_results,
-        decision_trace: vec![
-            format!("latency_ms={}", latency_ms),
-        ],
+        decision_trace,
     })
 }
 

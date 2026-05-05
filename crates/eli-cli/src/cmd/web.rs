@@ -627,7 +627,6 @@ fn tool_prefix(tool_name: &str) -> String {
         "finance.sync" => "SYNC".to_string(),
         "finance.options" => "OPTIONS".to_string(),
         "finance.prices" => "PRICES".to_string(),
-        "finance.news" => "NEWS".to_string(),
         "finance.fundamentals" => "FUNDAMENTALS".to_string(),
         "finance.filings" => "FILINGS".to_string(),
         "finance.search" => "SEARCH".to_string(),

@@ -8,7 +8,6 @@ fn finance_tools_doc() -> String {
         include_str!("tools/timeseries.md"),
         include_str!("tools/options.md"),
         include_str!("tools/filings.md"),
-        include_str!("tools/news.md"),
         include_str!("tools/odds.md"),
         include_str!("tools/prices.md"),
         include_str!("tools/macro.md"),
@@ -166,7 +165,6 @@ If your response fully addresses the user's request, use DONE.
 | `odds` | Near-term events, market sentiment, binary outcomes. Real money = real belief. |
 | `prices/timeseries` | Current or historical price data, including current price (last candle close). Verifiable facts. |
 | `filings` | Official numbers, guidance, legal statements. Slow but authoritative. |
-| `news` | Context around events, headlines. Semi-structured. |
 | `web crawl/search` | Last resort. Unstructured, noisy, expensive to parse. |
 
 **Key insight:** Odds tell you what the market believes will happen. Articles tell you what already happened (or opinions). When researching sentiment or near-term outcomes, odds > articles.

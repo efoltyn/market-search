@@ -209,11 +209,7 @@ async fn fetch_single_yahoo_snapshot(
             market_closed_fallback,
             effective_at: Some(observed_at),
             clock_status: None,
-            integrity_note: if data_looks_stale {
-                Some("price==previous_close during regular session; likely stale".to_string())
-            } else {
-                None
-            },
+            integrity_note: None,
         })
 }
 

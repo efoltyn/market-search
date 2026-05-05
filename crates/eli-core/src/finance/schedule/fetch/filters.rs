@@ -98,11 +98,7 @@ fn is_low_signal_macro_title(title: &str) -> bool {
         "temporary open market operations",
         "tri-party general collateral rate data",
         "standard & poors",
-        "recession indicators series",
-        "interest rate spreads",
-        "key ecb interest rates",
         "historical overnight ameribor unsecured interest rate",
-        "h.15 selected interest rates",
     ];
     low_signal.iter().any(|k| t.contains(k))
 }

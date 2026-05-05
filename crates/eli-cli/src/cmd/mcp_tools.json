@@ -380,7 +380,7 @@
         },
         {
             "name": "finance_curve",
-            "description": "Futures forward curve for commodities. Returns every contract month's price, front month price, back month price, raw spread (back-front), spread_pct, and structure label (contango if back>front, backwardation if back<front). Supported: oil/wti, brent, gold, silver, natgas, copper, platinum, palladium, gasoline/rbob, heating/ho.",
+            "description": "Futures forward curve for commodities. Returns every contract month's price, front month price, back month price, raw spread (back-front), and spread_pct. Supported: oil/wti, brent, gold, silver, natgas, copper, platinum, palladium, gasoline/rbob, heating/ho.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

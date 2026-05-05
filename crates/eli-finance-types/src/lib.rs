@@ -583,10 +583,6 @@ pub struct SnapshotResponse {
     #[serde(skip_serializing)]
     pub analytics: Option<SnapshotAnalytics>,
 
-    /// Market note extracted from analytics (e.g. "all returns 0.0 — market may be closed").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub market_note: Option<String>,
-
     /// Optional trailing returns by ticker and period (decimal returns).
     /// Shape: ticker -> period -> return
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -624,10 +620,6 @@ pub struct SnapshotAnalytics {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relative_strength: Option<BTreeMap<String, f64>>,
-
-    /// Warning when data may be stale (e.g. market closed, all returns 0.0).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub market_note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -881,55 +873,6 @@ pub struct SearchResponse {
     pub fred_results: Vec<SearchItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decision_trace: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NewsItem {
-    pub title: String,
-    pub link: String,
-    pub date: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub published_at: Option<DateTime<Utc>>,
-    #[serde(skip_serializing, default)]
-    pub freshness: Freshness,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_at: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub clock_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub integrity_note: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NewsRequest {
-    pub ticker: String,
-    pub date: String, // YYYY-MM-DD
-    #[serde(default)]
-    pub as_of: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub policy_file: Option<String>,
-    #[serde(default)]
-    pub policy_mode: Option<PolicyMode>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NewsResponse {
-    pub ticker: String,
-    pub date: String,
-    pub generated_at: DateTime<Utc>,
-    #[serde(default)]
-    pub schema_version: String,
-    #[serde(default)]
-    pub freshness_summary: FreshnessSummary,
-    #[serde(default)]
-    pub applied_policy: AppliedPolicy,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub decision_trace: Vec<String>,
-    #[serde(default)]
-    pub run_meta: RunMeta,
-    pub news: Vec<NewsItem>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub articles: Vec<NewsItem>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1737,8 +1680,6 @@ pub struct OptionsMetrics {
     #[serde(default)]
     pub has_liquid_near_money: bool,
     pub max_pain: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary_quality: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expirations_analyzed: Option<usize>,
 }

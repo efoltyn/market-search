@@ -126,13 +126,14 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
         .filter(|s| !s.is_empty());
 
     if req.list_tags {
-        let limit = req.limit.unwrap_or(100).max(1);
+        // `--limit N` from caller = total tags wanted (cap), not per-page size.
+        // Polymarket's per-page max is 500. For `--limit 10`, 1 HTTP call returns 10 tags
+        // instead of 50 pages of 10 tags = 500 wasted tags.
+        let total_cap = req.limit.unwrap_or(500).max(1);
+        let page_size = total_cap.min(500);
         let max_pages = match req.max_pages {
             Some(n) => n.max(1),
-            None => {
-                let target = 500usize;
-                (target + limit - 1) / limit
-            }
+            None => (total_cap + page_size - 1) / page_size,
         };
         let mut offset = req
             .cursor
@@ -142,10 +143,10 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
         let mut page = 0usize;
         let mut has_more = false;
         let mut tags_out: Vec<OddsTag> = Vec::new();
-        while page < max_pages {
+        while page < max_pages && tags_out.len() < total_cap {
             let url = format!(
                 "{}/tags?limit={}&offset={}",
-                POLYMARKET_GAMMA_URL, limit, offset
+                POLYMARKET_GAMMA_URL, page_size, offset
             );
             let resp = client
                 .get(&url)
@@ -185,18 +186,28 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
             let page_tags: Vec<PolyTag> = serde_json::from_value(tags_value)
                 .map_err(|e| Error::Provider(format!("polymarket tags list parse failed: {e}")))?;
             let raw_len = page_tags.len();
-            tags_out.extend(page_tags.into_iter().map(|t| OddsTag {
-                id: json_value_to_string(t.id),
-                label: t.label,
-                slug: t.slug,
-            }));
+            let remaining = total_cap.saturating_sub(tags_out.len());
+            tags_out.extend(
+                page_tags
+                    .into_iter()
+                    .take(remaining)
+                    .map(|t| OddsTag {
+                        id: json_value_to_string(t.id),
+                        label: t.label,
+                        slug: t.slug,
+                    }),
+            );
 
             page += 1;
-            if raw_len < limit {
+            if raw_len < page_size {
                 has_more = false;
                 break;
             }
-            offset = offset.saturating_add(limit);
+            if tags_out.len() >= total_cap {
+                has_more = true;
+                break;
+            }
+            offset = offset.saturating_add(page_size);
             has_more = true;
         }
 

@@ -23,9 +23,6 @@ macro_keywords = ["federal reserve","fed","fomc","rate","inflation","cpi","pce",
 macro_offtopic_keywords = ["mentions","tweet","airdrop","courts","crypto"]
 us_hint_keywords = ["us","u.s.","united states","american","nfp","nonfarm payrolls","fomc","federal reserve","cpi","pce","gdpnow"]
 policy_action_keywords = ["rate","cut","cuts","hike","hikes","hold","decrease","increase","bps","basis point","decision","meeting"]
-news_finance_keywords = ["stock","shares","etf","market","s&p","nasdaq","dow","invest","earnings","fed","bond","yield","economy","inflation"]
-news_noise_domain_blocklist = ["tlt.ng"]
-news_short_ticker_min_filtered_results = 5
 
 [freshness]
 live_after_seconds = 30

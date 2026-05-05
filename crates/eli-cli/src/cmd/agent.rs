@@ -2133,34 +2133,16 @@ async fn try_agent_direct_route(
         .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("direct route risk snapshot")?;
-        let today = chrono::Utc::now()
-            .date_naive()
-            .format("%Y-%m-%d")
-            .to_string();
-        let news = eli_core::finance::fetch_news(eli_core::finance::NewsRequest {
-            ticker: symbol.clone(),
-            date: today.clone(),
-            as_of: None,
-            policy_file: None,
-            policy_mode: None,
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("direct route risk news")?;
 
         let search_path = artifacts_dir.join("search.json");
         let snapshot_path = artifacts_dir.join("snapshot.json");
-        let news_path = artifacts_dir.join("news.json");
         std::fs::write(&search_path, serde_json::to_string_pretty(&search)?)
             .context("write direct risk search")?;
         std::fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)
             .context("write direct risk snapshot")?;
-        std::fs::write(&news_path, serde_json::to_string_pretty(&news)?)
-            .context("write direct risk news")?;
 
         let search_meta = serde_json::to_value(&search).context("serialize risk search")?;
         let snapshot_meta = serde_json::to_value(&snapshot).context("serialize risk snapshot")?;
-        let news_meta = serde_json::to_value(&news).context("serialize risk news")?;
         write_shadow_meta_for_value(
             &search_path,
             &search_meta,
@@ -2175,20 +2157,12 @@ async fn try_agent_direct_route(
             "direct_route:risk:snapshot",
         )
         .context("write risk snapshot sidecar")?;
-        write_shadow_meta_for_value(
-            &news_path,
-            &news_meta,
-            "agent.direct",
-            "direct_route:risk:news",
-        )
-        .context("write risk news sidecar")?;
 
-        let headline_count = news.news.len();
         let summary_path = artifacts_dir.join("summary.md");
         std::fs::write(
             &summary_path,
             format!(
-                "# Direct agent route\n\n- Task: {task}\n- Route: risk_packet\n- Subject: {subject}\n- Symbol: {symbol}\n- News date: {today}\n- Headlines fetched: {headline_count}\n"
+                "# Direct agent route\n\n- Task: {task}\n- Route: risk_packet\n- Subject: {subject}\n- Symbol: {symbol}\n"
             ),
         )
         .context("write direct risk summary")?;
@@ -2196,7 +2170,6 @@ async fn try_agent_direct_route(
         let artifact_paths = vec![
             search_path.display().to_string(),
             snapshot_path.display().to_string(),
-            news_path.display().to_string(),
             summary_path.display().to_string(),
         ];
         let worker = AgentWorkerResult {

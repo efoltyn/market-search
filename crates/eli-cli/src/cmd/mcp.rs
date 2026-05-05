@@ -824,58 +824,6 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 macro_lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(","),
             )
         }
-        "finance_news" => {
-            let ticker = v.get("ticker").and_then(|t| t.as_str()).unwrap_or("?");
-            let date = v.get("date").and_then(|d| d.as_str()).unwrap_or("?");
-            let mut lines = Vec::new();
-            // Track source domain counts
-            let mut source_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-            let articles = v.get("articles").or_else(|| v.get("news"))
-                .and_then(|a| a.as_array());
-            let total_articles = articles.map(|a| a.len()).unwrap_or(0);
-            if let Some(arts) = v.get("articles").or_else(|| v.get("news")).and_then(|a| a.as_array()) {
-                for art in arts.iter() {
-                    // Extract domain from link for source tracking
-                    if let Some(link) = art.get("link").and_then(|l| l.as_str()) {
-                        // Simple domain extraction: grab 2nd segment after //
-                        let domain = link.split("//").nth(1)
-                            .and_then(|s| s.split('/').next())
-                            .and_then(|d| d.split('.').rev().take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(".").into())
-                            .unwrap_or("unknown".to_string());
-                        // Simplify google news to actual source from title
-                        let src_label = if domain.contains("google") {
-                            // Try to extract publisher from title pattern "title - Publisher"
-                            art.get("title").and_then(|t| t.as_str())
-                                .and_then(|t| t.rsplit(" - ").next())
-                                .map(|s| s.chars().take(20).collect::<String>())
-                                .unwrap_or("google-news".to_string())
-                        } else {
-                            domain.chars().take(20).collect()
-                        };
-                        *source_counts.entry(src_label).or_insert(0) += 1;
-                    }
-                    let title = art.get("title").and_then(|t| t.as_str()).unwrap_or("?");
-                    let pub_date = art.get("published_at").and_then(|d| d.as_str())
-                        .map(|d| &d[..10.min(d.len())]).unwrap_or("?");
-                    let title_short: String = title.chars().take(80).collect();
-                    lines.push(format!("{} ({})", title_short, pub_date));
-                }
-            }
-            // Top 5 sources
-            let mut src_vec: Vec<(String, usize)> = source_counts.into_iter().collect();
-            src_vec.sort_by(|a, b| b.1.cmp(&a.1));
-            let top_sources: Vec<String> = src_vec.iter().take(5).map(|(s, n)| format!("{}:{}", s, n)).collect();
-            // Generic/ambiguous tickers produce noisy Google RSS results
-            let noisy_tickers = ["SPY", "AI", "TLT", "IWM", "QQQ", "GLD", "USO", "DIA", "XLE", "VIX"];
-            let noise_flag = if noisy_tickers.contains(&ticker.to_uppercase().as_str()) {
-                ",\"noise\":\"HIGH — ETF/index ticker, RSS results likely mixed with unrelated stories\""
-            } else { "" };
-            format!(
-                "\"ticker\":\"{}\",\"date\":\"{}\",\"count\":{},\"top_sources\":\"{}\"{},\"_schema\":\".articles[].{{title,published_at,link}}\",\"headlines\":[{}]",
-                ticker, date, total_articles, top_sources.join(" "), noise_flag,
-                lines.iter().take(15).map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
-            )
-        }
         "finance_auctions" => {
             let mut lines = Vec::new();
             if let Some(auctions) = v.get("auctions").and_then(|a| a.as_array()) {
@@ -1232,24 +1180,6 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
                 v.push(s("--all"));
             }
             Ok(v)
-        }
-        "finance_news" => {
-            let ticker = args
-                .get("ticker")
-                .and_then(|t| t.as_str())
-                .ok_or_else(|| anyhow::anyhow!("ticker required"))?;
-            let date = args
-                .get("date")
-                .and_then(|d| d.as_str())
-                .ok_or_else(|| anyhow::anyhow!("date required"))?;
-            Ok(vec![
-                s("finance"),
-                s("news"),
-                s("--ticker"),
-                s(ticker),
-                s("--date"),
-                s(date),
-            ])
         }
         "finance_fundamentals" => {
             let tickers = args

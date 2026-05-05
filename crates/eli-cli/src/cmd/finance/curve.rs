@@ -144,7 +144,6 @@ struct CurveResponse {
     commodity: String,
     unit: String,
     generated_at: String,
-    structure: String, // "backwardation" | "contango" | "mixed" | "insufficient_data"
     front_month_price: Option<f64>,
     back_month_price: Option<f64>,
     spread: Option<f64>,
@@ -344,20 +343,6 @@ async fn cmd_finance_curve(args: FinanceCurveArgs) -> Result<()> {
         c.change_from_front_pct = Some(diff / front_price * 100.0);
     }
 
-    // Determine structure
-    let structure = if contracts.len() < 2 {
-        "insufficient_data".to_string()
-    } else {
-        let back_price = contracts.last().unwrap().price;
-        if back_price > front_price * 1.005 {
-            "contango".to_string()
-        } else if back_price < front_price * 0.995 {
-            "backwardation".to_string()
-        } else {
-            "flat".to_string()
-        }
-    };
-
     let back_price = contracts.last().map(|c| c.price);
     let spread = back_price.map(|b| b - front_price);
     let spread_pct = back_price.map(|b| (b - front_price) / front_price * 100.0);
@@ -366,7 +351,6 @@ async fn cmd_finance_curve(args: FinanceCurveArgs) -> Result<()> {
         commodity: spec.name.to_string(),
         unit: spec.unit.to_string(),
         generated_at: chrono::Utc::now().to_rfc3339(),
-        structure,
         front_month_price: Some(front_price),
         back_month_price: back_price,
         spread,

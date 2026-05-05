@@ -1166,13 +1166,6 @@ fn build_options_response(
         (None, Some(put_iv)) => Some(put_iv),
         (None, None) => None,
     };
-    let summary_quality = if !has_liquid_near_money {
-        Some("illiquid".to_string())
-    } else if !has_iv_data || total_call_oi == 0 || total_put_oi == 0 {
-        Some("partial".to_string())
-    } else {
-        Some("usable".to_string())
-    };
     let metrics = Some(OptionsMetrics {
         underlying_price,
         put_call_ratio_volume,
@@ -1188,7 +1181,6 @@ fn build_options_response(
         has_iv_data,
         has_liquid_near_money,
         max_pain,
-        summary_quality,
         expirations_analyzed: Some(1),
     });
 

@@ -161,8 +161,6 @@ enum FinanceCommand {
     Filings(FinanceFilingsArgs),
     /// Alias for filings.
     Sec(FinanceFilingsArgs),
-    /// Fetch news context for a specific ticker and date.
-    News(FinanceNewsArgs),
     /// Fetch earnings and macro release schedules (no-auth public endpoints).
     Schedule(FinanceScheduleArgs),
     /// Aggregate implied Fed policy trajectory from local prediction-market cache.
@@ -1248,29 +1246,6 @@ pub struct FinanceBoeArgs {
     pub format: String,
     #[arg(long)]
     pub out: Option<PathBuf>,
-}
-
-#[derive(clap::Args, Debug)]
-struct FinanceNewsArgs {
-    /// Ticker to search for.
-    #[arg(long, visible_alias = "tickers")]
-    ticker: String,
-
-    /// Date of interest (YYYY-MM-DD).
-    #[arg(long)]
-    date: String,
-
-    /// Optional policy file override.
-    #[arg(long = "policy-file")]
-    policy_file: Option<PathBuf>,
-
-    /// Policy mode: observe | assist | enforce.
-    #[arg(long = "policy-mode", default_value = "observe")]
-    policy_mode: String,
-
-    /// Write full JSON output to a file instead of stdout.
-    #[arg(long)]
-    out: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

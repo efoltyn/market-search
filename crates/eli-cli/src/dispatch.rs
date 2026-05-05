@@ -247,7 +247,6 @@ async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
         FinanceCommand::Filings(args) | FinanceCommand::Sec(args) => {
             cmd_finance_filings(args).await
         }
-        FinanceCommand::News(args) => cmd_finance_news(args).await,
         FinanceCommand::Schedule(args) => cmd_finance_schedule(args).await,
         FinanceCommand::RatePath(args) => cmd_finance_rate_path(args).await,
         FinanceCommand::Odds(args) => cmd_finance_odds(args).await,

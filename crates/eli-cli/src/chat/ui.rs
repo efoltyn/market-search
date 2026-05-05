@@ -789,7 +789,7 @@ fn ensure_eli_research_brain(project_root: &Path) -> Result<PathBuf> {
 ## Default Research Flow\n\
 - If ticker/company is ambiguous: `eli finance search --query <name>`\n\
 - Start with price/volume: `eli finance timeseries` (zoom out, then zoom in). Identify key move dates.\n\
-- Only then pull catalysts: `eli finance news --date YYYY-MM-DD` / `eli finance filings` for those key dates. News only matters if it moved price.\n\
+- Only then pull catalysts: `eli finance filings` for those key dates. Filings only matter if they moved price.\n\
 - If the user mentions specific dates/days, include them (or ask 1 clarification).\n\
 {PINNED_END}\n\
 \n\
