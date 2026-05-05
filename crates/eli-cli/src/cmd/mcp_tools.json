@@ -20,6 +20,26 @@
                     "granularity": {
                         "type": "string",
                         "description": "Candle interval: 1m, 5m, 15m, 30m, 1h, 1d, 1w, 1mo (default: 1d)"
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "End timestamp for the window (RFC3339 or YYYY-MM-DD). Pin this for reproducible cache hits and historical reconstruction. Defaults to now."
+                    },
+                    "start": {
+                        "type": "string",
+                        "description": "Explicit window start (RFC3339 or YYYY-MM-DD). Must be used with end."
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "Explicit window end (RFC3339 or YYYY-MM-DD). Must be used with start."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Force a specific provider (auto|yahoo|fred|ibkr|pyth|binance). Default auto routes by ticker prefix."
+                    },
+                    "max_points_per_ticker": {
+                        "type": "integer",
+                        "description": "Safety cap. Errors if window×granularity would exceed this; suggests a coarser granularity."
                     }
                 }
             }
@@ -29,7 +49,13 @@
             "description": "Aggregated Polymarket+Kalshi probabilities per FOMC meeting (hold/cut/hike buckets). DERIVED — combines multiple prediction markets per meeting via volume-weighted average. Returns probabilities, volume_total, and n_markets per meeting so caller can see what was aggregated. For raw individual markets use finance_odds.",
             "inputSchema": {
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "source_mode": {
+                        "type": "string",
+                        "enum": ["auto", "meeting", "fallback"],
+                        "description": "Selection mode. auto=meeting if local cache fresh else fallback. meeting=per-FOMC-meeting probabilities. fallback=cumulative-by-date signals when meeting data is sparse."
+                    }
+                }
             }
         },
         {
@@ -57,9 +83,95 @@
                     "limit": {
                         "type": "integer",
                         "description": "Maximum markets to return. Default 12."
+                    },
+                    "list_series": {
+                        "type": "boolean",
+                        "description": "Kalshi only. List available series (top-level groupings)."
+                    },
+                    "list_events": {
+                        "type": "boolean",
+                        "description": "List available events (mid-level groupings)."
+                    },
+                    "list_markets": {
+                        "type": "boolean",
+                        "description": "List available markets (leaf binary contracts)."
+                    },
+                    "list_tags": {
+                        "type": "boolean",
+                        "description": "Polymarket only. List available tags."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["kalshi", "polymarket", "auto"],
+                        "description": "Force a specific venue. Default auto."
+                    },
+                    "series": {
+                        "type": "string",
+                        "description": "Kalshi series ticker filter (e.g. KXFEDDECISION)."
+                    },
+                    "event": {
+                        "type": "string",
+                        "description": "Event ticker filter."
+                    },
+                    "market": {
+                        "type": "string",
+                        "description": "Specific market ticker or Polymarket numeric ID."
+                    },
+                    "min_volume": {
+                        "type": "integer",
+                        "description": "Minimum 24h USD volume filter on local-cache search."
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": "Return top N markets after ranking. Different from `limit`: limit=API page size, top=post-rank cutoff."
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["relevance", "volume", "delta_prob", "delta_yes_price", "delta_volume"],
+                        "description": "Sort key for local-cache search. Default relevance."
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Category filter."
+                    },
+                    "profile": {
+                        "type": "string",
+                        "enum": ["auto", "macro", "broad"],
+                        "description": "Query profile. macro narrows to Fed/CPI/etc., broad casts wider."
+                    },
+                    "country": {
+                        "type": "string",
+                        "description": "Country filter for local-cache search (v1: US only)."
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "Pagination cursor for Kalshi list endpoints."
+                    },
+                    "deltas_only": {
+                        "type": "boolean",
+                        "description": "Only return markets that changed since last sync. Requires sync delta index."
+                    },
+                    "explain": {
+                        "type": "boolean",
+                        "description": "Include compact ranking explanations in local-cache search output."
+                    },
+                    "include_mentions": {
+                        "type": "boolean",
+                        "description": "Include mention/speech-prediction markets (filtered by default)."
+                    },
+                    "max_pages": {
+                        "type": "integer",
+                        "description": "Max pages to fetch from Kalshi list endpoints. Default unbounded."
+                    },
+                    "min_delta_pp": {
+                        "type": "number",
+                        "description": "Minimum absolute probability move (percentage points) since last sync. Requires sync delta index."
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status (e.g. open, closed)."
                     }
-                },
-                "required": ["search"]
+                }
             }
         },
         {
@@ -87,6 +199,19 @@
                     "target_dte": {
                         "type": "integer",
                         "description": "Target days to expiry. If set without explicit expiry, picks the nearest listed expiry."
+                    },
+                    "expirations": {
+                        "type": "boolean",
+                        "description": "List available expirations only (no chain data)."
+                    },
+                    "expiry": {
+                        "type": "string",
+                        "description": "Specific expiration date (YYYY-MM-DD). Use --expirations first to see valid dates."
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["calls", "puts", "both"],
+                        "description": "Filter chain by option type. Default both."
                     }
                 },
                 "required": ["ticker"]
@@ -98,12 +223,12 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "ticker": {
+                    "tickers": {
                         "type": "string",
-                        "description": "Stock ticker(s), comma-separated (e.g. NVDA or NVDA,AAPL,MSFT) — not for ETFs"
+                        "description": "Comma-separated list of tickers, e.g. AAPL,MSFT,NVDA. Single ticker returns array of 1."
                     }
                 },
-                "required": ["ticker"]
+                "required": ["tickers"]
             }
         },
         {
@@ -187,6 +312,11 @@
                     "time": {
                         "type": "string",
                         "description": "Filter: pre-market | after-hours"
+                    },
+                    "macro_profile": {
+                        "type": "string",
+                        "enum": ["broad", "market", "major"],
+                        "description": "Macro filtering profile. broad=all releases, market=common-watched only, major=top-tier only. The boolean `major` is a shortcut for macro_profile=major."
                     }
                 }
             }
@@ -310,6 +440,10 @@
                     "start": {
                         "type": "string",
                         "description": "Start period YYYY-MM-DD or YYYY-MM. Default: 2025-01-01"
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "End period (YYYY-MM-DD or YYYY-MM). Defaults to now."
                     }
                 }
             }
@@ -331,6 +465,10 @@
                     "length": {
                         "type": "integer",
                         "description": "Max observations (default 52 = ~1 year weekly)"
+                    },
+                    "route": {
+                        "type": "string",
+                        "description": "Custom EIA API route (e.g. petroleum/stoc/wstk/data/). Overrides preset."
                     }
                 }
             }
@@ -348,6 +486,14 @@
                     "countries": {
                         "type": "string",
                         "description": "Comma-separated ISO codes: US,XM(Euro area),JP,GB,CH,CN,AU,CA. Default: US,XM,JP,GB"
+                    },
+                    "dataset": {
+                        "type": "string",
+                        "description": "BIS SDMX dataset (e.g. WS_CBPOL). Use with `key` for direct query, bypassing presets."
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "SDMX dimension key (e.g. M.US+XM+JP+GB). Use with `dataset`."
                     },
                     "start": {
                         "type": "string",
@@ -369,6 +515,14 @@
                     "start": {
                         "type": "string",
                         "description": "Start date YYYYMM format. Default: 202401"
+                    },
+                    "db": {
+                        "type": "string",
+                        "description": "BOJ database name (e.g. IR01, FM01, BS01, CO). Use with codes for direct query."
+                    },
+                    "codes": {
+                        "type": "string",
+                        "description": "BOJ series codes (comma-separated)."
                     }
                 }
             }
@@ -390,6 +544,10 @@
                     "start": {
                         "type": "string",
                         "description": "Start date DD/Mon/YYYY (e.g. 01/Jan/2025). Default: 01/Jan/2025"
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "End date DD/Mon/YYYY format like 01/Jan/2026, or 'now'. Defaults to now."
                     }
                 }
             }
@@ -407,9 +565,12 @@
                     "months": {
                         "type": "integer",
                         "description": "Number of forward months to include (default 12, max 24)"
+                    },
+                    "list": {
+                        "type": "boolean",
+                        "description": "List supported commodities and exit (no curve data)."
                     }
-                },
-                "required": ["commodity"]
+                }
             }
         }
     ]

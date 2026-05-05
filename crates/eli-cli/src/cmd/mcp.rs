@@ -1133,6 +1133,18 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if let Some(provider) = args.get("provider").and_then(|p| p.as_str()) {
                 v.extend([s("--provider"), s(provider)]);
             }
+            if let Some(as_of) = args.get("as_of").and_then(|a| a.as_str()) {
+                v.extend([s("--as-of"), s(as_of)]);
+            }
+            if let Some(start) = args.get("start").and_then(|a| a.as_str()) {
+                v.extend([s("--start"), s(start)]);
+            }
+            if let Some(end) = args.get("end").and_then(|a| a.as_str()) {
+                v.extend([s("--end"), s(end)]);
+            }
+            if let Some(max_pts) = args.get("max_points_per_ticker").and_then(|n| n.as_u64()) {
+                v.extend([s("--max-points-per-ticker"), max_pts.to_string()]);
+            }
             if let Some(account) = args.get("ibkr_account").and_then(|a| a.as_str()) {
                 v.extend([s("--ibkr-account"), s(account)]);
             }
@@ -1147,16 +1159,104 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             Ok(v)
         }
-        "finance_rate_path" => Ok(vec![s("finance"), s("rate-path")]),
+        "finance_rate_path" => {
+            let mut v = vec![s("finance"), s("rate-path")];
+            if let Some(mode) = args.get("source_mode").and_then(|m| m.as_str()) {
+                v.extend([s("--source-mode"), s(mode)]);
+            }
+            Ok(v)
+        }
         "finance_odds" => {
-            let search = args
-                .get("search")
-                .and_then(|s| s.as_str())
-                .ok_or_else(|| anyhow::anyhow!("search required"))?;
-            let mut v = vec![s("finance"), s("odds"), s("--search"), s(search)];
-            let live = args.get("live").and_then(|l| l.as_bool()).unwrap_or(true);
-            if live {
+            let mut v = vec![s("finance"), s("odds")];
+            // List flags accept the call without requiring --search; otherwise --search
+            // is required to avoid returning the entire Kalshi catalog.
+            let list_series = args.get("list_series").and_then(|b| b.as_bool()).unwrap_or(false);
+            let list_events = args.get("list_events").and_then(|b| b.as_bool()).unwrap_or(false);
+            let list_markets = args.get("list_markets").and_then(|b| b.as_bool()).unwrap_or(false);
+            let list_tags = args.get("list_tags").and_then(|b| b.as_bool()).unwrap_or(false);
+            let any_list = list_series || list_events || list_markets || list_tags;
+            let search = args.get("search").and_then(|s| s.as_str());
+            if !any_list && search.is_none() {
+                anyhow::bail!("search required (or set list_series/list_events/list_markets/list_tags)");
+            }
+            if let Some(q) = search {
+                v.extend([s("--search"), s(q)]);
+            }
+            // Default --live=true only when searching; list endpoints don't need it.
+            if !any_list {
+                let live = args.get("live").and_then(|l| l.as_bool()).unwrap_or(true);
+                if live {
+                    v.push(s("--live"));
+                }
+            } else if args.get("live").and_then(|l| l.as_bool()).unwrap_or(false) {
                 v.push(s("--live"));
+            }
+            if list_series { v.push(s("--list-series")); }
+            if list_events { v.push(s("--list-events")); }
+            if list_markets { v.push(s("--list-markets")); }
+            if list_tags { v.push(s("--list-tags")); }
+            if let Some(provider) = args.get("provider").and_then(|p| p.as_str()) {
+                v.extend([s("--provider"), s(provider)]);
+            }
+            if let Some(series) = args.get("series").and_then(|p| p.as_str()) {
+                v.extend([s("--series"), s(series)]);
+            }
+            if let Some(event) = args.get("event").and_then(|p| p.as_str()) {
+                v.extend([s("--event"), s(event)]);
+            }
+            if let Some(market) = args.get("market").and_then(|p| p.as_str()) {
+                v.extend([s("--market"), s(market)]);
+            }
+            if let Some(min_vol) = args.get("min_volume").and_then(|n| n.as_u64()) {
+                v.extend([s("--min-volume"), min_vol.to_string()]);
+            }
+            if let Some(top) = args.get("top").and_then(|n| n.as_u64()) {
+                v.extend([s("--top"), top.to_string()]);
+            }
+            if let Some(sort_by) = args.get("sort_by").and_then(|p| p.as_str()) {
+                v.extend([s("--sort-by"), s(sort_by)]);
+            }
+            if let Some(category) = args.get("category").and_then(|p| p.as_str()) {
+                v.extend([s("--category"), s(category)]);
+            }
+            if let Some(profile) = args.get("profile").and_then(|p| p.as_str()) {
+                v.extend([s("--profile"), s(profile)]);
+            }
+            if let Some(country) = args.get("country").and_then(|p| p.as_str()) {
+                v.extend([s("--country"), s(country)]);
+            }
+            if let Some(cursor) = args.get("cursor").and_then(|p| p.as_str()) {
+                v.extend([s("--cursor"), s(cursor)]);
+            }
+            if args
+                .get("deltas_only")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                v.push(s("--deltas-only"));
+            }
+            if args
+                .get("explain")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                v.push(s("--explain"));
+            }
+            if args
+                .get("include_mentions")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                v.push(s("--include-mentions"));
+            }
+            if let Some(max_pages) = args.get("max_pages").and_then(|n| n.as_u64()) {
+                v.extend([s("--max-pages"), max_pages.to_string()]);
+            }
+            if let Some(min_delta_pp) = args.get("min_delta_pp").and_then(|n| n.as_f64()) {
+                v.extend([s("--min-delta-pp"), min_delta_pp.to_string()]);
+            }
+            if let Some(status) = args.get("status").and_then(|p| p.as_str()) {
+                v.extend([s("--status"), s(status)]);
             }
             // Polymarket orderbook depth pass-through.
             if args
@@ -1186,35 +1286,50 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if let Some(account) = args.get("ibkr_account").and_then(|a| a.as_str()) {
                 v.extend([s("--ibkr-account"), s(account)]);
             }
+            // --expirations and --summary are mutually exclusive in the CLI.
+            // Skip --summary when caller is asking just for expiration dates.
+            let want_expirations = args.get("expirations").and_then(|b| b.as_bool()).unwrap_or(false);
+            let want_all = args.get("all").and_then(|b| b.as_bool()).unwrap_or(false);
             let summary = args
                 .get("summary")
                 .and_then(|b| b.as_bool())
                 .unwrap_or(true);
-            if summary {
+            if summary && !want_expirations && !want_all {
                 v.push(s("--summary"));
             }
-            if let Some(nm) = args.get("near_money").and_then(|n| n.as_f64()) {
-                v.extend([s("--near-money"), nm.to_string()]);
-            } else {
-                // Default near-money to 10% to prevent oversized chain output
-                v.extend([s("--near-money"), s("10")]);
+            if !want_expirations {
+                if let Some(nm) = args.get("near_money").and_then(|n| n.as_f64()) {
+                    v.extend([s("--near-money"), nm.to_string()]);
+                } else {
+                    // Default near-money to 10% to prevent oversized chain output
+                    v.extend([s("--near-money"), s("10")]);
+                }
             }
             // Target days-to-expiry pass-through. CLI picks nearest listed expiry
             // when set without an explicit --expiry.
             if let Some(dte) = args.get("target_dte").and_then(|n| n.as_i64()) {
                 v.extend([s("--target-dte"), dte.to_string()]);
             }
-            if args.get("all").and_then(|b| b.as_bool()).unwrap_or(false) {
+            if let Some(expiry) = args.get("expiry").and_then(|e| e.as_str()) {
+                v.extend([s("--expiry"), s(expiry)]);
+            }
+            if let Some(opt_type) = args.get("type").and_then(|t| t.as_str()) {
+                v.extend([s("--type"), s(opt_type)]);
+            }
+            if want_expirations {
+                v.push(s("--expirations"));
+            }
+            if want_all {
                 v.push(s("--all"));
             }
             Ok(v)
         }
         "finance_fundamentals" => {
             let tickers = args
-                .get("ticker")
-                .or_else(|| args.get("tickers"))
+                .get("tickers")
+                .or_else(|| args.get("ticker"))
                 .and_then(|t| t.as_str())
-                .ok_or_else(|| anyhow::anyhow!("ticker required"))?;
+                .ok_or_else(|| anyhow::anyhow!("tickers required"))?;
             Ok(vec![
                 s("finance"),
                 s("fundamentals"),
@@ -1690,12 +1805,18 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if let Some(start) = args.get("start").and_then(|s| s.as_str()) {
                 v.extend([s("--start"), s(start)]);
             }
+            if let Some(end) = args.get("end").and_then(|s| s.as_str()) {
+                v.extend([s("--end"), s(end)]);
+            }
             Ok(v)
         }
         "finance_eia" => {
             let mut v = vec![s("finance"), s("eia")];
             if let Some(preset) = args.get("preset").and_then(|p| p.as_str()) {
                 v.extend([s("--preset"), s(preset)]);
+            }
+            if let Some(route) = args.get("route").and_then(|r| r.as_str()) {
+                v.extend([s("--route"), s(route)]);
             }
             if let Some(start) = args.get("start").and_then(|s| s.as_str()) {
                 v.extend([s("--start"), s(start)]);
@@ -1710,6 +1831,12 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if let Some(preset) = args.get("preset").and_then(|p| p.as_str()) {
                 v.extend([s("--preset"), s(preset)]);
             }
+            if let Some(dataset) = args.get("dataset").and_then(|d| d.as_str()) {
+                v.extend([s("--dataset"), s(dataset)]);
+            }
+            if let Some(key) = args.get("key").and_then(|k| k.as_str()) {
+                v.extend([s("--key"), s(key)]);
+            }
             if let Some(countries) = args.get("countries").and_then(|c| c.as_str()) {
                 v.extend([s("--countries"), s(countries)]);
             }
@@ -1722,6 +1849,12 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             let mut v = vec![s("finance"), s("boj")];
             if let Some(preset) = args.get("preset").and_then(|p| p.as_str()) {
                 v.extend([s("--preset"), s(preset)]);
+            }
+            if let Some(db) = args.get("db").and_then(|d| d.as_str()) {
+                v.extend([s("--db"), s(db)]);
+            }
+            if let Some(codes) = args.get("codes").and_then(|c| c.as_str()) {
+                v.extend([s("--codes"), s(codes)]);
             }
             if let Some(start) = args.get("start").and_then(|s| s.as_str()) {
                 v.extend([s("--start"), s(start)]);
@@ -1739,6 +1872,9 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if let Some(start) = args.get("start").and_then(|s| s.as_str()) {
                 v.extend([s("--start"), s(start)]);
             }
+            if let Some(end) = args.get("end").and_then(|e| e.as_str()) {
+                v.extend([s("--end"), s(end)]);
+            }
             Ok(v)
         }
         "finance_curve" => {
@@ -1748,6 +1884,9 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             if let Some(months) = args.get("months").and_then(|n| n.as_u64()) {
                 v.extend([s("--months"), months.to_string()]);
+            }
+            if args.get("list").and_then(|b| b.as_bool()).unwrap_or(false) {
+                v.push(s("--list"));
             }
             Ok(v)
         }
