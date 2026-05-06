@@ -122,25 +122,6 @@ struct ShareArgs {
     authtoken: Option<String>,
 }
 
-#[derive(clap::Args, Debug)]
-struct ServeArgs {
-    /// Port to listen on.
-    #[arg(long, default_value = "3333")]
-    port: u16,
-
-    /// Directory containing HTML and MD reports.
-    #[arg(long, default_value = "~/Downloads/eli-code/eli_research/reports/html")]
-    reports_dir: String,
-
-    /// Sentinel state directory for subscriptions, packets, and daemon status.
-    #[arg(long)]
-    sentinel_dir: Option<PathBuf>,
-
-    /// Open browser after starting.
-    #[arg(long, default_value_t = false)]
-    open: bool,
-}
-
 #[derive(Subcommand, Debug)]
 enum FinanceCommand {
     /// Fetch OHLCV time-series for one or more tickers.

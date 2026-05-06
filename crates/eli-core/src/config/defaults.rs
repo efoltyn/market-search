@@ -76,11 +76,3 @@ fn default_gemini_max_spawns_per_hour() -> u32 {
     1
 }
 
-fn default_spawn_target_preference() -> crate::sentinel::SpawnTarget {
-    crate::sentinel::SpawnTarget::Codex
-}
-
-fn default_sentinel_reports_dir() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
-    format!("{}/Downloads/eli-code/eli_research/reports/html", home)
-}

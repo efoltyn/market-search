@@ -14,7 +14,6 @@ pub mod metrics;
 pub mod openrouter;
 pub mod orchestrator;
 pub mod persistence;
-pub mod sentinel;
 pub mod trajectory;
 pub mod types;
 pub mod web;

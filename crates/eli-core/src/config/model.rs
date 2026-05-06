@@ -3,7 +3,6 @@ impl Default for ConfigFile {
         Self {
             chat: ChatConfig::default(),
             finance: FinanceConfig::default(),
-            sentinel: SentinelConfig::default(),
         }
     }
 }

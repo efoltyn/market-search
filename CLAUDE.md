@@ -62,7 +62,7 @@ here and we'll continue."
 PAUSE — wait for the user to confirm restart.
 
 After restart, verify in this session by listing tools — you should see
-`finance_timeseries`, `finance_snapshot`, etc. If you don't, the config
+`finance_timeseries`, `finance_odds`, etc. If you don't, the config
 didn't take. Check syntax of the JSON file you edited.
 
 ### For Codex
@@ -180,7 +180,7 @@ Whichever option they picked, test it:
 > "Open a new chat in claude.ai (or ChatGPT). Toggle Market Search on.
 > Ask: 'What's SPY trading at right now?'"
 
-Claude/ChatGPT should call the `finance_snapshot` tool and return a
+Claude/ChatGPT should call the `finance_timeseries` tool and return a
 real quote with the current price. If you see "I don't have access to
 real-time data" or similar, the connector isn't working — check:
 
