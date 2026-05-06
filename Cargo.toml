@@ -1,11 +1,18 @@
 [package]
-name = "eli"
-version.workspace = true
+name = "market-search"
+version = "0.2.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "financial coding agent"
+description = "MCP server for getting markets data into AI assistants — 20 tools covering equities, options, futures curves, prediction markets, central banks, and more."
 readme = "README.md"
+keywords = ["mcp", "finance", "claude", "markets", "ai"]
+categories = ["command-line-utilities", "science"]
+homepage = "https://eliterminal.com"
+
+[[bin]]
+name = "market-search"
+path = "src/main.rs"
 
 [dependencies]
 tokio.workspace = true
@@ -15,19 +22,17 @@ syn = "2.0.115"
 
 [workspace]
 members = [
-  "crates/eli-adapters",
   "crates/eli-cli",
   "crates/eli-core",
   "crates/eli-finance-types",
-  "crates/eli-screen",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/efoltyn/eli"
+repository = "https://github.com/efoltyn/market-search"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -63,11 +68,9 @@ axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-eli-adapters = { path = "crates/eli-adapters", version = "0.1.0" }
-eli-cli = { path = "crates/eli-cli", version = "0.1.0" }
-eli-core = { path = "crates/eli-core", version = "0.1.0" }
-eli-finance-types = { path = "crates/eli-finance-types", version = "0.1.0" }
-eli-screen = { path = "crates/eli-screen", version = "0.1.0" }
+eli-cli = { path = "crates/eli-cli", version = "0.2.2" }
+eli-core = { path = "crates/eli-core", version = "0.2.0" }
+eli-finance-types = { path = "crates/eli-finance-types", version = "0.2.0" }
 
 # ── dev build speed ────────────────────────────────────────────────────────────
 [profile.dev]

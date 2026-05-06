@@ -1,10 +1,10 @@
 [package]
 name = "eli-cli"
-version.workspace = true
+version = "0.2.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Internal CLI library for the `eli` crate. Use `cargo install eli`."
+description = "Internal CLI library for the `market-search` binary. Use `cargo install market-search`."
 readme = "README.md"
 autobins = false
 
@@ -23,8 +23,6 @@ reqwest.workspace = true
 directories.workspace = true
 uuid.workspace = true
 eli-core.workspace = true
-eli-adapters.workspace = true
-eli-screen.workspace = true
 base64 = "0.22"
 crossterm.workspace = true
 console.workspace = true

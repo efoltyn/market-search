@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Internal finance contracts for the `eli` crate. Use `cargo install eli`."
+description = "Internal finance contracts for the `eli` crate. Use `cargo install market-search`."
 readme = "README.md"
 
 [dependencies]

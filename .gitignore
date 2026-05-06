@@ -2,3 +2,27 @@
 /.venv-ibkr
 **/*.swp
 .DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Local backups + temp
+*.bak
+*.tmp
+*~
+
+# Rust profiling/coverage
+*.profraw
+**/lcov.info
+
+# Cargo registry caches that sometimes leak in
+.cargo/
+
+# Local scratch
+/tmp/
+/scratch/
+
+# Internal/experimental — not part of public release
+scripts/
+instincts/

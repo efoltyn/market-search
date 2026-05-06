@@ -1,147 +1,185 @@
-# eli
+# market-search
 
-Agent-native market data tools as one Rust binary.
+Your AI has web search. Ask about recession risk or oil prices, it summarizes articles.
 
-Eli gives agents structured live market data from public APIs so they can reason from numbers, not just narrative search output.
+Now it has **market search**. It sees the odds of recession on Kalshi and Polymarket, and the live price of oil.
 
-For launch, the two pillar tools are:
-- `eli finance timeseries`
-- `eli finance odds`
+```
+> finance_odds --search "recession" --live
 
-The rest of the finance surface supports those two.
+  kalshi        36.5%  vol=82,231,200   Will there be a recession in 2026?
+  polymarket    36.5%  vol=1,824,634    US recession by end of 2026
+  kalshi        22.5%  vol=2,965,000    Will the IMF declare a global recession before 2027?
+```
 
----
+```
+> finance_timeseries --tickers SPY,CL=F,^VIX,KXRECSSNBER-26 --range 30d
+
+  SPY                          22 candles   $682 → $655   -4.0%
+  CL=F                         22 candles    $66 → $89   +33.8%
+  ^VIX                         22 candles     21 → 26    +22.5%
+  KALSHI:KXRECSSNBER-26:YES    30 candles    22% → 36%   +63.6%
+```
+
+20 tools. 23 data providers. Stocks, options, crypto, futures, forex, prediction markets, FRED macro, Treasury auctions, SEC filings, central bank data from the Fed, ECB, BOJ, BOE, and BIS. Runs locally. No paid API keys.
 
 ## Install
 
-**Requires Rust:** https://rustup.rs
+Three ways:
+
+**1. Cargo (recommended)**
 
 ```bash
-cargo install eli
+cargo install market-search
 ```
 
-Installs `eli` to `~/.cargo/bin/eli`.
+Installs `market-search` to `~/.cargo/bin/`. Requires Rust ([rustup.rs](https://rustup.rs)).
 
-Local dev install from source:
+**2. Build from source**
 
 ```bash
-# From the repo's eli/ workspace
-cargo install --path .
+git clone https://github.com/efoltyn/market-search.git
+cd market-search/eli
+cargo build --release
 ```
 
----
+**3. Let your AI install it**
 
-## MCP Setup
+Paste this into Claude Code, Codex, or any coding agent:
 
-Add to `.mcp.json`:
+> Install market-search from https://github.com/efoltyn/market-search — clone the repo, build the Rust binary, and add it as an MCP server in `.mcp.json`.
+
+It will read the repo, run cargo build, and configure itself. The codebase is open Rust — coding agents can also read the source, modify tools, and add new providers.
+
+## MCP setup (local stdio)
+
+Add to your agent's MCP config (`.mcp.json` or equivalent):
 
 ```json
 {
   "mcpServers": {
-    "eli": {
-      "command": "eli",
+    "market-search": {
+      "command": "market-search",
       "args": ["mcp"]
     }
   }
 }
 ```
 
-Restart your agent. Eli tools become native MCP tools.
+Works with Claude Code, Codex, Gemini CLI, Cursor, Claude Desktop, or any MCP-compatible agent.
 
----
+## Public URL for claude.ai web / ChatGPT custom apps
 
-## Tool Surface
+For claude.ai or ChatGPT (which need a public HTTPS URL to reach your local server), market-search ships a built-in tunnel command:
 
-MCP currently exposes **15 finance tools**:
+```bash
+market-search mcp share --provider tunnelmole                            # temporary, instant
+market-search mcp share --provider cloudflare                            # temporary, instant
+market-search mcp share --provider ngrok --domain mysub.ngrok-free.dev   # permanent, requires free ngrok account
+market-search mcp share --provider self-host                             # see SELFHOST.md (in design)
+```
 
-- `finance_snapshot`
-- `finance_timeseries`
-- `finance_rate_path`
-- `finance_odds`
-- `finance_options`
-- `finance_fundamentals`
-- `finance_search`
-- `finance_filings`
-- `finance_schedule`
-- `finance_auctions`
-- `finance_cot`
-- `finance_nyfed`
-- `finance_volsurface`
-- `finance_stress`
-- `finance_fiscal`
+The command boots the local MCP server, spawns the tunnel binary, parses the public URL from its output, and prints a paste-ready block for claude.ai's connector dialog or ChatGPT's apps & connectors page.
 
----
+## Tools
+
+The 20 tools below are the MCP surface — what your AI sees when you connect via `market-search mcp`. They're the core of the project.
+
+The CLI binary also ships two **experimental** non-MCP subcommands: `market-search web` (basic crawl/search/read tools) and `market-search picks` (logs report picks to track performance over time). Neither is exposed via MCP and neither is core. They're shipped as-is; **contributors welcome to improve or replace them**. If you're here to use Market Search with an AI, ignore both.
+
+### Market data
+| Tool | What it does | Example |
+|---|---|---|
+| `finance_timeseries` | OHLCV candles from 9 providers. Auto-routes by ticker prefix. Mix stocks, ETFs, crypto, futures, FX, FRED macro, prediction markets in one call. | `--tickers SPY,DGS10,BN:ETH,CL=F --range 90d` |
+| `finance_options` | Full options chain: IV, max pain, put/call ratio, skew. `--all` parallelizes every expiration. | `--ticker SPY --all` |
+| `finance_fundamentals` | Income statement, P/E, margins, ROE, debt/equity, dividend yield | `--ticker NVDA` |
+| `finance_search` | Ticker symbol lookup + FRED macro series discovery | `--query "semiconductor"` |
+
+### Prediction markets
+| Tool | What it does | Example |
+|---|---|---|
+| `finance_odds` | Search Kalshi + Polymarket simultaneously. Probabilities, volume, both sources merged. | `--search "taiwan" --live` |
+| `finance_rate_path` | Per-meeting Fed hold/cut/hike probabilities aggregated from Polymarket + Kalshi | (no args needed) |
+
+### Macro & government
+| Tool | What it does | Example |
+|---|---|---|
+| `finance_schedule` | Earnings calendar + macro release dates (BEA, FRED, official sources) | `--kind macro --major --from 2026-04-01 --to 2026-04-30` |
+| `finance_cot` | CFTC Commitments of Traders: speculator vs commercial positioning | `--query crude --weeks 12` |
+| `finance_auctions` | US Treasury auction results: bid-to-cover, high yield, bidder breakdown | `--security-type note` |
+| `finance_nyfed` | NY Fed: SOFR, EFFR, reverse repo, SOMA holdings, dealer positions | `--kind rates` |
+| `finance_fiscal` | National debt, Treasury cash balance, average interest rates by security | `--kind debt` |
+| `finance_stress` | OFR Financial Stress Index with credit/equity/funding/vol decomposition | `--range 90` |
+| `finance_volsurface` | CBOE vol indices: VIX, VIX9D, VIX3M, VIX6M, VIX1Y, VVIX, OVX, GVZ, SKEW | `--symbols VIX,VVIX,SKEW` |
+| `finance_filings` | SEC filings: 10-K, 10-Q, 8-K, 20-F with accession numbers and URLs | `--ticker NVDA --forms 10-K` |
+| `finance_curve` | Futures forward curves for energy, metals, grains | `--commodity gold` |
+
+### Central banks
+| Tool | What it does | Example |
+|---|---|---|
+| `finance_ecb` | EUR/USD, Euro STR, M3, EURIBOR term structure, euro yield curve | `--preset yield_curve` |
+| `finance_bis` | Global central bank policy rates, total assets, credit-to-GDP gaps | `--preset policy_rates --countries US,XM,JP,GB` |
+| `finance_boj` | BOJ uncollateralized overnight call rate, TANKAN, balance sheet, JPY pairs | `--preset tankan` |
+| `finance_boe` | Bank Rate, SONIA, gilt yields (5Y/10Y/20Y), M4, GBP pairs | `--preset all` |
+| `finance_eia` | US crude, gasoline, distillate, natural gas storage + spot prices | `--preset crude` |
+
+## Timeseries provider routing
+
+`finance_timeseries` auto-detects the data source from the ticker:
+
+| Pattern | Provider | Coverage |
+|---|---|---|
+| `AAPL`, `SPY`, `CL=F`, `BTC-USD` | Yahoo Finance | Stocks, ETFs, futures, crypto, FX |
+| `UNRATE`, `DGS10`, `FRED:CPIAUCSL` | FRED | 800,000+ macro series |
+| `PYTH:BTC`, `PYTH:OIL` | Pyth Network | 24/7 crypto and commodity oracles |
+| `BN:BTC`, `BN:ETH` | Binance | Crypto OHLCV since 2019 |
+| `IBKR:FUT:CL:NYMEX` | IBKR (premium, optional) | Intraday futures with overnight extremes |
+| `CLEV:CPI`, `CLEV:COREPCE` | Cleveland Fed | Real-time inflation nowcasts |
+| `KXRECSSNBER-26` | Kalshi | Probability + volume candles |
+| `609655` (numeric) | Polymarket | Probability + volume candles |
+| `RATEPATH:JUN2026:hold` | Aggregated rate path | Per-meeting Fed hold/cut/hike historical curves |
+
+Mix any of them in one call:
+
+```bash
+market-search finance timeseries --tickers SPY,DGS10,BN:BTC,KXRECSSNBER-26,609655 --range 30d
+```
+
+## Data sources
+
+All core tools work without API keys.
+
+| Provider | Auth |
+|---|---|
+| Yahoo Finance, Kalshi, Polymarket, CFTC, SEC EDGAR | None |
+| NY Fed, US Treasury, OFR, CBOE, Nasdaq, BEA | None |
+| Pyth Network, Binance | None |
+| ECB, BIS, BOJ, BOE, Cleveland Fed | None |
+| FRED | Free key ([register](https://fred.stlouisfed.org/docs/api/api_key.html)) |
+| EIA | Free key ([register](https://www.eia.gov/opendata/register.php)) |
+| IBKR | Subscription (optional, for intraday futures) |
 
 ## Positioning
 
-Eli complements built-in websearch in Claude/Codex/Gemini/Cursor/OpenClaw.
+market-search complements the built-in web search in Claude/Codex/Gemini/Cursor.
 
-- Use websearch for broad discovery and narrative context.
-- Use Eli for structured, reproducible, low-token data ingestion and deltas.
+- Use **web search** for broad discovery and narrative context.
+- Use **market-search** for structured, reproducible, low-token data ingestion and deltas.
 
----
+The two are designed to be used together. Web search finds the article. market-search shows the chart.
 
-## Zero-Key Core
+## Demo
 
-Core finance tools use public endpoints including:
-- Yahoo Finance
-- FRED
-- Kalshi
-- Polymarket
-- US Treasury / FiscalData
-- New York Fed
-- OFR
-- CFTC
-- SEC EDGAR
-- Pyth Hermes
+[Eli Terminal](https://eliterminal.com) is the daily demo — every report on the site is produced by Claude using market-search, autonomously, on a 30-minute loop.
 
-No paid market-data subscription is required for normal Eli usage. Optional attachments can add providers like IBKR or keyed FRED enhancements later.
+## Workspace crates
 
----
+`market-search` is the install target. Other workspace crates are internal components published for dependency resolution:
 
-## CLI Examples
+`eli-cli`, `eli-core`, `eli-adapters`, `eli-finance-types`, `eli-screen`
 
-```bash
-# Core movement/context tool
-eli finance timeseries --tickers SPY,UNRATE --range 1y --granularity 1d
+## License
 
-# Core expectations tool
-eli finance odds --search "recession" --live --top 10
-eli finance odds --event KXFEDDECISION-26APR29
+AGPL-3.0-or-later for individuals, research, and OSS projects.
 
-# Supporting finance tools
-eli finance snapshot --tickers NVDA,AAPL,SPY
-eli finance options --ticker SPY --summary --near-money 5
-eli finance search --query "crude oil"
-eli finance schedule --kind macro --from 2026-03-23 --to 2026-04-03 --major
-eli finance filings --ticker NVDA --forms 10-K --limit 3
-eli finance cot --query "crude" --weeks 12
-eli finance nyfed --kind rates
-eli finance fiscal --kind debt
-eli finance stress --range 30
-eli finance volatility --symbols VIX,VVIX,SKEW --history 5
-```
-
----
-
-## Workspace Crates
-
-`eli` is the install target. Other workspace crates are internal components published for dependency resolution:
-
-- [`eli-cli`](./crates/eli-cli/README.md)
-- [`eli-core`](./crates/eli-core/README.md)
-- [`eli-adapters`](./crates/eli-adapters/README.md)
-- [`eli-finance-types`](./crates/eli-finance-types/README.md)
-- [`eli-screen`](./crates/eli-screen/README.md)
-
----
-
-## Build from Source (Dev)
-
-```bash
-cd eli
-cargo check -p eli --bin eli
-cargo build -p eli --bin eli
-
-ln -sf $(pwd)/target/debug/eli ../bin/eli
-```
+For firm and commercial use: licensing@eliterminal.com.

@@ -1135,3 +1135,32 @@ mod web_cmd_tests {
         );
     }
 }
+
+// ── helpers recovered from removed chat/agent code ────────────────────────
+
+async fn cmd_web(cmd: WebCommand) -> Result<()> {
+    match cmd {
+        WebCommand::Crawl(args) => cmd_web_crawl(args).await,
+        WebCommand::Search(args) => cmd_web_search(args).await,
+        WebCommand::Read(args) => cmd_web_read(args).await,
+        WebCommand::Extract(args) => cmd_web_extract(args).await,
+    }
+}
+
+fn default_finance_cache_dir() -> Result<std::path::PathBuf> {
+    if let Ok(paths) = Paths::discover() {
+        paths.ensure_dirs().context("ensure dirs")?;
+        return Ok(paths.cache_dir);
+    }
+    let tmp = std::env::temp_dir().join("eli_finance_cache");
+    std::fs::create_dir_all(&tmp).ok();
+    Ok(tmp)
+}
+
+fn parse_bool(val: &str) -> Result<bool> {
+    match val.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        other => anyhow::bail!("invalid boolean value: {other}"),
+    }
+}

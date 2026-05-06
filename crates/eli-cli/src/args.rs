@@ -1,5 +1,5 @@
 #[derive(Parser, Debug)]
-#[command(name = "eli", version, about = "Eli: a terminal CLI coding agent")]
+#[command(name = "market-search", version, about = "Market Search: MCP server for finance data + a terminal coding agent")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Command>,
@@ -40,24 +40,6 @@ enum Command {
         path: Vec<String>,
     },
 
-    /// Chat in a readline loop (default)
-    Chat,
-
-    /// Chat in debug mode (raw request/response + full tool output + observation)
-    Debug,
-
-    /// Chat in raw mode (no extra dumps)
-    Raw,
-
-    /// One-shot quantitative research loop
-    Research {
-        /// Research question/prompt (quote it)
-        query: String,
-    },
-
-    /// Launch the interactive chat UI (alias of default chat)
-    Tui,
-
     /// Financial data tools (for raw time-series exploration)
     Finance {
         #[command(subcommand)]
@@ -70,22 +52,7 @@ enum Command {
         cmd: WebCommand,
     },
 
-    /// Run background-style Eli workers from natural language tasks.
-    Agent {
-        #[command(subcommand)]
-        cmd: AgentCommand,
-    },
-
-    /// Parse Rust source into a structural map (functions, structs, enums, impls, traits).
-    Code(CodeArgs),
-
-    /// Run 24/7 sentinel monitoring and interruption queue workflows.
-    Sentinel {
-        #[command(subcommand)]
-        cmd: SentinelCommand,
-    },
-
-    /// Start MCP (Model Context Protocol) server — exposes eli tools as native Claude Code tools via JSON-RPC stdio.
+    /// Start MCP (Model Context Protocol) server — exposes market-search tools as native Claude Code tools via JSON-RPC stdio.
     Mcp(McpArgs),
 
     /// Log research picks for a report to track performance over time.
@@ -93,9 +60,6 @@ enum Command {
         #[command(subcommand)]
         cmd: PicksCommand,
     },
-
-    /// Start the local web monitor dashboard (reports + picks + daemons).
-    Serve(ServeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -121,6 +85,9 @@ struct PicksLogArgs {
 
 #[derive(clap::Args, Debug)]
 struct McpArgs {
+    #[command(subcommand)]
+    cmd: Option<McpSubcommand>,
+
     /// Run as HTTP server instead of stdio (MCP Streamable HTTP transport).
     #[arg(long, default_value_t = false)]
     http: bool,
@@ -128,6 +95,31 @@ struct McpArgs {
     /// Port for HTTP mode.
     #[arg(long, default_value = "8484")]
     port: u16,
+}
+
+#[derive(Subcommand, Debug)]
+enum McpSubcommand {
+    /// Get a public HTTPS /mcp URL (boots local HTTP MCP + spawns a tunnel).
+    Share(ShareArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ShareArgs {
+    /// Tunnel provider: tunnelmole | cloudflare | ngrok | self-host
+    #[arg(long, default_value = "tunnelmole")]
+    provider: String,
+
+    /// Local port the MCP HTTP server is bound to.
+    #[arg(long, default_value = "8484")]
+    port: u16,
+
+    /// For ngrok: reserved subdomain (e.g. mysub.ngrok-free.dev or just mysub).
+    #[arg(long)]
+    domain: Option<String>,
+
+    /// For ngrok: authtoken if not already configured globally.
+    #[arg(long)]
+    authtoken: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
