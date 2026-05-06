@@ -133,7 +133,7 @@ The CLI binary also ships two **experimental** non-MCP subcommands: `market-sear
 | `UNRATE`, `DGS10`, `FRED:CPIAUCSL` | FRED | 800,000+ macro series |
 | `PYTH:BTC`, `PYTH:OIL` | Pyth Network | 24/7 crypto and commodity oracles |
 | `BN:BTC`, `BN:ETH` | Binance | Crypto OHLCV since 2019 |
-| `IBKR:FUT:CL:NYMEX` | IBKR (premium, optional) | Intraday futures with overnight extremes |
+| `IBKR:FUT:CL:NYMEX` | IBKR (free, more setup) | Intraday futures incl. overnight extremes — free 15-min delayed institutional data once IB Gateway is running locally |
 | `CLEV:CPI`, `CLEV:COREPCE` | Cleveland Fed | Real-time inflation nowcasts |
 | `KXRECSSNBER-26` | Kalshi | Probability + volume candles |
 | `609655` (numeric) | Polymarket | Probability + volume candles |
@@ -157,7 +157,7 @@ All core tools work without API keys.
 | ECB, BIS, BOJ, BOE, Cleveland Fed | None |
 | FRED | Free key ([register](https://fred.stlouisfed.org/docs/api/api_key.html)) |
 | EIA | Free key ([register](https://www.eia.gov/opendata/register.php)) |
-| IBKR | Subscription (optional, for intraday futures) |
+| IBKR | Free IBKR account + IB Gateway running locally. 15-min delayed institutional-quality data is free (no fee). Real-time data costs from IBKR if you want it (~$10/mo for most US markets, free if you trade through them). Set IB Gateway to refresh every 24h so you don't re-sign-in daily. |
 
 ## Positioning
 
@@ -176,7 +176,7 @@ The two are designed to be used together. Web search finds the article. market-s
 
 `market-search` is the install target. Other workspace crates are internal components published for dependency resolution:
 
-`eli-cli`, `eli-core`, `eli-adapters`, `eli-finance-types`, `eli-screen`
+`eli-cli`, `eli-core`, `eli-finance-types`
 
 ## License
 
