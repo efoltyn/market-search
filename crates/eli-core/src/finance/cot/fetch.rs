@@ -31,19 +31,37 @@ fn expand_query_aliases(query: &str) -> Vec<String> {
 
     let aliases: &[(&[&str], &[&str])] = &[
         // Treasury
-        (&["10-year", "10y", "10yr", "ten year", "t-note"], &["ust 10y", "10-year"]),
+        (
+            &["10-year", "10y", "10yr", "ten year", "t-note"],
+            &["ust 10y", "10-year"],
+        ),
         (&["2-year", "2y", "2yr", "two year"], &["ust 2y", "2-year"]),
         (&["5-year", "5y", "5yr", "five year"], &["ust 5y", "5-year"]),
-        (&["30-year", "30y", "30yr", "t-bond", "treasury bond"], &["ust bond", "ultra ust", "30-year"]),
-        (&["treasury", "treasuries"], &["ust ", "t-note", "t-bond", "ultra ust"]),
+        (
+            &["30-year", "30y", "30yr", "t-bond", "treasury bond"],
+            &["ust bond", "ultra ust", "30-year"],
+        ),
+        (
+            &["treasury", "treasuries"],
+            &["ust ", "t-note", "t-bond", "ultra ust"],
+        ),
         // Equity indices
-        (&["s&p", "s&p 500", "sp500", "spx", "es"], &["s&p 500", "e-mini s&p"]),
+        (
+            &["s&p", "s&p 500", "sp500", "spx", "es"],
+            &["s&p 500", "e-mini s&p"],
+        ),
         (&["nasdaq", "nq"], &["nasdaq", "e-mini nasdaq"]),
         (&["dow", "djia", "ym"], &["djia", "dow jones"]),
         (&["russell", "rut"], &["russell", "e-mini russell"]),
         // Energy
-        (&["crude", "wti", "oil", "cl"], &["crude oil", "wti-physical", "wti financial"]),
-        (&["nat gas", "natural gas", "ng", "natgas"], &["natural gas", "nat gas"]),
+        (
+            &["crude", "wti", "oil", "cl"],
+            &["crude oil", "wti-physical", "wti financial"],
+        ),
+        (
+            &["nat gas", "natural gas", "ng", "natgas"],
+            &["natural gas", "nat gas"],
+        ),
         (&["brent"], &["brent"]),
         // Metals
         (&["gold", "gc", "xau"], &["gold"]),
@@ -62,7 +80,10 @@ fn expand_query_aliases(query: &str) -> Vec<String> {
         (&["aussie", "aud"], &["australian dollar"]),
         (&["cad", "loonie"], &["canadian dollar"]),
         // Rates
-        (&["eurodollar", "sofr", "fed funds"], &["sofr", "fed funds", "eurodollar"]),
+        (
+            &["eurodollar", "sofr", "fed funds"],
+            &["sofr", "fed funds", "eurodollar"],
+        ),
         (&["vix", "volatility"], &["vix", "volatility"]),
         (&["bitcoin", "btc"], &["bitcoin"]),
     ];
@@ -123,8 +144,12 @@ fn contract_priority_score(query: Option<&str>, contract_name: &str) -> i32 {
             return 80;
         }
         // Penalize basis/regional/NGL contracts that match "natural gas" broadly
-        if name.contains("basis") || name.contains("differential") || name.contains("swing")
-            || name.contains("propane") || name.contains("butane") || name.contains("ethane")
+        if name.contains("basis")
+            || name.contains("differential")
+            || name.contains("swing")
+            || name.contains("propane")
+            || name.contains("butane")
+            || name.contains("ethane")
             || name.contains("gasoline")
         {
             return -50;
@@ -139,12 +164,56 @@ fn contract_priority_score(query: Option<&str>, contract_name: &str) -> i32 {
 fn infer_report_type(query: &str) -> &'static str {
     let q = query.trim().to_ascii_lowercase();
     const FINANCIAL_HINTS: &[&str] = &[
-        "s&p", "sp500", "spx", "es", "nasdaq", "nq", "dow", "djia", "ym", "russell", "rut",
-        "euro", "eur", "yen", "jpy", "pound", "gbp", "swiss", "chf", "aussie", "aud", "cad",
-        "loonie", "bitcoin", "btc", "sofr", "eurodollar", "fed funds", "vix",
-        "ust ", "ust 10y", "ust 2y", "ust 5y", "ust bond", "treasury", "treasuries",
-        "10-year", "10y", "10yr", "2-year", "2y", "2yr", "5-year", "5y", "5yr",
-        "30-year", "30y", "30yr", "t-note", "t-bond",
+        "s&p",
+        "sp500",
+        "spx",
+        "es",
+        "nasdaq",
+        "nq",
+        "dow",
+        "djia",
+        "ym",
+        "russell",
+        "rut",
+        "euro",
+        "eur",
+        "yen",
+        "jpy",
+        "pound",
+        "gbp",
+        "swiss",
+        "chf",
+        "aussie",
+        "aud",
+        "cad",
+        "loonie",
+        "bitcoin",
+        "btc",
+        "sofr",
+        "eurodollar",
+        "fed funds",
+        "vix",
+        "ust ",
+        "ust 10y",
+        "ust 2y",
+        "ust 5y",
+        "ust bond",
+        "treasury",
+        "treasuries",
+        "10-year",
+        "10y",
+        "10yr",
+        "2-year",
+        "2y",
+        "2yr",
+        "5-year",
+        "5y",
+        "5yr",
+        "30-year",
+        "30y",
+        "30yr",
+        "t-note",
+        "t-bond",
     ];
     if FINANCIAL_HINTS.iter().any(|h| q == *h || q.contains(h)) {
         "financial"
@@ -157,7 +226,10 @@ pub async fn fetch_cot(req: CotRequest) -> Result<CotResponse> {
     let weeks = req.weeks.unwrap_or(12);
     let report = match req.report.as_deref() {
         Some(r) if !r.is_empty() => r,
-        _ => req.query.as_deref().map_or("disaggregated", infer_report_type),
+        _ => req
+            .query
+            .as_deref()
+            .map_or("disaggregated", infer_report_type),
     };
 
     let endpoint = match report {
@@ -205,11 +277,19 @@ pub async fn fetch_cot(req: CotRequest) -> Result<CotResponse> {
         let open_interest = parse_i64(&row["open_interest_all"]);
         let commodity_name = {
             let s = str_field(row, "commodity_name");
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         };
         let futonly_or_combined = {
             let s = str_field(row, "futonly_or_combined");
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         };
 
         let (spec_long, spec_short) = if is_financial {
@@ -262,10 +342,7 @@ pub async fn fetch_cot(req: CotRequest) -> Result<CotResponse> {
             commodity_name,
         };
 
-        by_contract
-            .entry(contract_name)
-            .or_default()
-            .push(pos);
+        by_contract.entry(contract_name).or_default().push(pos);
     }
 
     // Sort each contract's positions by date descending and compute week-over-week change.
@@ -297,8 +374,10 @@ pub async fn fetch_cot(req: CotRequest) -> Result<CotResponse> {
     // Re-order contract groups by their latest OI descending.
     // Deprioritize contracts where all spec positions are 0 (no managed money breakdown).
     {
-        let mut contract_oi: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        let mut contract_has_spec: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let mut contract_oi: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let mut contract_has_spec: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
         for p in &all_positions {
             let entry = contract_oi.entry(p.contract_name.clone()).or_insert(0);
             *entry = (*entry).max(p.open_interest);
@@ -353,35 +432,36 @@ pub async fn fetch_cot(req: CotRequest) -> Result<CotResponse> {
 
     // Compute freshness metadata from the latest position date.
     // CFTC reports positions as-of Tuesday, released the following Friday at 3:30 PM ET.
-    let (data_as_of, released_on, next_release, staleness) = if let Some(latest) = all_positions.first() {
-        let as_of = &latest.report_date;
-        // Parse the as-of date to compute release dates
-        if let Ok(as_of_date) = chrono::NaiveDate::parse_from_str(&as_of[..10], "%Y-%m-%d") {
-            let now = Utc::now().date_naive();
-            // Released Friday after the as-of Tuesday (3 days later)
-            let released = as_of_date + chrono::Duration::days(3);
-            // Next release is the following Friday (10 days after as-of, i.e. 7 days after released)
-            let next = released + chrono::Duration::days(7);
-            let days_stale = (now - as_of_date).num_days();
-            let stale_str = if days_stale <= 3 {
-                format!("{}d old (current — released this week)", days_stale)
-            } else if days_stale <= 7 {
-                format!("{}d old (last week's positions)", days_stale)
+    let (data_as_of, released_on, next_release, staleness) =
+        if let Some(latest) = all_positions.first() {
+            let as_of = &latest.report_date;
+            // Parse the as-of date to compute release dates
+            if let Ok(as_of_date) = chrono::NaiveDate::parse_from_str(&as_of[..10], "%Y-%m-%d") {
+                let now = Utc::now().date_naive();
+                // Released Friday after the as-of Tuesday (3 days later)
+                let released = as_of_date + chrono::Duration::days(3);
+                // Next release is the following Friday (10 days after as-of, i.e. 7 days after released)
+                let next = released + chrono::Duration::days(7);
+                let days_stale = (now - as_of_date).num_days();
+                let stale_str = if days_stale <= 3 {
+                    format!("{}d old (current — released this week)", days_stale)
+                } else if days_stale <= 7 {
+                    format!("{}d old (last week's positions)", days_stale)
+                } else {
+                    format!("{}d old (stale — multiple weeks behind)", days_stale)
+                };
+                (
+                    Some(as_of_date.format("%Y-%m-%d").to_string()),
+                    Some(released.format("%Y-%m-%d (Fri 3:30 PM ET)").to_string()),
+                    Some(next.format("%Y-%m-%d (Fri 3:30 PM ET)").to_string()),
+                    Some(stale_str),
+                )
             } else {
-                format!("{}d old (stale — multiple weeks behind)", days_stale)
-            };
-            (
-                Some(as_of_date.format("%Y-%m-%d").to_string()),
-                Some(released.format("%Y-%m-%d (Fri 3:30 PM ET)").to_string()),
-                Some(next.format("%Y-%m-%d (Fri 3:30 PM ET)").to_string()),
-                Some(stale_str),
-            )
+                (Some(as_of[..10].to_string()), None, None, None)
+            }
         } else {
-            (Some(as_of[..10].to_string()), None, None, None)
-        }
-    } else {
-        (None, None, None, None)
-    };
+            (None, None, None, None)
+        };
 
     Ok(CotResponse {
         generated_at: Utc::now(),

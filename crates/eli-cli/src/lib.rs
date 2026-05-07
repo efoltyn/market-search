@@ -13,6 +13,8 @@ include!("cmd/finance/paper.rs");
 include!("cmd/finance/ibkr.rs");
 include!("cmd/finance/misc.rs");
 include!("cmd/finance/timeseries.rs");
+include!("cmd/finance/movers.rs");
+include!("cmd/finance/movers_extended.rs");
 include!("cmd/finance/curve.rs");
 include!("cmd/finance/fed.rs");
 include!("cmd/finance/mod.rs");

@@ -33,14 +33,17 @@ pub struct SearchFilters {
 pub fn default_db_path() -> PathBuf {
     directories::ProjectDirs::from("", "", "eli")
         .map(|d| d.cache_dir().join("odds").join("markets.db"))
-        .unwrap_or_else(|| std::env::temp_dir().join("eli-odds-cache").join("markets.db"))
+        .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("eli-odds-cache")
+                .join("markets.db")
+        })
 }
 
 /// Open (or create) the markets database and ensure schema exists.
 pub fn open_markets_db(path: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create cache dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create cache dir: {e}"))?;
     }
     let conn = Connection::open_with_flags(
         path,
@@ -200,10 +203,7 @@ pub fn upsert_markets(
 /// Returns the number of rows pruned.
 pub fn prune_stale_markets(conn: &Connection, cutoff: &str) -> Result<usize, String> {
     let deleted = conn
-        .execute(
-            "DELETE FROM markets WHERE synced_at < ?1",
-            params![cutoff],
-        )
+        .execute("DELETE FROM markets WHERE synced_at < ?1", params![cutoff])
         .map_err(|e| format!("prune stale: {e}"))?;
     Ok(deleted)
 }
@@ -333,7 +333,9 @@ pub fn search_markets(
              ORDER BY fts.rank, COALESCE(m.volume, 0) DESC
              LIMIT {limit}"
         );
-        let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare search: {e}"))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("prepare search: {e}"))?;
         let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
             run_bind_values.iter().map(|b| b.as_ref()).collect();
         let rows = stmt
@@ -395,9 +397,7 @@ pub fn get_sync_meta(conn: &Connection, key: &str) -> Result<Option<String>, Str
     let mut stmt = conn
         .prepare("SELECT value FROM sync_meta WHERE key = ?1")
         .map_err(|e| format!("prepare meta: {e}"))?;
-    let result = stmt
-        .query_row(params![key], |row| row.get(0))
-        .ok();
+    let result = stmt.query_row(params![key], |row| row.get(0)).ok();
     Ok(result)
 }
 

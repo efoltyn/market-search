@@ -23,8 +23,11 @@ fn parse_string(v: &serde_json::Value) -> Option<String> {
 }
 
 fn normalized_security_type(item: &serde_json::Value) -> String {
-    let raw = parse_string(item.get("security_type").unwrap_or(&serde_json::Value::Null))
-        .unwrap_or_default();
+    let raw = parse_string(
+        item.get("security_type")
+            .unwrap_or(&serde_json::Value::Null),
+    )
+    .unwrap_or_default();
     let raw_lower = raw.to_ascii_lowercase();
     let is_tips = item
         .get("inflation_index_security")
@@ -127,12 +130,16 @@ pub async fn fetch_auctions(req: AuctionsRequest) -> Result<AuctionsResponse> {
             }
         }
 
-        let cusip = parse_string(item.get("cusip").unwrap_or(&serde_json::Value::Null))
-            .unwrap_or_default();
-        let security_term = parse_string(item.get("security_term").unwrap_or(&serde_json::Value::Null))
-            .unwrap_or_default();
-        let auction_date = parse_string(item.get("auction_date").unwrap_or(&serde_json::Value::Null))
-            .unwrap_or_default();
+        let cusip =
+            parse_string(item.get("cusip").unwrap_or(&serde_json::Value::Null)).unwrap_or_default();
+        let security_term = parse_string(
+            item.get("security_term")
+                .unwrap_or(&serde_json::Value::Null),
+        )
+        .unwrap_or_default();
+        let auction_date =
+            parse_string(item.get("auction_date").unwrap_or(&serde_json::Value::Null))
+                .unwrap_or_default();
         let issue_date = item.get("issue_date").and_then(parse_string);
         let maturity_date = item.get("maturity_date").and_then(parse_string);
 
@@ -141,16 +148,17 @@ pub async fn fetch_auctions(req: AuctionsRequest) -> Result<AuctionsResponse> {
         //   bills           → `high_investment_rate` (bond-equivalent yield), fallback `high_discnt_rate`
         //   FRNs            → `high_discnt_margin` (spread over the index)
         // We expose all three through one `high_yield` field so callers see one consistent name.
-        let high_yield = item.get("high_yield").and_then(parse_f64).or_else(|| {
-            match security_type.as_str() {
+        let high_yield = item
+            .get("high_yield")
+            .and_then(parse_f64)
+            .or_else(|| match security_type.as_str() {
                 "Bill" => item
                     .get("high_investment_rate")
                     .and_then(parse_f64)
                     .or_else(|| item.get("high_discnt_rate").and_then(parse_f64)),
                 "FRN" => item.get("high_discnt_margin").and_then(parse_f64),
                 _ => None,
-            }
-        });
+            });
         let bid_to_cover_ratio = item.get("bid_to_cover_ratio").and_then(parse_f64);
         let total_accepted = item.get("total_accepted").and_then(parse_f64);
         let total_tendered = item.get("total_tendered").and_then(parse_f64);

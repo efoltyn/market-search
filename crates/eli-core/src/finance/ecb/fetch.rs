@@ -64,11 +64,16 @@ impl EcbPreset {
     }
 
     /// Returns (dataset, key, label, unit_hint).
-    fn queries(&self) -> Vec<(&'static str, &'static str, &'static str, Option<&'static str>)> {
+    fn queries(
+        &self,
+    ) -> Vec<(
+        &'static str,
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+    )> {
         match self {
-            Self::Eurusd => vec![
-                ("EXR", "D.USD.EUR.SP00.A", "EUR/USD", None),
-            ],
+            Self::Eurusd => vec![("EXR", "D.USD.EUR.SP00.A", "EUR/USD", None)],
             Self::FxMajors => vec![
                 ("EXR", "D.USD.EUR.SP00.A", "EUR/USD", None),
                 ("EXR", "D.GBP.EUR.SP00.A", "EUR/GBP", None),
@@ -76,29 +81,83 @@ impl EcbPreset {
                 ("EXR", "D.CHF.EUR.SP00.A", "EUR/CHF", None),
                 ("EXR", "D.CNY.EUR.SP00.A", "EUR/CNY", None),
             ],
-            Self::Estr => vec![
-                ("EST", "B.EU000A2X2A25.WT", "Euro STR", Some("percent")),
-            ],
-            Self::M3 => vec![
-                ("BSI", "M.U2.N.V.M30.X.1.U2.2300.Z01.E", "M3 Money Supply", Some("millions_eur")),
-            ],
+            Self::Estr => vec![("EST", "B.EU000A2X2A25.WT", "Euro STR", Some("percent"))],
+            Self::M3 => vec![(
+                "BSI",
+                "M.U2.N.V.M30.X.1.U2.2300.Z01.E",
+                "M3 Money Supply",
+                Some("millions_eur"),
+            )],
             Self::Euribor => vec![
-                ("FM", "M.U2.EUR.RT.MM.EURIBOR1MD_.HSTA", "EURIBOR 1M", Some("percent")),
-                ("FM", "M.U2.EUR.RT.MM.EURIBOR3MD_.HSTA", "EURIBOR 3M", Some("percent")),
-                ("FM", "M.U2.EUR.RT.MM.EURIBOR6MD_.HSTA", "EURIBOR 6M", Some("percent")),
-                ("FM", "M.U2.EUR.RT.MM.EURIBOR1YD_.HSTA", "EURIBOR 12M", Some("percent")),
+                (
+                    "FM",
+                    "M.U2.EUR.RT.MM.EURIBOR1MD_.HSTA",
+                    "EURIBOR 1M",
+                    Some("percent"),
+                ),
+                (
+                    "FM",
+                    "M.U2.EUR.RT.MM.EURIBOR3MD_.HSTA",
+                    "EURIBOR 3M",
+                    Some("percent"),
+                ),
+                (
+                    "FM",
+                    "M.U2.EUR.RT.MM.EURIBOR6MD_.HSTA",
+                    "EURIBOR 6M",
+                    Some("percent"),
+                ),
+                (
+                    "FM",
+                    "M.U2.EUR.RT.MM.EURIBOR1YD_.HSTA",
+                    "EURIBOR 12M",
+                    Some("percent"),
+                ),
             ],
             Self::YieldCurve => vec![
-                ("YC", "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_3M", "EUR 3M yield", Some("percent")),
-                ("YC", "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_1Y", "EUR 1Y yield", Some("percent")),
-                ("YC", "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_2Y", "EUR 2Y yield", Some("percent")),
-                ("YC", "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_5Y", "EUR 5Y yield", Some("percent")),
-                ("YC", "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_10Y", "EUR 10Y yield", Some("percent")),
-                ("YC", "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_30Y", "EUR 30Y yield", Some("percent")),
+                (
+                    "YC",
+                    "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_3M",
+                    "EUR 3M yield",
+                    Some("percent"),
+                ),
+                (
+                    "YC",
+                    "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_1Y",
+                    "EUR 1Y yield",
+                    Some("percent"),
+                ),
+                (
+                    "YC",
+                    "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_2Y",
+                    "EUR 2Y yield",
+                    Some("percent"),
+                ),
+                (
+                    "YC",
+                    "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_5Y",
+                    "EUR 5Y yield",
+                    Some("percent"),
+                ),
+                (
+                    "YC",
+                    "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_10Y",
+                    "EUR 10Y yield",
+                    Some("percent"),
+                ),
+                (
+                    "YC",
+                    "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_30Y",
+                    "EUR 30Y yield",
+                    Some("percent"),
+                ),
             ],
-            Self::BalanceSheet => vec![
-                ("BSI", "M.U2.N.C.T00.A.1.Z5.0000.Z01.E", "Eurosystem Total Assets", Some("millions_eur")),
-            ],
+            Self::BalanceSheet => vec![(
+                "BSI",
+                "M.U2.N.C.T00.A.1.Z5.0000.Z01.E",
+                "Eurosystem Total Assets",
+                Some("millions_eur"),
+            )],
         }
     }
 }
@@ -106,26 +165,29 @@ impl EcbPreset {
 pub async fn fetch_ecb(req: EcbRequest) -> Result<EcbResponse> {
     let client = &*crate::finance::shared_client::GENERAL;
 
-    let queries: Vec<(String, String, String, Option<String>)> = if let Some(ref preset) = req.preset {
-        preset
-            .queries()
-            .into_iter()
-            .map(|(ds, key, label, unit)| {
-                (ds.to_string(), key.to_string(), label.to_string(), unit.map(|u| u.to_string()))
-            })
-            .collect()
-    } else if let (Some(ref ds), Some(ref key)) = (&req.dataset, &req.key) {
-        vec![(ds.clone(), key.clone(), format!("{}/{}", ds, key), None)]
-    } else {
-        return Err(Error::InvalidInput(
-            "ecb requires either --preset or --dataset + --key".to_string(),
-        ));
-    };
+    let queries: Vec<(String, String, String, Option<String>)> =
+        if let Some(ref preset) = req.preset {
+            preset
+                .queries()
+                .into_iter()
+                .map(|(ds, key, label, unit)| {
+                    (
+                        ds.to_string(),
+                        key.to_string(),
+                        label.to_string(),
+                        unit.map(|u| u.to_string()),
+                    )
+                })
+                .collect()
+        } else if let (Some(ref ds), Some(ref key)) = (&req.dataset, &req.key) {
+            vec![(ds.clone(), key.clone(), format!("{}/{}", ds, key), None)]
+        } else {
+            return Err(Error::InvalidInput(
+                "ecb requires either --preset or --dataset + --key".to_string(),
+            ));
+        };
 
-    let start = req
-        .start_period
-        .as_deref()
-        .unwrap_or("2025-01-01");
+    let start = req.start_period.as_deref().unwrap_or("2025-01-01");
     let end = req.end_period.as_deref();
 
     let mut all_series = Vec::new();

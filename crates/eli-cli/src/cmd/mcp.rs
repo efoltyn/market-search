@@ -76,7 +76,7 @@ fn mcp_initialize(id: serde_json::Value) -> serde_json::Value {
         "result": {
             "protocolVersion": "2025-11-25",
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "eli", "version": "0.1.0" }
+            "serverInfo": { "name": "market-search", "version": env!("CARGO_PKG_VERSION") }
         }
     })
 }
@@ -632,6 +632,60 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 ),
                 None => format!("\"_summary\":\"timeseries parse failed — read file\""),
             }
+        }
+        "finance_movers" => {
+            let mut lines = Vec::new();
+            if let Some(movers) = v.get("movers").and_then(|m| m.as_array()) {
+                for mover in movers.iter().take(15) {
+                    let ticker = mover.get("ticker").and_then(|v| v.as_str()).unwrap_or("?");
+                    let pct = mover.get("change_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let price = mover.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let cap = mover.get("market_cap").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let value_change = mover
+                        .get("estimated_value_change")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let src = mover.get("source").and_then(|v| v.as_str()).unwrap_or("?");
+                    let cap_str = if cap >= 1_000_000_000_000 {
+                        format!("${:.1}T", cap as f64 / 1e12)
+                    } else if cap >= 1_000_000_000 {
+                        format!("${:.0}B", cap as f64 / 1e9)
+                    } else if cap >= 1_000_000 {
+                        format!("${:.0}M", cap as f64 / 1e6)
+                    } else {
+                        "?".to_string()
+                    };
+                    let value_str = if value_change.abs() >= 1e12 {
+                        format!("{:+.1}T", value_change / 1e12)
+                    } else if value_change.abs() >= 1e9 {
+                        format!("{:+.1}B", value_change / 1e9)
+                    } else if value_change.abs() >= 1e6 {
+                        format!("{:+.0}M", value_change / 1e6)
+                    } else {
+                        "?".to_string()
+                    };
+                    lines.push(format!(
+                        "{}|{:+.1}%|${:.2}|cap:{}|value:{}|{}",
+                        ticker, pct, price, cap_str, value_str, src
+                    ));
+                }
+            }
+            let provider = v.get("provider").and_then(|p| p.as_str()).unwrap_or("?");
+            let universe = v.get("universe").and_then(|p| p.as_str()).unwrap_or("?");
+            let direction = v.get("direction").and_then(|p| p.as_str()).unwrap_or("?");
+            let sort_by = v.get("sort_by").and_then(|p| p.as_str()).unwrap_or("?");
+            let returned = v.get("returned").and_then(|n| n.as_u64()).unwrap_or(lines.len() as u64);
+            let candidate_count = v.get("candidate_count").and_then(|n| n.as_u64()).unwrap_or(0);
+            format!(
+                "\"provider\":\"{}\",\"universe\":\"{}\",\"direction\":\"{}\",\"sort_by\":\"{}\",\"candidate_count\":{},\"returned\":{},\"_schema\":\".movers[].{{ticker,name,price,change_pct,market_cap,volume,dollar_volume,estimated_value_change,source}}\",\"top\":[{}]",
+                provider,
+                universe,
+                direction,
+                sort_by,
+                candidate_count,
+                returned,
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
         }
         "finance_cot" => {
             // Group all weeks by contract, compute raw historical percentile + data age (no labels)
@@ -1191,6 +1245,71 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             Ok(v)
         }
+        "finance_movers" => {
+            let mut v = vec![s("finance"), s("movers")];
+            if let Some(universe) = args.get("universe").and_then(|u| u.as_str()) {
+                v.extend([s("--universe"), s(universe)]);
+            }
+            if let Some(tickers) = args
+                .get("tickers")
+                .or_else(|| args.get("ticker"))
+                .and_then(|t| t.as_str())
+            {
+                v.extend([s("--tickers"), s(tickers)]);
+            }
+            if let Some(direction) = args.get("direction").and_then(|d| d.as_str()) {
+                v.extend([s("--direction"), s(direction)]);
+            }
+            if let Some(sort_by) = args.get("sort_by").and_then(|d| d.as_str()) {
+                v.extend([s("--sort-by"), s(sort_by)]);
+            }
+            if let Some(provider) = args.get("provider").and_then(|p| p.as_str()) {
+                v.extend([s("--provider"), s(provider)]);
+            }
+            if let Some(min_cap) = args.get("min_market_cap").and_then(|m| m.as_str()) {
+                v.extend([s("--min-market-cap"), s(min_cap)]);
+            }
+            if let Some(max_cap) = args.get("max_market_cap").and_then(|m| m.as_str()) {
+                v.extend([s("--max-market-cap"), s(max_cap)]);
+            }
+            if let Some(min_change) = args.get("min_change_pct").and_then(|n| n.as_f64()) {
+                v.extend([s("--min-change-pct"), min_change.to_string()]);
+            }
+            if let Some(min_price) = args.get("min_price").and_then(|n| n.as_f64()) {
+                v.extend([s("--min-price"), min_price.to_string()]);
+            }
+            if let Some(min_volume) = args.get("min_volume").and_then(|n| n.as_u64()) {
+                v.extend([s("--min-volume"), min_volume.to_string()]);
+            }
+            if let Some(limit) = args.get("limit").and_then(|n| n.as_u64()) {
+                v.extend([s("--limit"), limit.to_string()]);
+            }
+            if let Some(scan_limit) = args.get("scan_limit").and_then(|n| n.as_u64()) {
+                v.extend([s("--scan-limit"), scan_limit.to_string()]);
+            }
+            if let Some(account) = args.get("ibkr_account").and_then(|a| a.as_str()) {
+                v.extend([s("--ibkr-account"), s(account)]);
+            }
+            if let Some(host) = args.get("ibkr_host").and_then(|a| a.as_str()) {
+                v.extend([s("--ibkr-host"), s(host)]);
+            }
+            if let Some(port) = args.get("ibkr_port").and_then(|n| n.as_u64()) {
+                v.extend([s("--ibkr-port"), port.to_string()]);
+            }
+            if let Some(client_id) = args.get("ibkr_client_id").and_then(|n| n.as_i64()) {
+                v.extend([s("--ibkr-client-id"), client_id.to_string()]);
+            }
+            if let Some(data_type) = args.get("ibkr_market_data_type").and_then(|n| n.as_i64()) {
+                v.extend([s("--ibkr-market-data-type"), data_type.to_string()]);
+            }
+            if let Some(timeout_secs) = args.get("ibkr_timeout_secs").and_then(|n| n.as_u64()) {
+                v.extend([s("--ibkr-timeout-secs"), timeout_secs.to_string()]);
+            }
+            if let Some(b) = args.get("include_extended_hours").and_then(|v| v.as_bool()) {
+                if b { v.push(s("--include-extended-hours")); }
+            }
+            Ok(v)
+        }
         "finance_rate_path" => {
             // source_mode argument is accepted for backwards compatibility but
             // ignored (no-op flag). Don't propagate it to the CLI.
@@ -1704,6 +1823,20 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
                 v.extend([s("--limit"), limit.to_string()]);
             }
             if args
+                .get("download")
+                .and_then(|b| b.as_bool())
+                .is_some_and(|download| !download)
+            {
+                v.push(s("--no-download"));
+            }
+            if args
+                .get("download_all")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                v.push(s("--download-all"));
+            }
+            if args
                 .get("include_text")
                 .and_then(|b| b.as_bool())
                 .unwrap_or(false)
@@ -1712,6 +1845,9 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
                 if let Some(mc) = args.get("max_chars").and_then(|n| n.as_u64()) {
                     v.extend([s("--max-chars"), mc.to_string()]);
                 }
+            }
+            if let Some(user_agent) = args.get("user_agent").and_then(|ua| ua.as_str()) {
+                v.extend([s("--user-agent"), s(user_agent)]);
             }
             Ok(v)
         }

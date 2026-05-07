@@ -1533,122 +1533,28 @@ async fn cmd_finance_odds_search_live_fts(
             if !hydrate_kalshi {
                 return (all_events, all_markets, errors);
             }
-            for (idx, series_ticker) in kalshi_series_vec.iter().enumerate() {
-                if idx > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                match live_fetch_kalshi_series_markets(&client, series_ticker).await {
-                    Ok(resp) => {
-                        for event in resp.events {
-                            if !opts.include_mentions
-                                && is_mention_event_ticker(&event.event_ticker)
-                            {
-                                continue;
-                            }
-                            let category = event.category.clone().unwrap_or_default();
-                            if !category_matches_filter(&category, opts.category_filter.as_deref())
-                            {
-                                continue;
-                            }
-                            let event_title = event.title.clone();
-                            let event_ticker = event.event_ticker.clone();
-                            all_events.push(serde_json::json!({
-                                "source": "kalshi",
-                                "event_ticker": event_ticker,
-                                "title": event_title.clone(),
-                                "category": if category.is_empty() {
-                                    serde_json::Value::Null
-                                } else {
-                                    serde_json::json!(category)
-                                },
-                                "series_ticker": event.series_ticker.or_else(|| Some(series_ticker.clone())),
-                            }));
-                            for market in event.markets {
-                                if !live_is_open_status(market.status.as_deref()) {
-                                    continue;
-                                }
-                                let volume_usd =
-                                    live_parse_decimal(market.volume_fp.as_deref()).unwrap_or(0.0);
-                                let volume_24h_usd =
-                                    live_parse_decimal(market.volume_24h_fp.as_deref())
-                                        .unwrap_or(0.0);
-                                let open_interest =
-                                    live_parse_decimal(market.open_interest_fp.as_deref())
-                                        .unwrap_or(0.0);
-                                let probability_yes = live_kalshi_market_probability_yes(&market);
-                                let display_title = live_kalshi_market_display_title(
-                                    &event_title,
-                                    &market.title,
-                                    market.yes_sub_title.as_deref(),
-                                    market.subtitle.as_deref(),
-                                );
-                                let (match_score, matched_terms) = live_market_score(
-                                    &display_title,
-                                    &event_title,
-                                    &category,
-                                    "",
-                                    &query_phrase,
-                                    &query_terms,
-                                    &[],
-                                    volume_usd,
-                                    volume_24h_usd,
-                                    open_interest,
-                                    market.close_time.as_deref(),
-                                    market.status.as_deref(),
-                                    probability_yes,
-                                    50,
-                                    profile_applied,
-                                    &opts.policy,
-                                );
-                                let mut market_json = serde_json::json!({
-                                    "source": "kalshi",
-                                    "ticker": market.ticker,
-                                    "title": display_title,
-                                    "event_ticker": market.event_ticker,
-                                    "yes_price": probability_yes,
-                                    "yes_bid": live_parse_decimal(market.yes_bid_dollars.as_deref()),
-                                    "yes_ask": live_parse_decimal(market.yes_ask_dollars.as_deref()),
-                                    "volume": live_volume_to_cents(volume_usd),
-                                    "volume_usd": volume_usd,
-                                    "volume_24h_usd": volume_24h_usd,
-                                    "open_interest": open_interest,
-                                    "close_time": market.close_time,
-                                    "status": market.status,
-                                    "probability_yes": probability_yes,
-                                    "category": if category.is_empty() {
-                                        serde_json::Value::Null
-                                    } else {
-                                        serde_json::json!(category)
-                                    },
-                                    "series_ticker": series_ticker,
-                                    "match_score": match_score,
-                                    "match_terms": matched_terms,
-                                    "score_components": {
-                                        "fts_discovery": true,
-                                        "kalshi_series_hint": hinted_kalshi_series.iter().any(|hint| hint == series_ticker),
-                                        "volume_usd": volume_usd,
-                                    },
-                                });
-                                let market_ticker = market.ticker.clone();
-                                attach_market_delta(
-                                    &mut market_json,
-                                    "kalshi",
-                                    &market_ticker,
-                                    delta_lookup.as_ref(),
-                                );
-                                all_markets.push(market_json);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        errors.push(serde_json::json!({
-                            "phase": "fts_hydration",
-                            "source": "kalshi",
-                            "series_ticker": series_ticker,
-                            "error": error,
-                        }));
-                    }
-                }
+            let mut hydrated = futures::stream::iter(kalshi_series_vec.iter().cloned().enumerate())
+                .map(|(idx, series_ticker)| {
+                    let hydration = live_hydrate_kalshi_fts_series(
+                        &client,
+                        series_ticker,
+                        &query_phrase,
+                        &query_terms,
+                        opts,
+                        profile_applied,
+                        &hinted_kalshi_series,
+                        delta_lookup.as_ref(),
+                    );
+                    async move { (idx, hydration.await) }
+                })
+                .buffer_unordered(LIVE_KALSHI_SERIES_HYDRATION_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            hydrated.sort_by_key(|(idx, _)| *idx);
+            for (_, (mut events, mut markets, mut series_errors)) in hydrated {
+                all_events.append(&mut events);
+                all_markets.append(&mut markets);
+                errors.append(&mut series_errors);
             }
             (all_events, all_markets, errors)
         }
@@ -1691,31 +1597,7 @@ async fn cmd_finance_odds_search_live_fts(
     all_events.truncate(final_limit.max(8));
     live_markets = select_diverse_live_markets(&ranked_live_markets, final_limit);
     // Ensure both sources represented if available.
-    for source in ["kalshi", "polymarket"] {
-        let source_available = ranked_live_markets.iter().any(|row| {
-            row.get("source")
-                .and_then(|v| v.as_str())
-                .is_some_and(|value| value == source)
-        });
-        let source_selected = live_markets.iter().any(|row| {
-            row.get("source")
-                .and_then(|v| v.as_str())
-                .is_some_and(|value| value == source)
-        });
-        if !source_available || source_selected {
-            continue;
-        }
-        if let Some(candidate) = ranked_live_markets.iter().find(|row| {
-            row.get("source")
-                .and_then(|v| v.as_str())
-                .is_some_and(|value| value == source)
-        }) {
-            if live_markets.len() >= final_limit && !live_markets.is_empty() {
-                live_markets.pop();
-            }
-            live_markets.push(candidate.clone());
-        }
-    }
+    ensure_live_source_diversity(&mut live_markets, &ranked_live_markets, final_limit);
 
     // --orderbook: attach Polymarket book depth to the limited slice the user
     // sees (cheaper than running it across every ranked candidate).
@@ -1769,6 +1651,275 @@ async fn cmd_finance_odds_search_live_fts(
         "finance.odds.search_live_fts",
         &[format!("query={query}"), "source=fts5_live".to_string()],
     )
+}
+
+async fn live_hydrate_kalshi_fts_series(
+    client: &reqwest::Client,
+    series_ticker: String,
+    query_phrase: &str,
+    query_terms: &[String],
+    opts: &CsvSearchOptions,
+    profile_applied: SearchProfile,
+    hinted_kalshi_series: &[String],
+    delta_lookup: Option<&SyncDeltaLookup>,
+) -> (
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+) {
+    let mut all_events = Vec::new();
+    let mut all_markets = Vec::new();
+    let mut errors = Vec::new();
+
+    match live_fetch_kalshi_series_markets(client, &series_ticker).await {
+        Ok(resp) => {
+            for event in resp.events {
+                if !opts.include_mentions && is_mention_event_ticker(&event.event_ticker) {
+                    continue;
+                }
+                let category = event.category.clone().unwrap_or_default();
+                if !category_matches_filter(&category, opts.category_filter.as_deref()) {
+                    continue;
+                }
+                let event_title = event.title.clone();
+                let event_ticker = event.event_ticker.clone();
+                all_events.push(serde_json::json!({
+                    "source": "kalshi",
+                    "event_ticker": event_ticker,
+                    "title": event_title.clone(),
+                    "category": if category.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(category.clone())
+                    },
+                    "series_ticker": event.series_ticker.or_else(|| Some(series_ticker.clone())),
+                }));
+                for market in event.markets {
+                    if !live_is_open_status(market.status.as_deref()) {
+                        continue;
+                    }
+                    let volume_usd =
+                        live_parse_decimal(market.volume_fp.as_deref()).unwrap_or(0.0);
+                    let volume_24h_usd =
+                        live_parse_decimal(market.volume_24h_fp.as_deref()).unwrap_or(0.0);
+                    let open_interest =
+                        live_parse_decimal(market.open_interest_fp.as_deref()).unwrap_or(0.0);
+                    let probability_yes = live_kalshi_market_probability_yes(&market);
+                    let display_title = live_kalshi_market_display_title(
+                        &event_title,
+                        &market.title,
+                        market.yes_sub_title.as_deref(),
+                        market.subtitle.as_deref(),
+                    );
+                    let (match_score, matched_terms) = live_market_score(
+                        &display_title,
+                        &event_title,
+                        &category,
+                        "",
+                        query_phrase,
+                        query_terms,
+                        &[],
+                        volume_usd,
+                        volume_24h_usd,
+                        open_interest,
+                        market.close_time.as_deref(),
+                        market.status.as_deref(),
+                        probability_yes,
+                        50,
+                        profile_applied,
+                        &opts.policy,
+                    );
+                    let market_ticker = market.ticker.clone();
+                    let mut market_json = serde_json::json!({
+                        "source": "kalshi",
+                        "ticker": market_ticker.clone(),
+                        "title": display_title,
+                        "event_ticker": market.event_ticker,
+                        "yes_price": probability_yes,
+                        "yes_bid": live_parse_decimal(market.yes_bid_dollars.as_deref()),
+                        "yes_ask": live_parse_decimal(market.yes_ask_dollars.as_deref()),
+                        "volume": live_volume_to_cents(volume_usd),
+                        "volume_usd": volume_usd,
+                        "volume_24h_usd": volume_24h_usd,
+                        "open_interest": open_interest,
+                        "close_time": market.close_time,
+                        "status": market.status,
+                        "probability_yes": probability_yes,
+                        "category": if category.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::json!(category.clone())
+                        },
+                        "series_ticker": series_ticker.clone(),
+                        "match_score": match_score,
+                        "match_terms": matched_terms,
+                        "score_components": {
+                            "fts_discovery": true,
+                            "kalshi_series_hint": hinted_kalshi_series.iter().any(|hint| hint == &series_ticker),
+                            "volume_usd": volume_usd,
+                        },
+                    });
+                    attach_market_delta(&mut market_json, "kalshi", &market_ticker, delta_lookup);
+                    all_markets.push(market_json);
+                }
+            }
+        }
+        Err(error) => {
+            errors.push(serde_json::json!({
+                "phase": "fts_hydration",
+                "source": "kalshi",
+                "series_ticker": series_ticker,
+                "error": error,
+            }));
+        }
+    }
+
+    (all_events, all_markets, errors)
+}
+
+async fn live_hydrate_ranked_kalshi_series(
+    client: &reqwest::Client,
+    series: RankedKalshiSeries,
+    query_phrase: &str,
+    query_terms: &[String],
+    expansion_terms: &[String],
+    opts: &CsvSearchOptions,
+    profile_applied: SearchProfile,
+    delta_lookup: Option<&SyncDeltaLookup>,
+) -> (
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    bool,
+) {
+    let mut all_events = Vec::new();
+    let mut all_markets = Vec::new();
+    let mut errors = Vec::new();
+    let mut series_had_live_markets = false;
+
+    let series_resp = match live_fetch_kalshi_series_markets(client, &series.ticker).await {
+        Ok(resp) => resp,
+        Err(error) => {
+            errors.push(serde_json::json!({
+                "phase": "series_drill_down",
+                "source": "kalshi",
+                "series_ticker": series.ticker,
+                "error": error,
+            }));
+            return (all_events, all_markets, errors, false);
+        }
+    };
+
+    for event in series_resp.events {
+        if !opts.include_mentions && is_mention_event_ticker(&event.event_ticker) {
+            continue;
+        }
+        let category = event
+            .category
+            .clone()
+            .or_else(|| series.category.clone())
+            .unwrap_or_default();
+        if !category_matches_filter(&category, opts.category_filter.as_deref()) {
+            continue;
+        }
+
+        let active_markets: Vec<LiveKalshiMarket> = event
+            .markets
+            .into_iter()
+            .filter(|market| live_is_open_status(market.status.as_deref()))
+            .collect();
+        if active_markets.is_empty() {
+            continue;
+        }
+        series_had_live_markets = true;
+
+        let event_title = event.title.clone();
+        let event_ticker = event.event_ticker.clone();
+        let event_score = series.score
+            + live_scored_hits(&event.title, query_phrase, query_terms, 12, 7, 18).0
+            + live_scored_hits(&event.title, "", expansion_terms, 4, 2, 0).0;
+        all_events.push(serde_json::json!({
+            "source": "kalshi",
+            "event_ticker": event_ticker,
+            "title": event_title.clone(),
+            "category": if category.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(category.clone())
+            },
+            "series_ticker": event.series_ticker.or_else(|| Some(series.ticker.clone())),
+            "match_score": event_score,
+        }));
+
+        for market in active_markets {
+            let volume_usd = live_parse_decimal(market.volume_fp.as_deref()).unwrap_or(0.0);
+            let volume_24h_usd =
+                live_parse_decimal(market.volume_24h_fp.as_deref()).unwrap_or(0.0);
+            let open_interest =
+                live_parse_decimal(market.open_interest_fp.as_deref()).unwrap_or(0.0);
+            let probability_yes = live_kalshi_market_probability_yes(&market);
+            let display_title = live_kalshi_market_display_title(
+                &event_title,
+                &market.title,
+                market.yes_sub_title.as_deref(),
+                market.subtitle.as_deref(),
+            );
+            let (match_score, matched_terms) = live_market_score(
+                &display_title,
+                &event_title,
+                &category,
+                "",
+                query_phrase,
+                query_terms,
+                expansion_terms,
+                volume_usd,
+                volume_24h_usd,
+                open_interest,
+                market.close_time.as_deref(),
+                market.status.as_deref(),
+                probability_yes,
+                series.score,
+                profile_applied,
+                &opts.policy,
+            );
+            let market_ticker = market.ticker.clone();
+            let mut market_json = serde_json::json!({
+                "source": "kalshi",
+                "ticker": market_ticker.clone(),
+                "title": display_title,
+                "event_ticker": market.event_ticker,
+                "yes_price": probability_yes,
+                "yes_bid": live_parse_decimal(market.yes_bid_dollars.as_deref()),
+                "yes_ask": live_parse_decimal(market.yes_ask_dollars.as_deref()),
+                "volume": live_volume_to_cents(volume_usd),
+                "volume_usd": volume_usd,
+                "volume_24h_usd": volume_24h_usd,
+                "open_interest": open_interest,
+                "close_time": market.close_time,
+                "status": market.status,
+                "probability_yes": probability_yes,
+                "category": if category.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(category.clone())
+                },
+                "series_ticker": series.ticker.clone(),
+                "match_score": match_score,
+                "match_terms": matched_terms,
+                "score_components": {
+                    "series_score": series.score,
+                    "series_frequency": series.frequency.clone(),
+                    "volume_usd": volume_usd,
+                    "volume_24h_usd": volume_24h_usd,
+                    "open_interest": open_interest,
+                },
+            });
+            attach_market_delta(&mut market_json, "kalshi", &market_ticker, delta_lookup);
+            all_markets.push(market_json);
+        }
+    }
+
+    (all_events, all_markets, errors, series_had_live_markets)
 }
 
 /// Returns true if the market status indicates it is currently active/open.
@@ -1889,6 +2040,7 @@ const LIVE_KALSHI_SERIES_MAX_PAGES: usize = 5;
 const LIVE_KALSHI_SERIES_FETCH_BUDGET: usize = 10;
 const LIVE_KALSHI_SERIES_EVENT_LIMIT: usize = 25;
 const LIVE_KALSHI_SERIES_EVENT_MAX_PAGES: usize = 4;
+const LIVE_KALSHI_SERIES_HYDRATION_CONCURRENCY: usize = 1;
 const LIVE_KALSHI_TAG_FETCH_LIMIT: usize = 3;
 const LIVE_KALSHI_TAG_SERIES_MIN: usize = 8;
 const LIVE_EXPANSION_LIMIT: usize = 4;
@@ -2350,6 +2502,65 @@ fn live_direction_specificity_score(title: &str, event_title: &str, query_terms:
             score -= 35;
         }
     }
+
+    let bearish_query = [
+        "bear",
+        "bearish",
+        "below",
+        "crash",
+        "crashes",
+        "collapse",
+        "collapses",
+        "down",
+        "drop",
+        "drops",
+        "fall",
+        "falls",
+        "lower",
+        "under",
+    ]
+    .iter()
+    .any(|term| query_has(term));
+    let bullish_query = [
+        "above", "bull", "bullish", "higher", "moon", "moons", "over", "rally", "rallies",
+        "rise", "rises", "surge", "surges", "up",
+    ]
+    .iter()
+    .any(|term| query_has(term));
+    let mentions_bearish = text.contains(" below ")
+        || text.contains(" under ")
+        || text.contains(" lower ")
+        || text.contains(" down ")
+        || text.contains(" drop")
+        || text.contains(" fall")
+        || text.contains(" crash")
+        || text.contains("less than")
+        || text.contains("or below");
+    let mentions_bullish = text.contains(" above ")
+        || text.contains(" over ")
+        || text.contains(" higher ")
+        || text.contains(" rally")
+        || text.contains(" rise")
+        || text.contains(" surge")
+        || text.contains(" hit ")
+        || text.contains(" reach ");
+
+    if bearish_query {
+        if mentions_bearish {
+            score += 70;
+        }
+        if mentions_bullish {
+            score -= 45;
+        }
+    }
+    if bullish_query {
+        if mentions_bullish {
+            score += 55;
+        }
+        if mentions_bearish {
+            score -= 35;
+        }
+    }
     score
 }
 
@@ -2381,6 +2592,8 @@ fn append_live_query_alias_terms(terms: &mut Vec<String>) {
 fn live_search_fallback_queries(query: &str) -> Vec<String> {
     let tokens = live_ascii_tokens(query);
     let mut fallbacks = Vec::new();
+    let has_token = |needle: &str| tokens.iter().any(|token| token == needle);
+    let has_any = |needles: &[&str]| needles.iter().any(|needle| has_token(needle));
     if tokens.iter().any(|token| token == "fomc") {
         fallbacks.push("federal reserve".to_string());
         fallbacks.push("fed decision".to_string());
@@ -2413,6 +2626,34 @@ fn live_search_fallback_queries(query: &str) -> Vec<String> {
     if tokens.iter().any(|token| token == "tariff" || token == "tariffs") {
         fallbacks.push("tariffs".to_string());
         fallbacks.push("trade war".to_string());
+    }
+    let power_grid_query = has_any(&[
+        "blackout",
+        "blackouts",
+        "electric",
+        "electrical",
+        "electricity",
+        "grid",
+        "grids",
+        "utilities",
+        "utility",
+    ]) || (has_token("power")
+        && has_any(&[
+            "center",
+            "centers",
+            "data",
+            "electric",
+            "electricity",
+            "energy",
+            "grid",
+            "shortage",
+            "utility",
+        ]));
+    if power_grid_query {
+        fallbacks.push("electric utility".to_string());
+        fallbacks.push("data center power".to_string());
+        fallbacks.push("power grid".to_string());
+        fallbacks.push("blackout".to_string());
     }
     fallbacks.retain(|candidate| candidate != query);
     fallbacks
@@ -2847,37 +3088,93 @@ fn select_diverse_live_markets(
     let mut diversity_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
 
-    for require_direct_match in [true, false] {
-        for enforce_diversity in [true, false] {
-            for row in ranked_live_markets {
-                if selected.len() >= final_limit {
-                    break;
-                }
-                if require_direct_match && !live_market_has_direct_match(row) {
-                    continue;
-                }
-                let row_key = live_market_row_key(row);
-                if selected_rows.contains(&row_key) {
-                    continue;
-                }
-                let diversity_key = live_market_diversity_key(row);
-                if enforce_diversity
-                    && diversity_counts
-                        .get(&diversity_key)
-                        .copied()
-                        .unwrap_or_default()
-                        >= LIVE_EVENT_FIRST_PASS_CAP
-                {
-                    continue;
-                }
-                selected_rows.insert(row_key);
-                *diversity_counts.entry(diversity_key).or_insert(0) += 1;
-                selected.push(row.clone());
+    for enforce_diversity in [true, false] {
+        for row in ranked_live_markets {
+            if selected.len() >= final_limit {
+                break;
             }
+            if !live_market_has_direct_match(row) {
+                continue;
+            }
+            let row_key = live_market_row_key(row);
+            if selected_rows.contains(&row_key) {
+                continue;
+            }
+            let diversity_key = live_market_diversity_key(row);
+            if enforce_diversity
+                && diversity_counts
+                    .get(&diversity_key)
+                    .copied()
+                    .unwrap_or_default()
+                    >= LIVE_EVENT_FIRST_PASS_CAP
+            {
+                continue;
+            }
+            selected_rows.insert(row_key);
+            *diversity_counts.entry(diversity_key).or_insert(0) += 1;
+            selected.push(row.clone());
+        }
+    }
+
+    if !selected.is_empty() {
+        return selected;
+    }
+
+    for enforce_diversity in [true, false] {
+        for row in ranked_live_markets {
+            if selected.len() >= final_limit {
+                break;
+            }
+            let row_key = live_market_row_key(row);
+            if selected_rows.contains(&row_key) {
+                continue;
+            }
+            let diversity_key = live_market_diversity_key(row);
+            if enforce_diversity
+                && diversity_counts
+                    .get(&diversity_key)
+                    .copied()
+                    .unwrap_or_default()
+                    >= LIVE_EVENT_FIRST_PASS_CAP
+            {
+                continue;
+            }
+            selected_rows.insert(row_key);
+            *diversity_counts.entry(diversity_key).or_insert(0) += 1;
+            selected.push(row.clone());
         }
     }
 
     selected
+}
+
+fn ensure_live_source_diversity(
+    live_markets: &mut Vec<serde_json::Value>,
+    ranked_live_markets: &[serde_json::Value],
+    final_limit: usize,
+) {
+    let direct_selected = live_markets.iter().any(live_market_has_direct_match);
+    for source in ["kalshi", "polymarket"] {
+        let source_selected = live_markets.iter().any(|row| {
+            row.get("source")
+                .and_then(|v| v.as_str())
+                .is_some_and(|value| value == source)
+        });
+        if source_selected {
+            continue;
+        }
+        if let Some(candidate) = ranked_live_markets.iter().find(|row| {
+            row.get("source")
+                .and_then(|v| v.as_str())
+                .is_some_and(|value| value == source)
+                && (!direct_selected || live_market_has_direct_match(row))
+        }) {
+            if live_markets.len() >= final_limit && !live_markets.is_empty() {
+                live_markets.pop();
+            }
+            live_markets.push(candidate.clone());
+        }
+    }
 }
 
 async fn live_fetch_json<T>(
@@ -2891,6 +3188,7 @@ where
 {
     let mut attempt = 0usize;
     loop {
+        live_provider_throttle(url).await;
         let resp = client
             .get(url)
             .query(query)
@@ -2907,15 +3205,147 @@ where
         }
 
         if (status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
-            && attempt < 2
+            && attempt < 4
         {
+            let retry_after_ms = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|seconds| seconds.saturating_mul(1000));
             attempt += 1;
-            tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64)).await;
+            let backoff_ms = retry_after_ms.unwrap_or(500 * attempt as u64);
+            live_provider_note_cooldown(url, backoff_ms).await;
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             continue;
         }
 
         return Err(format!("{label} failed: http {status}"));
     }
+}
+
+fn live_provider_throttle_spec(url: &str) -> Option<(&'static str, u64)> {
+    if url.contains("api.elections.kalshi.com") {
+        // Kalshi is the provider that 429s under concurrent live hydration.
+        // 125ms schedules around 8 req/s across CLI/MCP processes, close to
+        // common public API ceilings while leaving a small safety margin.
+        return Some(("kalshi", 125));
+    }
+    None
+}
+
+async fn live_provider_throttle(url: &str) {
+    let Some((provider, spacing_ms)) = live_provider_throttle_spec(url) else {
+        return;
+    };
+    let provider = provider.to_string();
+    let wait_ms = tokio::task::spawn_blocking(move || {
+        live_provider_reserve_slot(&provider, spacing_ms)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    if wait_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+    }
+}
+
+async fn live_provider_note_cooldown(url: &str, cooldown_ms: u64) {
+    let Some((provider, _)) = live_provider_throttle_spec(url) else {
+        return;
+    };
+    let provider = provider.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        live_provider_extend_cooldown(&provider, cooldown_ms);
+    })
+    .await;
+}
+
+fn live_provider_limit_dir() -> std::path::PathBuf {
+    directories::ProjectDirs::from("", "", "eli")
+        .map(|d| d.cache_dir().join("odds").join("provider_limits"))
+        .unwrap_or_else(|| std::env::temp_dir().join("eli-odds-provider-limits"))
+}
+
+fn live_now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+struct LiveProviderDirLock {
+    path: std::path::PathBuf,
+}
+
+impl Drop for LiveProviderDirLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
+fn live_provider_acquire_lock(
+    base_dir: &std::path::Path,
+    provider: &str,
+) -> Option<LiveProviderDirLock> {
+    let lock_path = base_dir.join(format!("{provider}.lock"));
+    for _ in 0..200 {
+        match std::fs::create_dir(&lock_path) {
+            Ok(()) => {
+                return Some(LiveProviderDirLock { path: lock_path });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = std::fs::metadata(&lock_path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|elapsed| elapsed > std::time::Duration::from_secs(10));
+                if stale {
+                    let _ = std::fs::remove_dir(&lock_path);
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+fn live_provider_read_next_ms(path: &std::path::Path) -> u128 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u128>().ok())
+        .unwrap_or_default()
+}
+
+fn live_provider_reserve_slot(provider: &str, spacing_ms: u64) -> Option<u64> {
+    let base_dir = live_provider_limit_dir();
+    std::fs::create_dir_all(&base_dir).ok()?;
+    let _lock = live_provider_acquire_lock(&base_dir, provider)?;
+    let state_path = base_dir.join(format!("{provider}.next_ms"));
+    let now = live_now_millis();
+    let next_allowed = live_provider_read_next_ms(&state_path);
+    let scheduled = now.max(next_allowed);
+    let following = scheduled.saturating_add(spacing_ms as u128);
+    let _ = std::fs::write(&state_path, following.to_string());
+    Some(scheduled.saturating_sub(now).min(u64::MAX as u128) as u64)
+}
+
+fn live_provider_extend_cooldown(provider: &str, cooldown_ms: u64) {
+    let base_dir = live_provider_limit_dir();
+    if std::fs::create_dir_all(&base_dir).is_err() {
+        return;
+    }
+    let Some(_lock) = live_provider_acquire_lock(&base_dir, provider) else {
+        return;
+    };
+    let state_path = base_dir.join(format!("{provider}.next_ms"));
+    let now = live_now_millis();
+    let next_allowed = live_provider_read_next_ms(&state_path);
+    let cooldown_until = now.saturating_add(cooldown_ms as u128);
+    let _ = std::fs::write(&state_path, next_allowed.max(cooldown_until).to_string());
 }
 
 fn live_discover_kalshi_tags(
@@ -3706,148 +4136,50 @@ async fn cmd_finance_odds_search_live_no_csv(
         })
         .collect();
 
-    let mut kalshi_series_with_live_markets = 0usize;
-    for (idx, series) in ranked_series
+    let ranked_series_to_fetch: Vec<RankedKalshiSeries> = ranked_series
         .iter()
         .take(LIVE_KALSHI_SERIES_FETCH_BUDGET)
-        .enumerate()
-    {
-        if idx > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
-        let series_resp = match live_fetch_kalshi_series_markets(&client, &series.ticker).await {
-            Ok(resp) => resp,
-            Err(error) => {
-                api_errors.push(serde_json::json!({
-                    "phase": "series_drill_down",
-                    "source": "kalshi",
-                    "series_ticker": series.ticker,
-                    "error": error,
-                }));
-                continue;
-            }
-        };
+        .cloned()
+        .collect();
+    let mut hydrated_kalshi = futures::stream::iter(ranked_series_to_fetch.into_iter().enumerate())
+        .map(|(idx, series)| {
+            let hydration = live_hydrate_ranked_kalshi_series(
+                &client,
+                series,
+                &query_phrase,
+                &query_terms,
+                &expansion_terms,
+                opts,
+                profile_applied,
+                delta_lookup.as_ref(),
+            );
+            async move { (idx, hydration.await) }
+        })
+        .buffer_unordered(LIVE_KALSHI_SERIES_HYDRATION_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    hydrated_kalshi.sort_by_key(|(idx, _)| *idx);
 
-        let mut series_had_live_markets = false;
-        for event in series_resp.events {
-            if !opts.include_mentions && is_mention_event_ticker(&event.event_ticker) {
-                continue;
-            }
-            let category = event
-                .category
-                .clone()
-                .or_else(|| series.category.clone())
-                .unwrap_or_default();
-            if !category_matches_filter(&category, opts.category_filter.as_deref()) {
-                continue;
-            }
-
-            let active_markets: Vec<LiveKalshiMarket> = event
-                .markets
-                .into_iter()
-                .filter(|market| live_is_open_status(market.status.as_deref()))
-                .collect();
-            if active_markets.is_empty() {
-                continue;
-            }
-            series_had_live_markets = true;
-
-            let event_title = event.title.clone();
-            let event_ticker = event.event_ticker.clone();
-            let event_score = series.score
-                + live_scored_hits(&event.title, &query_phrase, &query_terms, 12, 7, 18).0
-                + live_scored_hits(&event.title, "", &expansion_terms, 4, 2, 0).0;
-            let event_key = format!("kalshi::{event_ticker}");
-            if seen_events.insert(event_key) {
-                all_events.push(serde_json::json!({
-                    "source": "kalshi",
-                    "event_ticker": event_ticker,
-                    "title": event_title.clone(),
-                    "category": if category.is_empty() { serde_json::Value::Null } else { serde_json::json!(category) },
-                    "series_ticker": event.series_ticker.or_else(|| Some(series.ticker.clone())),
-                    "match_score": event_score,
-                }));
-            }
-
-            for market in active_markets {
-                let volume_usd = live_parse_decimal(market.volume_fp.as_deref()).unwrap_or(0.0);
-                let volume_24h_usd =
-                    live_parse_decimal(market.volume_24h_fp.as_deref()).unwrap_or(0.0);
-                let open_interest =
-                    live_parse_decimal(market.open_interest_fp.as_deref()).unwrap_or(0.0);
-                let probability_yes = live_kalshi_market_probability_yes(&market);
-                let display_title = live_kalshi_market_display_title(
-                    &event_title,
-                    &market.title,
-                    market.yes_sub_title.as_deref(),
-                    market.subtitle.as_deref(),
-                );
-                let (match_score, matched_terms) = live_market_score(
-                    &display_title,
-                    &event_title,
-                    &category,
-                    "",
-                    &query_phrase,
-                    &query_terms,
-                    &expansion_terms,
-                    volume_usd,
-                    volume_24h_usd,
-                    open_interest,
-                    market.close_time.as_deref(),
-                    market.status.as_deref(),
-                    probability_yes,
-                    series.score,
-                    profile_applied,
-                    &opts.policy,
-                );
-                let market_key = format!("kalshi::{}", market.ticker);
-                if !seen_markets.insert(market_key) {
-                    continue;
-                }
-                let mut market_json = serde_json::json!({
-                    "source": "kalshi",
-                    "ticker": market.ticker,
-                    "title": display_title,
-                    "event_ticker": market.event_ticker,
-                    "yes_price": probability_yes,
-                    "yes_bid": live_parse_decimal(market.yes_bid_dollars.as_deref()),
-                    "yes_ask": live_parse_decimal(market.yes_ask_dollars.as_deref()),
-                    "volume": live_volume_to_cents(volume_usd),
-                    "volume_usd": volume_usd,
-                    "volume_24h_usd": volume_24h_usd,
-                    "open_interest": open_interest,
-                    "close_time": market.close_time,
-                    "status": market.status,
-                    "probability_yes": probability_yes,
-                    "category": if category.is_empty() { serde_json::Value::Null } else { serde_json::json!(category) },
-                    "series_ticker": series.ticker,
-                    "match_score": match_score,
-                    "match_terms": matched_terms,
-                    "score_components": {
-                        "series_score": series.score,
-                        "series_frequency": series.frequency,
-                        "volume_usd": volume_usd,
-                        "volume_24h_usd": volume_24h_usd,
-                        "open_interest": open_interest,
-                    },
-                });
-                let market_ticker = market_json
-                    .get("ticker")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                attach_market_delta(
-                    &mut market_json,
-                    "kalshi",
-                    &market_ticker,
-                    delta_lookup.as_ref(),
-                );
-                live_markets.push(market_json);
-            }
-        }
-
+    let mut kalshi_series_with_live_markets = 0usize;
+    for (_, (events, markets, mut errors, series_had_live_markets)) in hydrated_kalshi {
+        api_errors.append(&mut errors);
         if series_had_live_markets {
             kalshi_series_with_live_markets += 1;
+        }
+        for event in events {
+            let event_key = event
+                .get("event_ticker")
+                .and_then(|v| v.as_str())
+                .map(|event_ticker| format!("kalshi::{event_ticker}"));
+            if event_key.is_some_and(|key| seen_events.insert(key)) {
+                all_events.push(event);
+            }
+        }
+        for market in markets {
+            let market_key = live_market_row_key(&market);
+            if seen_markets.insert(market_key) {
+                live_markets.push(market);
+            }
         }
     }
 
@@ -3913,31 +4245,7 @@ async fn cmd_finance_odds_search_live_no_csv(
     write_back_live_markets_to_db(&ranked_live_markets);
     all_events.truncate(final_limit.max(8));
     live_markets = select_diverse_live_markets(&ranked_live_markets, final_limit);
-    for source in ["kalshi", "polymarket"] {
-        let source_available = ranked_live_markets.iter().any(|row| {
-            row.get("source")
-                .and_then(|v| v.as_str())
-                .is_some_and(|value| value == source)
-        });
-        let source_selected = live_markets.iter().any(|row| {
-            row.get("source")
-                .and_then(|v| v.as_str())
-                .is_some_and(|value| value == source)
-        });
-        if !source_available || source_selected {
-            continue;
-        }
-        if let Some(candidate) = ranked_live_markets.iter().find(|row| {
-            row.get("source")
-                .and_then(|v| v.as_str())
-                .is_some_and(|value| value == source)
-        }) {
-            if live_markets.len() >= final_limit && !live_markets.is_empty() {
-                live_markets.pop();
-            }
-            live_markets.push(candidate.clone());
-        }
-    }
+    ensure_live_source_diversity(&mut live_markets, &ranked_live_markets, final_limit);
 
     // --orderbook: same as the FTS path — only attach to the slice the user sees.
     if let Some(depth) = orderbook_depth {
@@ -4318,6 +4626,13 @@ mod odds_live_tests {
     }
 
     #[test]
+    fn live_search_fallback_queries_cover_power_grid_intent() {
+        let fallbacks = live_search_fallback_queries("electricity shortage");
+        assert!(fallbacks.contains(&"electric utility".to_string()));
+        assert!(fallbacks.contains(&"data center power".to_string()));
+    }
+
+    #[test]
     fn live_query_kalshi_series_hints_cover_macro_queries() {
         let fed_hints = live_query_kalshi_series_hints(&live_query_terms("fed rate cut june"));
         assert!(fed_hints.contains(&"KXFEDDECISION".to_string()));
@@ -4415,6 +4730,22 @@ mod odds_live_tests {
             &query_terms,
         );
         assert!(cut_score > hold_score);
+    }
+
+    #[test]
+    fn live_direction_specificity_prefers_bearish_markets_for_crash_queries() {
+        let query_terms = live_query_terms("bitcoin crash");
+        let down_score = live_direction_specificity_score(
+            "Will the price of Bitcoin be below $70,000 on May 8?",
+            "Bitcoin price on May 8",
+            &query_terms,
+        );
+        let up_score = live_direction_specificity_score(
+            "Will Bitcoin hit $150k by June 30, 2026?",
+            "When will Bitcoin hit $150k?",
+            &query_terms,
+        );
+        assert!(down_score > up_score);
     }
 
     #[test]
@@ -4562,5 +4893,121 @@ mod odds_live_tests {
             .collect();
 
         assert_eq!(tickers, vec!["relevant-1", "relevant-2"]);
+    }
+
+    #[test]
+    fn select_diverse_live_markets_does_not_fill_with_unrelated_when_direct_exists() {
+        let ranked = vec![
+            serde_json::json!({
+                "source": "kalshi",
+                "ticker": "direct",
+                "event_ticker": "event-a",
+                "title": "Electric utility bill protection",
+                "match_score": 120,
+                "match_terms": ["electricity"],
+                "status": "active",
+                "volume_usd": 1000.0
+            }),
+            serde_json::json!({
+                "source": "polymarket",
+                "ticker": "unrelated",
+                "event_ticker": "event-b",
+                "title": "High liquidity but unrelated",
+                "match_score": 300,
+                "match_terms": [],
+                "status": "open",
+                "volume_usd": 1_000_000.0
+            }),
+        ];
+
+        let selected = select_diverse_live_markets(&ranked, 4);
+        let tickers: Vec<String> = selected
+            .iter()
+            .filter_map(|row| {
+                row.get("ticker")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+
+        assert_eq!(tickers, vec!["direct"]);
+    }
+
+    #[test]
+    fn source_diversity_does_not_add_unrelated_source_when_direct_selected() {
+        let ranked = vec![
+            serde_json::json!({
+                "source": "kalshi",
+                "ticker": "direct",
+                "event_ticker": "event-a",
+                "title": "Electric utility bill protection",
+                "match_score": 120,
+                "match_terms": ["electricity"],
+                "status": "active",
+                "volume_usd": 1000.0
+            }),
+            serde_json::json!({
+                "source": "polymarket",
+                "ticker": "unrelated",
+                "event_ticker": "event-b",
+                "title": "Epstein storage units raided in 2026?",
+                "match_score": 300,
+                "match_terms": [],
+                "status": "open",
+                "volume_usd": 1_000_000.0
+            }),
+        ];
+
+        let mut selected = vec![ranked[0].clone()];
+        ensure_live_source_diversity(&mut selected, &ranked, 4);
+        let tickers: Vec<String> = selected
+            .iter()
+            .filter_map(|row| {
+                row.get("ticker")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+
+        assert_eq!(tickers, vec!["direct"]);
+    }
+
+    #[test]
+    fn source_diversity_adds_missing_source_when_relevant_candidate_exists() {
+        let ranked = vec![
+            serde_json::json!({
+                "source": "kalshi",
+                "ticker": "kalshi-direct",
+                "event_ticker": "event-a",
+                "title": "Will there be a recession in 2026?",
+                "match_score": 120,
+                "match_terms": ["recession"],
+                "status": "active",
+                "volume_usd": 1000.0
+            }),
+            serde_json::json!({
+                "source": "polymarket",
+                "ticker": "poly-direct",
+                "event_ticker": "event-b",
+                "title": "Recession in 2026?",
+                "match_score": 119,
+                "match_terms": ["recession"],
+                "status": "open",
+                "volume_usd": 900.0
+            }),
+        ];
+
+        let mut selected = vec![ranked[0].clone()];
+        ensure_live_source_diversity(&mut selected, &ranked, 4);
+        let tickers: Vec<String> = selected
+            .iter()
+            .filter_map(|row| {
+                row.get("ticker")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+
+        assert_eq!(tickers, vec!["kalshi-direct", "poly-direct"]);
     }
 }

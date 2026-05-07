@@ -84,27 +84,31 @@ Claude Desktop locally — Step 3 was sufficient.
 
 If they want Market Search in claude.ai web or ChatGPT, ask:
 
-> "How do you want to connect this? Three options:
+> "How do you want to connect this? Two options:
 > 1. **Temporary URL (instant, 5 sec)** — best for trying it out once.
 >    URL dies when you close the terminal.
 > 2. **Permanent URL (free, ~3 min setup)** — best for everyday use.
 >    Requires a one-time email or Google/GitHub signup at ngrok.com.
-> 3. **Self-host (paid, ~10 min setup)** — most secure, your data
->    never leaves your machine. Requires you own a domain (~$10/yr)
->    and a small VPS (~$5/mo). See SELFHOST.md."
+>
+> (A third 'self-host' mode where TLS keys live on the user's laptop
+> and a VPS gateway only routes encrypted bytes is described in
+> SELFHOST.md, but it's a design spec — not implemented yet. Don't
+> offer it as a setup option.)"
 
 ### If they pick option 1 (temporary):
 
 Run this in a terminal that the user will keep open:
 
 ```bash
-market-search mcp share --provider tunnelmole
+market-search mcp share --provider cloudflare
 ```
 
-(If `npx` / Node.js isn't installed, fall back to `--provider cloudflare`
-which only needs the `cloudflared` binary. On macOS: `brew install
-cloudflared`. On Linux: download from
-https://github.com/cloudflare/cloudflared/releases/latest .)
+This needs the `cloudflared` binary. If missing:
+- macOS: `brew install cloudflared`
+- Linux: download from https://github.com/cloudflare/cloudflared/releases/latest
+
+(Tunnelmole is also available via `--provider tunnelmole` but dies
+silently after a few hours; recommend cloudflared as the default temp.)
 
 The command prints a block with a URL ending in `/mcp`. Copy that URL
 and tell the user:
@@ -162,16 +166,18 @@ use is far below this).
 
 Have them paste the URL into claude.ai or ChatGPT as described above.
 
-### If they pick option 3 (self-host):
+### Self-host (NOT a setup option):
 
-Open `SELFHOST.md` in this repo and walk them through the architecture.
-Tell them: "This is the most secure option but the implementation is in
-design phase. Pick option 1 or 2 for now and revisit when SELFHOST.md
-moves out of design."
+If the user asks about it, explain: "Self-host is a design spec, not
+runnable code yet. SELFHOST.md describes a future architecture where
+your laptop holds the TLS private keys and a VPS gateway only routes
+encrypted bytes (so even a compromised gateway can't decrypt your MCP
+traffic). It requires gateway code that doesn't exist in this build.
+For sensitive work today, use `market-search mcp` over stdio locally —
+no public URL means no public attack surface."
 
-Or: if they want to contribute / pilot, point them at the GitHub issues
-labeled `selfhost` and offer to walk them through Phase 0 (frp prototype
-on Hetzner with a real Let's Encrypt cert).
+If they want to contribute, point them at SELFHOST.md and the GitHub
+repo issues.
 
 ## Step 5 — Verify end-to-end
 
@@ -200,8 +206,8 @@ real-time data" or similar, the connector isn't working — check:
   (a stray comma, mismatched braces). Read the file back and parse it
   to confirm.
 - **`market-search mcp share --provider tunnelmole` errors with "npx not found"**:
-  Node.js isn't installed. Either install Node from nodejs.org, or
-  switch to `--provider cloudflare` which has no Node dependency.
+  Node.js isn't installed. Just use the default `--provider cloudflare` instead
+  (no Node dependency, more reliable).
 - **`market-search mcp share --provider cloudflare` errors with "cloudflared not
   found"**: Install cloudflared as in option 1 above.
 - **Public URL works in `curl` but not in claude.ai**: Most often the

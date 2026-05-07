@@ -71,7 +71,11 @@ impl BojPreset {
     fn queries(&self) -> Vec<(&'static str, &'static str, &'static str)> {
         // (db, codes_comma_sep, label)
         match self {
-            Self::PolicyRate => vec![("FM01", "STRDCLUCON", "Uncollateralized Overnight Call Rate (BOJ policy operating target, daily avg)")],
+            Self::PolicyRate => vec![(
+                "FM01",
+                "STRDCLUCON",
+                "Uncollateralized Overnight Call Rate (BOJ policy operating target, daily avg)",
+            )],
             Self::CallRate => vec![("FM01", "STRDCLUCON", "Call Rate (daily avg)")],
             Self::MonetaryBase => vec![("MD01", "MABS1AN11", "Monetary Base (monthly)")],
             Self::BalanceSheet => vec![("BS01", "MABJMTA", "BOJ Total Assets (monthly)")],
@@ -81,7 +85,11 @@ impl BojPreset {
             ],
             Self::Tankan => vec![
                 ("CO", "TK99F1000601GCQ01000", "TANKAN Mfg Large DI (actual)"),
-                ("CO", "TK99F2000601GCQ01000", "TANKAN Non-Mfg Large DI (actual)"),
+                (
+                    "CO",
+                    "TK99F2000601GCQ01000",
+                    "TANKAN Non-Mfg Large DI (actual)",
+                ),
             ],
             Self::Fx => vec![("FM08", "FXERD04", "USD/JPY (17:00 JST)")],
         }
@@ -101,7 +109,9 @@ pub async fn fetch_boj(req: BojRequest) -> Result<BojResponse> {
             .collect()
     } else if let (Some(ref db), codes) = (&req.db, &req.codes) {
         if codes.is_empty() {
-            return Err(Error::InvalidInput("boj requires --codes when using --db".to_string()));
+            return Err(Error::InvalidInput(
+                "boj requires --codes when using --db".to_string(),
+            ));
         }
         vec![(db.clone(), codes.join(","), "custom".to_string())]
     } else {
@@ -129,7 +139,10 @@ pub async fn fetch_boj(req: BojRequest) -> Result<BojResponse> {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            warnings.push(format!("boj {db} returned {status}: {}", body.chars().take(200).collect::<String>()));
+            warnings.push(format!(
+                "boj {db} returned {status}: {}",
+                body.chars().take(200).collect::<String>()
+            ));
             continue;
         }
 
@@ -142,9 +155,15 @@ pub async fn fetch_boj(req: BojRequest) -> Result<BojResponse> {
         };
 
         // Check status.
-        let status = body.get("STATUS").and_then(|v| v.as_str().or_else(|| v.as_i64().map(|_| ""))).unwrap_or("");
+        let status = body
+            .get("STATUS")
+            .and_then(|v| v.as_str().or_else(|| v.as_i64().map(|_| "")))
+            .unwrap_or("");
         if status != "200" && status != "" {
-            let msg = body.get("MESSAGE").and_then(|v| v.as_str()).unwrap_or("unknown error");
+            let msg = body
+                .get("MESSAGE")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
             warnings.push(format!("boj {db}: {msg}"));
             continue;
         }
@@ -159,15 +178,40 @@ pub async fn fetch_boj(req: BojRequest) -> Result<BojResponse> {
         };
 
         for item in items {
-            let code = item.get("SERIES_CODE").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let name = item.get("NAME_OF_TIME_SERIES").and_then(|v| v.as_str()).unwrap_or(label).to_string();
-            let unit = item.get("UNIT").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let freq = item.get("FREQUENCY").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let code = item
+                .get("SERIES_CODE")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = item
+                .get("NAME_OF_TIME_SERIES")
+                .and_then(|v| v.as_str())
+                .unwrap_or(label)
+                .to_string();
+            let unit = item
+                .get("UNIT")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let freq = item
+                .get("FREQUENCY")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
 
-            let dates_val = item.get("VALUES").and_then(|v| v.get("SURVEY_DATES")).or_else(|| item.get("SURVEY_DATES"));
-            let values_val = item.get("VALUES").and_then(|v| v.get("VALUES")).or_else(|| item.get("VALUES"));
+            let dates_val = item
+                .get("VALUES")
+                .and_then(|v| v.get("SURVEY_DATES"))
+                .or_else(|| item.get("SURVEY_DATES"));
+            let values_val = item
+                .get("VALUES")
+                .and_then(|v| v.get("VALUES"))
+                .or_else(|| item.get("VALUES"));
 
-            let (dates, values) = match (dates_val.and_then(|v| v.as_array()), values_val.and_then(|v| v.as_array())) {
+            let (dates, values) = match (
+                dates_val.and_then(|v| v.as_array()),
+                values_val.and_then(|v| v.as_array()),
+            ) {
                 (Some(d), Some(v)) => (d, v),
                 _ => continue,
             };

@@ -254,8 +254,7 @@ pub async fn fetch_ibkr_snapshot(req: &SnapshotRequest) -> Result<Vec<TickerSnap
     // hit an entitlement failure while requesting Realtime (1).  Wrapped in
     // an Arc<AtomicI32> so concurrent ticker tasks see the flip and stamp
     // their snapshots with the right session_state/freshness.
-    let effective_type =
-        std::sync::Arc::new(std::sync::atomic::AtomicI32::new(requested_type));
+    let effective_type = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(requested_type));
 
     normalize_tickers(&req.tickers)
         .into_iter()
@@ -418,13 +417,7 @@ pub async fn fetch_ibkr_timeseries(
 
     for ticker in normalize_tickers(&req.tickers) {
         let (display_name, contract_input) = parse_ibkr_ticker(&ticker);
-        let detail = match resolve_contract_detail(
-            &client,
-            &contract_input,
-            timeout_secs,
-        )
-        .await
-        {
+        let detail = match resolve_contract_detail(&client, &contract_input, timeout_secs).await {
             Ok(detail) => detail,
             Err(err) => {
                 errors.push(TimeseriesError {
@@ -623,7 +616,8 @@ pub async fn fetch_ibkr_options(req: &OptionsRequest) -> Result<OptionsResponse>
     )
     .await?;
 
-    let underlying_snapshot = fetch_contract_snapshot(&client, &detail.contract, timeout_secs).await?;
+    let underlying_snapshot =
+        fetch_contract_snapshot(&client, &detail.contract, timeout_secs).await?;
     let underlying_price = underlying_snapshot
         .current_price
         .or(underlying_snapshot.previous_close)
@@ -1101,8 +1095,10 @@ fn build_options_response(
     };
 
     let atm_iv_call = {
-        let mut candidates: Vec<&OptionContract> =
-            calls.iter().filter(|c| c.implied_volatility.is_some()).collect();
+        let mut candidates: Vec<&OptionContract> = calls
+            .iter()
+            .filter(|c| c.implied_volatility.is_some())
+            .collect();
         candidates.sort_by(|a, b| {
             (a.strike - underlying_price)
                 .abs()
@@ -1112,8 +1108,10 @@ fn build_options_response(
         candidates.first().and_then(|c| c.implied_volatility)
     };
     let atm_iv_put = {
-        let mut candidates: Vec<&OptionContract> =
-            puts.iter().filter(|p| p.implied_volatility.is_some()).collect();
+        let mut candidates: Vec<&OptionContract> = puts
+            .iter()
+            .filter(|p| p.implied_volatility.is_some())
+            .collect();
         candidates.sort_by(|a, b| {
             (a.strike - underlying_price)
                 .abs()
@@ -1123,9 +1121,7 @@ fn build_options_response(
         candidates.first().and_then(|p| p.implied_volatility)
     };
     let skew_near_put_call_iv_ratio = match (atm_iv_call, atm_iv_put) {
-        (Some(call_iv), Some(put_iv)) if call_iv > 0.0 && put_iv > 0.0 => {
-            Some(put_iv / call_iv)
-        }
+        (Some(call_iv), Some(put_iv)) if call_iv > 0.0 && put_iv > 0.0 => Some(put_iv / call_iv),
         _ => None,
     };
     let has_iv_data = atm_iv_call.is_some() || atm_iv_put.is_some();
@@ -1640,10 +1636,7 @@ async fn resolve_contract_detail(
     // IBKR may return them in any order, so sort by last_trade_date ascending
     // and take the first.
     if all.len() > 1
-        && matches!(
-            input.sec_type.as_deref(),
-            Some("FUT") | Some("FOP")
-        )
+        && matches!(input.sec_type.as_deref(), Some("FUT") | Some("FOP"))
         && input.expiry.as_ref().map_or(true, |e| e.is_empty())
     {
         all.sort_by(|a, b| {

@@ -21,7 +21,7 @@ Now it has **market search**. It sees the odds of recession on Kalshi and Polyma
   KALSHI:KXRECSSNBER-26:YES    30 candles    22% → 36%   +63.6%
 ```
 
-20 tools. 23 data providers. Stocks, options, crypto, futures, forex, prediction markets, FRED macro, Treasury auctions, SEC filings, central bank data from the Fed, ECB, BOJ, BOE, and BIS. Runs locally. No paid API keys.
+21 tools. 23 data providers. Stocks, options, crypto, futures, forex, prediction markets, FRED macro, Treasury auctions, SEC filings, central bank data from the Fed, ECB, BOJ, BOE, and BIS. Runs locally. No paid API keys.
 
 ## Install
 
@@ -39,8 +39,9 @@ Installs `market-search` to `~/.cargo/bin/`. Requires Rust ([rustup.rs](https://
 
 ```bash
 git clone https://github.com/efoltyn/market-search.git
-cd market-search/eli
+cd market-search
 cargo build --release
+./target/release/market-search --help
 ```
 
 **3. Let your AI install it**
@@ -70,20 +71,21 @@ Works with Claude Code, Codex, Gemini CLI, Cursor, Claude Desktop, or any MCP-co
 
 ## Public URL for claude.ai web / ChatGPT custom apps
 
-For claude.ai or ChatGPT (which need a public HTTPS URL to reach your local server), market-search ships a built-in tunnel command:
+For claude.ai or ChatGPT (which need a public HTTPS URL to reach your local server), market-search ships a built-in tunnel command. Three providers ship today:
 
 ```bash
-market-search mcp share --provider tunnelmole                            # temporary, instant
-market-search mcp share --provider cloudflare                            # temporary, instant
+market-search mcp share --provider cloudflare                            # temporary, instant (default)
+market-search mcp share --provider tunnelmole                            # temporary, instant (less reliable)
 market-search mcp share --provider ngrok --domain mysub.ngrok-free.dev   # permanent, requires free ngrok account
-market-search mcp share --provider self-host                             # see SELFHOST.md (in design)
 ```
 
 The command boots the local MCP server, spawns the tunnel binary, parses the public URL from its output, and prints a paste-ready block for claude.ai's connector dialog or ChatGPT's apps & connectors page.
 
+> **Self-host / sovereign mode is NOT implemented yet** — `--provider self-host` is a placeholder that errors out. The planned architecture (laptop holds TLS keys, gateway only routes encrypted bytes) is described in [SELFHOST.md](SELFHOST.md) as a design spec. For sensitive use today, run `market-search mcp` locally over stdio (no public URL exposure).
+
 ## Tools
 
-The 20 tools below are the MCP surface — what your AI sees when you connect via `market-search mcp`. They're the core of the project.
+The 21 tools below are the MCP surface — what your AI sees when you connect via `market-search mcp`. They're the core of the project.
 
 The CLI binary also ships two **experimental** non-MCP subcommands: `market-search web` (basic crawl/search/read tools) and `market-search picks` (logs report picks to track performance over time). Neither is exposed via MCP and neither is core. They're shipped as-is; **contributors welcome to improve or replace them**. If you're here to use Market Search with an AI, ignore both.
 
@@ -91,6 +93,7 @@ The CLI binary also ships two **experimental** non-MCP subcommands: `market-sear
 | Tool | What it does | Example |
 |---|---|---|
 | `finance_timeseries` | OHLCV candles from 9 providers. Auto-routes by ticker prefix. Mix stocks, ETFs, crypto, futures, FX, FRED macro, prediction markets in one call. | `--tickers SPY,DGS10,BN:ETH,CL=F --range 90d` |
+| `finance_movers` | Largest day movers by percent, market cap, dollar volume, or estimated market-cap value change. Uses IBKR when configured, Yahoo otherwise. | `--sort-by value_change --min-market-cap 2B` |
 | `finance_options` | Full options chain: IV, max pain, put/call ratio, skew. `--all` parallelizes every expiration. | `--ticker SPY --all` |
 | `finance_fundamentals` | Income statement, P/E, margins, ROE, debt/equity, dividend yield | `--ticker NVDA` |
 | `finance_search` | Ticker symbol lookup + FRED macro series discovery | `--query "semiconductor"` |
@@ -111,7 +114,7 @@ The CLI binary also ships two **experimental** non-MCP subcommands: `market-sear
 | `finance_fiscal` | National debt, Treasury cash balance, average interest rates by security | `--kind debt` |
 | `finance_stress` | OFR Financial Stress Index with credit/equity/funding/vol decomposition | `--range 90` |
 | `finance_volsurface` | CBOE vol indices: VIX, VIX9D, VIX3M, VIX6M, VIX1Y, VVIX, OVX, GVZ, SKEW | `--symbols VIX,VVIX,SKEW` |
-| `finance_filings` | SEC filings: 10-K, 10-Q, 8-K, 20-F with accession numbers and URLs | `--ticker NVDA --forms 10-K` |
+| `finance_filings` | Download recent SEC filings by ticker; returns URLs, local primary docs, and saved index JSON | `--ticker NVDA --forms 10-K --limit 3` |
 | `finance_curve` | Futures forward curves for energy, metals, grains | `--commodity gold` |
 
 ### Central banks

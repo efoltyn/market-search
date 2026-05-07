@@ -31,7 +31,9 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
                 if let Some(quotes) = json["quotes"].as_array() {
                     for q in quotes {
                         let symbol = q["symbol"].as_str().unwrap_or_default();
-                        if symbol.is_empty() { continue; }
+                        if symbol.is_empty() {
+                            continue;
+                        }
                         yahoo_results.push(SearchItem {
                             symbol: symbol.to_string(),
                             name: q["shortname"]
@@ -57,8 +59,8 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
     // FRED's search_rank misfires on words like "apple" → returns bananas/avocados/orange juice
     // commodity series while Yahoo correctly surfaces AAPL with a high score.
     const COMMON_NOUN_AMBIGUOUS: &[&str] = &[
-        "apple", "orange", "peach", "cotton", "sugar", "butter",
-        "lemon", "berry", "wheat", "corn", "rice", "salt",
+        "apple", "orange", "peach", "cotton", "sugar", "butter", "lemon", "berry", "wheat", "corn",
+        "rice", "salt",
         // Commodity nouns: Yahoo correctly surfaces the equity ETF (GLD, SLV,
         // CPER, BITO) while FRED returns commodity-pricing series with high
         // search_rank. Suppress FRED when Yahoo dominates.
@@ -98,11 +100,7 @@ pub async fn fetch_search(req: SearchRequest) -> Result<SearchResponse> {
 }
 
 /// Determine which provider is most relevant for this query.
-fn determine_preferred_provider(
-    query: &str,
-    yahoo: &[SearchItem],
-    fred: &[SearchItem],
-) -> String {
+fn determine_preferred_provider(query: &str, yahoo: &[SearchItem], fred: &[SearchItem]) -> String {
     let raw = query.trim();
     let q = raw.to_ascii_lowercase();
 
@@ -112,10 +110,31 @@ fn determine_preferred_provider(
 
     // Explicit macro intent → fred
     const FRED_TERMS: &[&str] = &[
-        "inflation", "cpi", "pce", "ppi", "gdp", "unemployment", "employment", "payroll",
-        "jobs", "labor", "mortgage rate", "yield", "treasury", "fed fund", "federal funds",
-        "recession", "sentiment", "consumer confidence", "housing starts", "claims",
-        "delinquency", "money supply", "m2", "balance sheet", "debt to gdp",
+        "inflation",
+        "cpi",
+        "pce",
+        "ppi",
+        "gdp",
+        "unemployment",
+        "employment",
+        "payroll",
+        "jobs",
+        "labor",
+        "mortgage rate",
+        "yield",
+        "treasury",
+        "fed fund",
+        "federal funds",
+        "recession",
+        "sentiment",
+        "consumer confidence",
+        "housing starts",
+        "claims",
+        "delinquency",
+        "money supply",
+        "m2",
+        "balance sheet",
+        "debt to gdp",
     ];
     if FRED_TERMS.iter().any(|term| q.contains(term)) {
         return "fred".to_string();
@@ -123,8 +142,8 @@ fn determine_preferred_provider(
 
     // Explicit instrument intent → yahoo
     const YAHOO_TERMS: &[&str] = &[
-        "stock", "stocks", "share", "shares", "etf", "etfs", "option", "options",
-        "future", "futures", "earnings", "dividend", "ipo",
+        "stock", "stocks", "share", "shares", "etf", "etfs", "option", "options", "future",
+        "futures", "earnings", "dividend", "ipo",
     ];
     if YAHOO_TERMS.iter().any(|term| q.contains(term)) {
         return "yahoo".to_string();
@@ -201,17 +220,35 @@ async fn search_fred_api(query: &str, api_key: &str) -> Result<Vec<SearchItem>> 
 
     let mut items = Vec::new();
     for s in &series {
-        let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let freq = s.get("frequency_short").and_then(|v| v.as_str()).unwrap_or("");
+        let id = s
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let title = s
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let freq = s
+            .get("frequency_short")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let units = s.get("units_short").and_then(|v| v.as_str()).unwrap_or("");
-        let sa = s.get("seasonal_adjustment_short").and_then(|v| v.as_str()).unwrap_or("");
+        let sa = s
+            .get("seasonal_adjustment_short")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
-        if id.is_empty() { continue; }
+        if id.is_empty() {
+            continue;
+        }
 
         // Build descriptive name with metadata inline
         let name = if !freq.is_empty() || !units.is_empty() {
-            format!("{} [{} {} {}]", title, freq, units, sa).trim_end().to_string()
+            format!("{} [{} {} {}]", title, freq, units, sa)
+                .trim_end()
+                .to_string()
         } else {
             title
         };
@@ -279,7 +316,9 @@ fn search_fred_catalog(query: &str) -> Vec<SearchItem> {
         .filter(|(id, name)| {
             let id_lower = id.to_lowercase();
             let name_lower = name.to_lowercase();
-            words.iter().all(|w| id_lower.contains(w) || name_lower.contains(w))
+            words
+                .iter()
+                .all(|w| id_lower.contains(w) || name_lower.contains(w))
         })
         .map(|(id, name)| SearchItem {
             symbol: id.to_string(),

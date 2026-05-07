@@ -117,7 +117,11 @@ pub async fn fetch_boe(req: BoeRequest) -> Result<BoeResponse> {
         ));
     };
 
-    let codes_str = code_labels.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>().join(",");
+    let codes_str = code_labels
+        .iter()
+        .map(|(c, _)| c.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
 
     // BOE date format: DD/Mon/YYYY
     let start = req.start.as_deref().unwrap_or("01/Jan/2025");
@@ -130,7 +134,10 @@ pub async fn fetch_boe(req: BoeRequest) -> Result<BoeResponse> {
 
     let resp = client
         .get(&url)
-        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        )
         .send()
         .await
         .map_err(|e| Error::Provider(format!("boe fetch failed: {e}")))?;
@@ -167,16 +174,21 @@ pub async fn fetch_boe(req: BoeRequest) -> Result<BoeResponse> {
         .map(|(i, c)| (i, c.trim().to_string()))
         .collect();
 
-    let mut by_code: std::collections::BTreeMap<String, Vec<BoeObservation>> = std::collections::BTreeMap::new();
+    let mut by_code: std::collections::BTreeMap<String, Vec<BoeObservation>> =
+        std::collections::BTreeMap::new();
 
     for line in lines {
         let fields: Vec<&str> = line.split(',').collect();
-        if fields.is_empty() { continue; }
+        if fields.is_empty() {
+            continue;
+        }
 
         // BOE date in response: "DD Mon YYYY" (e.g. "02 Jan 2025")
         let date_raw = fields[0].trim();
         let period = parse_boe_date(date_raw).unwrap_or_default();
-        if period.is_empty() { continue; }
+        if period.is_empty() {
+            continue;
+        }
 
         for &(idx, ref code) in &code_indices {
             let val_raw = fields.get(idx).map(|s| s.trim()).unwrap_or("");
@@ -190,7 +202,10 @@ pub async fn fetch_boe(req: BoeRequest) -> Result<BoeResponse> {
             by_code
                 .entry(code.clone())
                 .or_default()
-                .push(BoeObservation { period: period.clone(), value });
+                .push(BoeObservation {
+                    period: period.clone(),
+                    value,
+                });
         }
     }
 
@@ -202,9 +217,21 @@ pub async fn fetch_boe(req: BoeRequest) -> Result<BoeResponse> {
     let series: Vec<BoeSeries> = by_code
         .into_iter()
         .map(|(code, obs)| {
-            let label = label_map.get(&code).cloned().unwrap_or_else(|| code.clone());
-            let key = if code.is_empty() { None } else { Some(code.clone()) };
-            BoeSeries { code, key, label, observations: obs }
+            let label = label_map
+                .get(&code)
+                .cloned()
+                .unwrap_or_else(|| code.clone());
+            let key = if code.is_empty() {
+                None
+            } else {
+                Some(code.clone())
+            };
+            BoeSeries {
+                code,
+                key,
+                label,
+                observations: obs,
+            }
         })
         .collect();
 
@@ -219,15 +246,25 @@ pub async fn fetch_boe(req: BoeRequest) -> Result<BoeResponse> {
 /// Parse BOE date "DD Mon YYYY" → "YYYY-MM-DD".
 fn parse_boe_date(raw: &str) -> Option<String> {
     let parts: Vec<&str> = raw.split_whitespace().collect();
-    if parts.len() != 3 { return None; }
+    if parts.len() != 3 {
+        return None;
+    }
     let day: u32 = parts[0].parse().ok()?;
     let month = match parts[1].to_ascii_lowercase().as_str() {
-        "jan" => 1, "feb" => 2, "mar" => 3, "apr" => 4,
-        "may" => 5, "jun" => 6, "jul" => 7, "aug" => 8,
-        "sep" => 9, "oct" => 10, "nov" => 11, "dec" => 12,
+        "jan" => 1,
+        "feb" => 2,
+        "mar" => 3,
+        "apr" => 4,
+        "may" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "aug" => 8,
+        "sep" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "dec" => 12,
         _ => return None,
     };
     let year: i32 = parts[2].parse().ok()?;
-    NaiveDate::from_ymd_opt(year, month, day)
-        .map(|d| d.format("%Y-%m-%d").to_string())
+    NaiveDate::from_ymd_opt(year, month, day).map(|d| d.format("%Y-%m-%d").to_string())
 }

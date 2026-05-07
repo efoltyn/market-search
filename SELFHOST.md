@@ -1,13 +1,33 @@
-# Market Search — Self-Host Architecture
+# Market Search self-hosting
 
-**Status: design phase.** The implementation (`eli-gateway` crate +
-sovereign mode in the `market-search` binary) is on the roadmap below. For now,
-this document describes the architecture so you can review the threat
-model and contribute to the build.
+> **STATUS: NOT IMPLEMENTED.** This document is a design spec for a future
+> sovereign self-host mode. It is **not** a runnable setup guide. The
+> `market-search mcp share --provider self-host` command currently exits
+> with an error pointing here.
+>
+> If you ran `cargo install market-search` and want a public URL today, use
+> `--provider ngrok` (permanent, free with account) or `--provider cloudflare`
+> (instant temporary). See the README.
 
-If you just want to use Market Search today and don't care about
-sovereignty, use `market-search mcp share --provider ngrok` (permanent, free) or
-`--provider tunnelmole` (temporary, instant). See the README.
+## What works today vs what's planned
+
+| Mode | Command | Status | Who can decrypt MCP traffic? |
+|---|---|---:|---|
+| Local stdio MCP | `market-search mcp` | Shipped | No public network path — nobody but you |
+| Cloudflare quick tunnel | `market-search mcp share --provider cloudflare` | Shipped | Cloudflare terminates public TLS |
+| Tunnelmole | `market-search mcp share --provider tunnelmole` | Shipped (less reliable — dies after hours) | Tunnelmole terminates public TLS |
+| Ngrok with reserved subdomain | `market-search mcp share --provider ngrok --domain ...` | Shipped | Ngrok terminates public TLS |
+| **Sovereign self-host** | `market-search mcp share --provider self-host` | **Not shipped** | Planned: TLS terminates on YOUR laptop |
+
+Self-host's distinguishing property is **NOT** that "data never leaves your
+machine" — your AI still sends MCP requests and receives responses, and
+market-search still fetches data from external providers like Yahoo / FRED.
+The actual property is: **third-party tunnel providers cannot decrypt MCP
+traffic** because TLS terminates on your laptop, not at their edge. The
+gateway VPS sees only encrypted bytes plus SNI hostname / source IP / byte
+counts.
+
+The rest of this document is the architectural design for that future mode.
 
 ---
 

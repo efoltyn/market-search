@@ -45,6 +45,94 @@
             }
         },
         {
+            "name": "finance_movers",
+            "description": "Largest day movers across Yahoo Finance day-gainer/day-loser screeners or an explicit ticker list. Filter by direction, percent move, price, volume, min/max market cap, and sort by percent, market cap, dollar volume, or estimated market-cap value change. In provider=auto mode, uses IBKR Gateway for price/change when configured and Yahoo Finance otherwise; Yahoo is also used to enrich IBKR results with market cap metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "universe": {
+                        "type": "string",
+                        "description": "Candidate universe: day_movers, day_gainers, day_losers, or tickers. Default day_movers."
+                    },
+                    "tickers": {
+                        "type": "string",
+                        "description": "Comma-separated explicit tickers. If supplied, overrides screener discovery."
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["gainers", "losers", "both"],
+                        "description": "Direction filter. Default both."
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["percent", "abs_percent", "market_cap", "value_change", "dollar_volume", "volume"],
+                        "description": "Ranking metric. value_change = abs(market_cap * change_pct). Default value_change."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "yahoo", "ibkr"],
+                        "description": "Price/change provider. Auto uses IBKR when configured, otherwise Yahoo."
+                    },
+                    "min_market_cap": {
+                        "type": "string",
+                        "description": "Minimum market cap, e.g. 500M, 2B, 1.5T."
+                    },
+                    "max_market_cap": {
+                        "type": "string",
+                        "description": "Maximum market cap, e.g. 2B."
+                    },
+                    "min_change_pct": {
+                        "type": "number",
+                        "description": "Minimum absolute percent move. Default 0."
+                    },
+                    "min_price": {
+                        "type": "number",
+                        "description": "Minimum last price. Default 5."
+                    },
+                    "min_volume": {
+                        "type": "integer",
+                        "description": "Minimum reported day volume."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of movers to return. Default 25."
+                    },
+                    "scan_limit": {
+                        "type": "integer",
+                        "description": "Candidate count per Yahoo screener leg before local filtering/sorting. Default 100, max 250."
+                    },
+                    "ibkr_account": {
+                        "type": "string",
+                        "description": "Optional IBKR account override."
+                    },
+                    "ibkr_host": {
+                        "type": "string",
+                        "description": "Optional IBKR host override."
+                    },
+                    "ibkr_port": {
+                        "type": "integer",
+                        "description": "Optional IBKR port override."
+                    },
+                    "ibkr_client_id": {
+                        "type": "integer",
+                        "description": "Optional IBKR client id override."
+                    },
+                    "ibkr_market_data_type": {
+                        "type": "integer",
+                        "description": "Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen."
+                    },
+                    "ibkr_timeout_secs": {
+                        "type": "integer",
+                        "description": "Optional IBKR timeout in seconds."
+                    },
+                    "include_extended_hours": {
+                        "type": "boolean",
+                        "description": "If true, also fetch pre-market / after-hours move and surface as extended_price, extended_change_pct, extended_session. Sort metrics combine regular + extended when this is enabled."
+                    }
+                }
+            }
+        },
+        {
             "name": "finance_rate_path",
             "description": "Aggregated Polymarket+Kalshi probabilities per FOMC meeting (hold/cut/hike buckets). DERIVED — combines multiple prediction markets per meeting via volume-weighted average. Returns: meetings[] (per-meeting hold/cut/hike + n_markets + volume_total, dates snapped to actual FOMC decision day), year_view (cuts_distribution, eoy_rate_distribution, cut_by_meeting_distribution from cardinality markets), compound_paths[] (joint multi-meeting Pause-Pause-Pause paths). For raw individual markets use finance_odds.",
             "inputSchema": {
@@ -241,7 +329,7 @@
         },
         {
             "name": "finance_filings",
-            "description": "Recent SEC filings (8-K, 10-K, 10-Q) for a ticker. Can download and inline document text for analysis.",
+            "description": "Download recent SEC filings by ticker. Returns SEC metadata, filing URLs, local primary-document paths, saved filing index JSON, and optionally all filing attachments. No filing text parsing or inline excerpting.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -257,13 +345,25 @@
                         "type": "integer",
                         "description": "Max filings (default: 5)"
                     },
+                    "download": {
+                        "type": "boolean",
+                        "description": "Download primary filing documents and index JSON to local cache. Default: true"
+                    },
+                    "download_all": {
+                        "type": "boolean",
+                        "description": "Download every file listed in each filing index, including exhibits/attachments. Default: false"
+                    },
                     "include_text": {
                         "type": "boolean",
-                        "description": "Download and inline document text excerpt"
+                        "description": "Deprecated alias for download=true; no text parsing or inline excerpt is performed"
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Max chars for inline excerpt"
+                        "description": "Deprecated; ignored because filings are downloaded raw"
+                    },
+                    "user_agent": {
+                        "type": "string",
+                        "description": "Optional SEC User-Agent override with contact email, e.g. eli-cli (mailto:me@example.com)"
                     }
                 },
                 "required": ["ticker"]

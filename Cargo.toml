@@ -1,10 +1,10 @@
 [package]
 name = "market-search"
-version = "0.2.5"
+version = "0.2.9"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "MCP server for getting markets data into AI assistants — 20 tools covering equities, options, futures curves, prediction markets, central banks, and more."
+description = "MCP server for getting markets data into AI assistants — 21 tools covering equities, options, futures curves, prediction markets, central banks, and more."
 readme = "README.md"
 keywords = ["mcp", "finance", "claude", "markets", "ai"]
 categories = ["command-line-utilities", "science"]
@@ -68,8 +68,8 @@ axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-eli-cli = { path = "crates/eli-cli", version = "0.2.2" }
-eli-core = { path = "crates/eli-core", version = "0.2.0" }
+eli-cli = { path = "crates/eli-cli", version = "0.2.4" }
+eli-core = { path = "crates/eli-core", version = "0.2.1" }
 eli-finance-types = { path = "crates/eli-finance-types", version = "0.2.0" }
 
 # ── dev build speed ────────────────────────────────────────────────────────────

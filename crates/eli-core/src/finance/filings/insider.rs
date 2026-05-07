@@ -1,5 +1,5 @@
 use super::super::*;
-use super::support::{sec_client, sec_fetch_submissions, sec_get_text, sec_lookup_cik};
+use super::support::{sec_client, sec_fetch_submissions, sec_lookup_cik};
 
 pub async fn fetch_insider(req: InsiderRequest, cache_dir: &Path) -> Result<InsiderResponse> {
     let ticker = req.ticker.trim().to_ascii_uppercase();

@@ -1,8 +1,5 @@
 use super::super::*;
-use super::support::{
-    best_effort_sec_filing_excerpt, html_to_text, sanitize_for_filename, sec_client,
-    sec_fetch_submissions, sec_get_text, sec_lookup_cik,
-};
+use super::support::{sec_client, sec_fetch_submissions, sec_get_bytes, sec_lookup_cik};
 
 pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<FilingsResponse> {
     let ticker = req.ticker.trim().to_ascii_uppercase();
@@ -24,7 +21,7 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
     let forms_set: std::collections::HashSet<String> = forms.into_iter().collect();
 
     let limit = req.limit.unwrap_or(5).clamp(1, 25);
-    let excerpt_max = req.max_chars.unwrap_or(SEC_DEFAULT_TEXT_MAX_CHARS).max(256);
+    let should_download = req.download || req.download_all || req.include_text;
 
     let sec_dir = cache_dir.join("finance").join("sec");
     std::fs::create_dir_all(&sec_dir)?;
@@ -122,40 +119,35 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
             size,
             url: url.clone(),
             filing_index_url: Some(filing_index_url),
+            download_dir: None,
+            primary_doc_path: None,
+            index_json_path: None,
+            downloaded_files: Vec::new(),
             text_path: None,
             text_excerpt: None,
         };
 
-        if req.include_text {
-            if let Some(url) = url {
-                // Download and convert to text; store on disk and return an excerpt inline.
-                let raw = sec_get_text(&client, &url).await?;
-                let text = html_to_text(&raw);
-
-                let filings_dir = cache_dir.join("finance").join("filings").join(&ticker);
-                std::fs::create_dir_all(&filings_dir)?;
-                let safe_form = sanitize_for_filename(&doc.form);
-                let path = filings_dir.join(format!("{accession_nodash}_{safe_form}.txt"));
-                std::fs::write(&path, text.as_bytes())?;
-
-                doc.text_path = Some(path.display().to_string());
-                doc.text_excerpt = Some(best_effort_sec_filing_excerpt(
-                    &text,
-                    &doc.form,
-                    doc.items.as_deref(),
-                    excerpt_max,
-                ));
-            }
+        if should_download {
+            let download = download_filing_files(
+                &client,
+                cache_dir,
+                &ticker,
+                &accession_nodash,
+                &base,
+                &doc.filing_index_url.clone().unwrap_or_default(),
+                doc.primary_document.as_deref(),
+                req.download_all,
+            )
+            .await?;
+            doc.download_dir = Some(download.download_dir);
+            doc.primary_doc_path = download.primary_doc_path;
+            doc.index_json_path = download.index_json_path;
+            doc.downloaded_files = download.files;
         }
 
         out.push(doc);
         if out.len() >= limit {
             break;
-        }
-
-        // Be nice to SEC: small delay between doc fetches.
-        if req.include_text {
-            tokio::time::sleep(StdDuration::from_millis(125)).await;
         }
     }
 
@@ -166,4 +158,135 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
         generated_at: Utc::now(),
         filings: out,
     })
+}
+
+struct FilingDownloadResult {
+    download_dir: String,
+    primary_doc_path: Option<String>,
+    index_json_path: Option<String>,
+    files: Vec<FilingDownload>,
+}
+
+async fn download_filing_files(
+    client: &reqwest::Client,
+    cache_dir: &Path,
+    ticker: &str,
+    accession_nodash: &str,
+    base_url: &str,
+    index_url: &str,
+    primary_document: Option<&str>,
+    download_all: bool,
+) -> Result<FilingDownloadResult> {
+    let filing_dir = cache_dir
+        .join("finance")
+        .join("filings")
+        .join(ticker)
+        .join(accession_nodash);
+    std::fs::create_dir_all(&filing_dir)?;
+
+    let mut files = Vec::new();
+    let index_path = filing_dir.join("index.json");
+    let index_bytes = sec_get_bytes(client, index_url).await?;
+    std::fs::write(&index_path, &index_bytes)?;
+    files.push(FilingDownload {
+        kind: "index_json".to_string(),
+        filename: "index.json".to_string(),
+        url: index_url.to_string(),
+        path: index_path.display().to_string(),
+        bytes: Some(index_bytes.len() as u64),
+    });
+
+    let mut primary_doc_path = None;
+    let mut seen = std::collections::HashSet::new();
+    if let Some(filename) = primary_document.and_then(sec_archive_filename) {
+        seen.insert(filename.clone());
+        let url = archive_file_url(base_url, &filename);
+        let path = filing_dir.join(&filename);
+        let downloaded =
+            download_sec_archive_file(client, "primary_document", &filename, &url, &path).await?;
+        primary_doc_path = Some(downloaded.path.clone());
+        files.push(downloaded);
+    }
+
+    if download_all {
+        for filename in filing_index_document_names(&index_bytes) {
+            if filename.eq_ignore_ascii_case("index.json") || !seen.insert(filename.clone()) {
+                continue;
+            }
+            let url = archive_file_url(base_url, &filename);
+            let path = filing_dir.join(&filename);
+            files.push(
+                download_sec_archive_file(client, "attachment", &filename, &url, &path).await?,
+            );
+        }
+    }
+
+    Ok(FilingDownloadResult {
+        download_dir: filing_dir.display().to_string(),
+        primary_doc_path,
+        index_json_path: Some(index_path.display().to_string()),
+        files,
+    })
+}
+
+async fn download_sec_archive_file(
+    client: &reqwest::Client,
+    kind: &str,
+    filename: &str,
+    url: &str,
+    path: &Path,
+) -> Result<FilingDownload> {
+    let bytes = sec_get_bytes(client, url).await?;
+    std::fs::write(path, &bytes)?;
+    Ok(FilingDownload {
+        kind: kind.to_string(),
+        filename: filename.to_string(),
+        url: url.to_string(),
+        path: path.display().to_string(),
+        bytes: Some(bytes.len() as u64),
+    })
+}
+
+fn archive_file_url(base_url: &str, filename: &str) -> String {
+    format!("{}{}", base_url, filename.trim_start_matches('/'))
+}
+
+fn sec_archive_filename(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_start_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let filename = Path::new(trimmed).file_name()?.to_str()?.trim();
+    if filename.is_empty() || filename == "." || filename == ".." {
+        return None;
+    }
+    Some(filename.to_string())
+}
+
+#[derive(Deserialize)]
+struct FilingIndexJson {
+    directory: Option<FilingIndexDirectory>,
+}
+
+#[derive(Deserialize)]
+struct FilingIndexDirectory {
+    item: Option<Vec<FilingIndexItem>>,
+}
+
+#[derive(Deserialize)]
+struct FilingIndexItem {
+    name: Option<String>,
+}
+
+fn filing_index_document_names(index_bytes: &[u8]) -> Vec<String> {
+    let Ok(index) = serde_json::from_slice::<FilingIndexJson>(index_bytes) else {
+        return Vec::new();
+    };
+    index
+        .directory
+        .and_then(|directory| directory.item)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| item.name.as_deref().and_then(sec_archive_filename))
+        .collect()
 }

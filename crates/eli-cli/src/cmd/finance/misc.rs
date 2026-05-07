@@ -157,13 +157,15 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
         None
     };
 
-    let user_agent = config.and_then(|c| c.chat.sec_user_agent);
+    let user_agent = args.user_agent.or_else(|| config.and_then(|c| c.chat.sec_user_agent));
 
     let ticker_for_meta = args.ticker.clone();
     let req = eli_core::finance::FilingsRequest {
         ticker: args.ticker,
         forms: args.forms,
         limit: Some(args.limit),
+        download: !args.no_download || args.include_text || args.download_all,
+        download_all: args.download_all,
         include_text: args.include_text,
         max_chars: args.max_chars,
         user_agent,

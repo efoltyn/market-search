@@ -634,17 +634,41 @@ pub struct FilingsRequest {
     #[serde(default)]
     pub limit: Option<usize>,
 
-    /// If true, download the primary document and save as text under cache_dir.
+    /// If true, download the filing index JSON and primary document under cache_dir.
+    #[serde(default = "default_true")]
+    pub download: bool,
+
+    /// If true, download every document listed in the filing index, not just the primary document.
+    #[serde(default)]
+    pub download_all: bool,
+
+    /// Deprecated compatibility alias for download. No text parsing or excerpting is performed.
     #[serde(default)]
     pub include_text: bool,
 
-    /// Max chars for the inline excerpt (full text is still written to disk when include_text=true).
+    /// Deprecated compatibility option. Filings are downloaded raw; no inline excerpt is generated.
     #[serde(default)]
     pub max_chars: Option<usize>,
 
     /// Optional SEC User-Agent override (e.g. "eli-cli (mailto:...)").
     #[serde(default)]
     pub user_agent: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FilingDownload {
+    /// index_json, primary_document, or attachment.
+    pub kind: String,
+    pub filename: String,
+    pub url: String,
+    pub path: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -679,8 +703,21 @@ pub struct FilingDoc {
     pub filing_index_url: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_doc_path: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_json_path: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloaded_files: Vec<FilingDownload>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub text_path: Option<String>,
 
+    /// Deprecated. No filing text is parsed into an excerpt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_excerpt: Option<String>,
 }
@@ -1786,7 +1823,6 @@ pub struct OptionsResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_expiry_summary: Option<MultiExpirySummary>,
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExpirySnapshot {

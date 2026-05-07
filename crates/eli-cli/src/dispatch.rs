@@ -41,6 +41,7 @@ pub async fn run() -> Result<()> {
 async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
     match cmd {
         FinanceCommand::Timeseries(args) => cmd_finance_timeseries(args).await,
+        FinanceCommand::Movers(args) => cmd_finance_movers(args).await,
         FinanceCommand::Fundamentals(args) => cmd_finance_fundamentals(args).await,
         FinanceCommand::Search(args) => cmd_finance_search(args).await,
         FinanceCommand::Filings(args) | FinanceCommand::Sec(args) => {

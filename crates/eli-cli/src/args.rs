@@ -105,8 +105,8 @@ enum McpSubcommand {
 
 #[derive(clap::Args, Debug)]
 struct ShareArgs {
-    /// Tunnel provider: tunnelmole | cloudflare | ngrok | self-host
-    #[arg(long, default_value = "tunnelmole")]
+    /// Tunnel provider: cloudflare | ngrok | tunnelmole | self-host
+    #[arg(long, default_value = "cloudflare")]
     provider: String,
 
     /// Local port the MCP HTTP server is bound to.
@@ -126,6 +126,8 @@ struct ShareArgs {
 enum FinanceCommand {
     /// Fetch OHLCV time-series for one or more tickers.
     Timeseries(FinanceTimeseriesArgs),
+    /// Largest day movers by percent move, market cap, dollar volume, or estimated value change.
+    Movers(FinanceMoversArgs),
     /// Current snapshot of income/balance/cashflow + 32 trailing ratios + company profile (sector, industry, employees). Single ticker returns object; multi-ticker returns array.
     Fundamentals(FinanceFundamentalsArgs),
     /// Search for ticker symbols or macro series IDs.
@@ -1239,6 +1241,102 @@ struct FinanceFundamentalsArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct FinanceMoversArgs {
+    /// Candidate universe: day_movers | day_gainers | day_losers | most_actives |
+    /// small_cap_gainers | aggressive_small_caps | top_etfs | most_shorted | tickers.
+    #[arg(long, default_value = "day_movers")]
+    universe: String,
+
+    /// Explicit tickers for universe=tickers, or to override screener discovery.
+    #[arg(long, visible_alias = "ticker", value_delimiter = ',')]
+    tickers: Vec<String>,
+
+    /// Direction filter: gainers | losers | both.
+    #[arg(long, default_value = "both")]
+    direction: String,
+
+    /// Sort by: percent | abs_percent | market_cap | value_change | dollar_volume | volume.
+    #[arg(long, default_value = "value_change")]
+    sort_by: String,
+
+    /// Data provider for price/change: auto | yahoo | ibkr. Auto uses IBKR when configured, Yahoo otherwise.
+    #[arg(long, default_value = "auto")]
+    provider: String,
+
+    /// Minimum market cap filter, e.g. 500M, 2B, 1.5T.
+    #[arg(long)]
+    min_market_cap: Option<String>,
+
+    /// Maximum market cap filter, e.g. 2B for small/mid-cap screens.
+    #[arg(long)]
+    max_market_cap: Option<String>,
+
+    /// Minimum absolute percent move.
+    #[arg(long, default_value_t = 0.0)]
+    min_change_pct: f64,
+
+    /// Minimum last price.
+    #[arg(long, default_value_t = 5.0)]
+    min_price: f64,
+
+    /// Minimum reported day volume.
+    #[arg(long)]
+    min_volume: Option<u64>,
+
+    /// Optional sector filter (case-insensitive substring match against Yahoo screener `sector`).
+    #[arg(long)]
+    sector: Option<String>,
+
+    /// Optional industry filter (case-insensitive substring match against Yahoo screener `industry`).
+    #[arg(long)]
+    industry: Option<String>,
+
+    /// Number of movers to return.
+    #[arg(long, default_value_t = 25)]
+    limit: usize,
+
+    /// Candidate count per Yahoo screener leg before local filtering/sorting.
+    #[arg(long, default_value_t = 100)]
+    scan_limit: usize,
+
+    /// Optional IBKR account code. Used when --provider ibkr or auto detects IBKR setup.
+    #[arg(long)]
+    ibkr_account: Option<String>,
+
+    /// Optional IBKR host override.
+    #[arg(long)]
+    ibkr_host: Option<String>,
+
+    /// Optional IBKR port override.
+    #[arg(long)]
+    ibkr_port: Option<u16>,
+
+    /// Optional IBKR client id override.
+    #[arg(long)]
+    ibkr_client_id: Option<i32>,
+
+    /// Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.
+    #[arg(long)]
+    ibkr_market_data_type: Option<i32>,
+
+    /// Optional IBKR timeout in seconds.
+    #[arg(long)]
+    ibkr_timeout_secs: Option<u64>,
+
+    /// Output format (currently: json).
+    #[arg(long, default_value = "json")]
+    format: String,
+
+    /// Write full JSON output to a file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// Also fetch and surface pre-market / after-hours move alongside regular-session change.
+    #[arg(long, default_value_t = false)]
+    include_extended_hours: bool,
+}
+
+#[derive(clap::Args, Debug)]
 struct FinanceSearchArgs {
     /// Search query (e.g. "Apple" or "Inflation").
     #[arg(long, required = false)]
@@ -1631,13 +1729,25 @@ struct FinanceFilingsArgs {
     #[arg(long, default_value_t = 5)]
     limit: usize,
 
-    /// Download primary documents, save to cache, and include a text excerpt inline.
+    /// Do not download filing files; return SEC metadata and URLs only.
+    #[arg(long)]
+    no_download: bool,
+
+    /// Download every document listed in each filing index, not just the primary document.
+    #[arg(long)]
+    download_all: bool,
+
+    /// Deprecated alias for the old text mode. Now downloads raw filing files without parsing.
     #[arg(long)]
     include_text: bool,
 
-    /// Max chars for the inline excerpt (full text is still written to disk when --include-text is set).
+    /// Deprecated. Filings are downloaded raw; no inline excerpt is generated.
     #[arg(long)]
     max_chars: Option<usize>,
+
+    /// SEC User-Agent override with contact email, e.g. "eli-cli (mailto:me@example.com)".
+    #[arg(long)]
+    user_agent: Option<String>,
 
     /// Override cache directory (defaults to Eli's cache dir).
     #[arg(long)]

@@ -78,14 +78,12 @@ impl BisPreset {
                 label_prefix: "Policy Rate",
                 unit: "percent",
             }],
-            Self::CentralBankAssets => vec![
-                BisQuerySpec {
-                    dataflow: "WS_CBTA",
-                    key: format!("Q.{}.B.XDC..B", areas),
-                    label_prefix: "CB Total Assets (local ccy)",
-                    unit: "billions_local_currency",
-                },
-            ],
+            Self::CentralBankAssets => vec![BisQuerySpec {
+                dataflow: "WS_CBTA",
+                key: format!("Q.{}.B.XDC..B", areas),
+                label_prefix: "CB Total Assets (local ccy)",
+                unit: "billions_local_currency",
+            }],
             Self::CreditGap => vec![BisQuerySpec {
                 dataflow: "WS_CREDIT_GAP",
                 key: format!("Q.{}.P.A.C", areas),
@@ -158,13 +156,19 @@ pub async fn fetch_bis(req: BisRequest) -> Result<BisResponse> {
                 continue;
             }
             let body = resp.text().await.unwrap_or_default();
-            warnings.push(format!("bis {} returned {}: {}", spec.dataflow, status, body.chars().take(200).collect::<String>()));
+            warnings.push(format!(
+                "bis {} returned {}: {}",
+                spec.dataflow,
+                status,
+                body.chars().take(200).collect::<String>()
+            ));
             continue;
         }
 
-        let body = resp.text().await.map_err(|e| {
-            Error::Provider(format!("bis body read failed: {e}"))
-        })?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| Error::Provider(format!("bis body read failed: {e}")))?;
 
         let parsed = parse_bis_csv(&body, spec.label_prefix, spec.unit);
         all_series.extend(parsed);
@@ -174,7 +178,10 @@ pub async fn fetch_bis(req: BisRequest) -> Result<BisResponse> {
         }
     }
 
-    let dataset = queries.first().map(|q| q.dataflow.to_string()).unwrap_or_default();
+    let dataset = queries
+        .first()
+        .map(|q| q.dataflow.to_string())
+        .unwrap_or_default();
 
     Ok(BisResponse {
         generated_at: Utc::now(),
@@ -273,7 +280,11 @@ fn parse_bis_csv(body: &str, label_prefix: &str, unit: &str) -> Vec<BisSeries> {
                 composite_key: format!("{}/{}", area, label_prefix),
                 ref_area: area,
                 frequency: freq_label.clone(),
-                unit: if unit.is_empty() { None } else { Some(unit.to_string()) },
+                unit: if unit.is_empty() {
+                    None
+                } else {
+                    Some(unit.to_string())
+                },
                 observations: obs,
             }
         })

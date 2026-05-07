@@ -1,20 +1,29 @@
 // `eli mcp share` — boot local HTTP MCP + spawn a public-URL tunnel.
 //
 // Three free providers:
-//   tunnelmole  → temporary URL via `npx tunnelmole`        (default)
-//   cloudflare  → temporary URL via `cloudflared`
-//   ngrok       → permanent URL via `ngrok` (account required)
+//   cloudflare  → temporary URL via `cloudflared` (default — most reliable temp)
+//   ngrok       → permanent URL via `ngrok` (account required, your reserved subdomain persists)
+//   tunnelmole  → temporary URL via `npx tunnelmole` (less reliable; dies silently after hours)
 //
 // Plus a placeholder for `self-host` (sovereign) mode that points at
 // SELFHOST.md until the Rust gateway/laptop-ACME stack ships.
 
-const SHARE_PID_FILE: &str = "/tmp/eli-share-children.pid";
+const SHARE_PID_FILE: &str = "/tmp/market-search-share-children.pid";
 
 async fn cmd_mcp_share(args: ShareArgs) -> Result<()> {
     let provider = args.provider.to_ascii_lowercase();
     let port = args.port;
 
-    eprintln!("[eli mcp share] provider={} port={}", provider, port);
+    // Self-host is design-phase only — short-circuit BEFORE booting any local
+    // server, since this isn't actually a runnable provider yet.
+    if matches!(
+        provider.as_str(),
+        "self-host" | "selfhost" | "self_host" | "sovereign"
+    ) {
+        return provider_selfhost();
+    }
+
+    eprintln!("[market-search mcp share] provider={} port={}", provider, port);
 
     // Reap any tunnel children orphaned by a previous SIGTERM/SIGKILL run.
     cleanup_orphan_children();
@@ -26,9 +35,8 @@ async fn cmd_mcp_share(args: ShareArgs) -> Result<()> {
         "tunnelmole" | "tm" => provider_tunnelmole(port).await,
         "cloudflare" | "cloudflared" | "cf" => provider_cloudflare(port).await,
         "ngrok" => provider_ngrok(args).await,
-        "self-host" | "selfhost" | "self_host" | "sovereign" => provider_selfhost(),
         other => anyhow::bail!(
-            "unknown provider '{}'. Pick one of: tunnelmole, cloudflare, ngrok, self-host",
+            "unknown provider '{}'. Pick one of: tunnelmole, cloudflare, ngrok (self-host is not implemented yet — see SELFHOST.md)",
             other
         ),
     }
@@ -114,7 +122,7 @@ async fn provider_cloudflare(port: u16) -> Result<()> {
             "cloudflared not found. Install it:\n  \
              macOS: brew install cloudflared\n  \
              Linux: curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared\n  \
-             Or pick another provider: eli mcp share --provider tunnelmole"
+             Or pick another provider: eli mcp share --provider ngrok --domain <your>.ngrok-free.dev"
         );
     }
 
@@ -209,22 +217,15 @@ async fn provider_ngrok(args: ShareArgs) -> Result<()> {
 }
 
 fn provider_selfhost() -> Result<()> {
-    println!();
-    println!("┌─ Self-host mode ─────────────────────────────────────────────");
-    println!("│");
-    println!("│  Most secure option. Your data never leaves your machine.");
-    println!("│");
-    println!("│  Architecture: SNI-routing gateway on your VPS,");
-    println!("│  TLS terminates on your laptop (gateway can't decrypt traffic).");
-    println!("│");
-    println!("│  Status: design phase — see SELFHOST.md");
-    println!("│  Requires: a domain (~$10/yr) + a small VPS (~$5/mo)");
-    println!("│");
-    println!("│  For now, use --provider ngrok (permanent free) or");
-    println!("│  --provider tunnelmole (instant temporary).");
-    println!("└──────────────────────────────────────────────────────────────");
-    println!();
-    Ok(())
+    anyhow::bail!(
+        "self-host / sovereign mode is NOT IMPLEMENTED yet — it is a design spec, not a runnable provider.\n\n\
+         What works today:\n  \
+         market-search mcp share --provider ngrok --domain <your>.ngrok-free.dev   (permanent, free, requires ngrok account)\n  \
+         market-search mcp share --provider cloudflare                              (instant temporary URL, dies on process exit)\n  \
+         market-search mcp share --provider tunnelmole                              (instant temporary, dies after a few hours)\n\n\
+         The planned sovereign architecture (SNI-pass-through gateway, TLS terminates on laptop, gateway cannot decrypt MCP traffic) requires \
+         a separate eli-gateway crate plus rustls-acme + quinn integration that doesn't exist in this build. See SELFHOST.md for the design.\n\n\
+         If you want to pilot the self-host architecture, file an issue at github.com/efoltyn/market-search.")
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

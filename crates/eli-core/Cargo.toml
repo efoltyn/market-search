@@ -1,10 +1,10 @@
 [package]
 name = "eli-core"
-version.workspace = true
+version = "0.2.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Internal core library for the `eli` crate. Use `cargo install market-search`."
+description = "Internal core library for the market-search binary. Use `cargo install market-search`."
 readme = "README.md"
 
 [dependencies]

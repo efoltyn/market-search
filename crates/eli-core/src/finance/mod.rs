@@ -47,7 +47,6 @@ pub(crate) mod shared_client {
 
 const SEC_COMPANY_TICKERS_TTL_SECS: u64 = 60 * 60 * 24 * 7; // 7 days
 const SEC_SUBMISSIONS_TTL_SECS: u64 = 60 * 60 * 24; // 1 day
-const SEC_DEFAULT_TEXT_MAX_CHARS: usize = 10_000;
 const SCHEDULE_HTTP_TIMEOUT_SECS: u64 = 6;
 const SCHEDULE_PER_DAY_TIMEOUT_SECS: u64 = 5;
 const YAHOO_SEARCH_URL: &str = "https://query2.finance.yahoo.com/v1/finance/search";
@@ -67,9 +66,7 @@ impl From<eli_finance_types::FinanceTypesError> for Error {
 
 mod providers;
 pub use providers::odds::fetch_odds;
-pub use providers::odds::{
-    fetch_polymarket_orderbooks, PolymarketBookLevel, PolymarketOrderbook,
-};
+pub use providers::odds::{fetch_polymarket_orderbooks, PolymarketBookLevel, PolymarketOrderbook};
 
 mod filings;
 pub use filings::fetch_filings;
@@ -166,9 +163,9 @@ pub fn default_cache_dir() -> PathBuf {
 /// Users commonly type "VIX" or "GSPC" without the caret — Yahoo returns
 /// empty data for the bare ticker, so we auto-correct here.
 const YAHOO_INDEX_BARE_NAMES: &[&str] = &[
-    "VIX", "GSPC", "DJI", "IXIC", "RUT", "N225", "HSI", "AXJO",
-    "STOXX50E", "FTSE", "GDAXI", "FCHI", "BVSP", "MERV", "KS11",
-    "TWII", "JKSE", "KLSE", "STI", "NZ50", "OVX", "TNX", "TYX", "IRX",
+    "VIX", "GSPC", "DJI", "IXIC", "RUT", "N225", "HSI", "AXJO", "STOXX50E", "FTSE", "GDAXI",
+    "FCHI", "BVSP", "MERV", "KS11", "TWII", "JKSE", "KLSE", "STI", "NZ50", "OVX", "TNX", "TYX",
+    "IRX",
 ];
 
 pub fn normalize_tickers(tickers: &[String]) -> Vec<String> {
@@ -179,11 +176,7 @@ pub fn normalize_tickers(tickers: &[String]) -> Vec<String> {
         .map(|t| {
             let upper = t.to_ascii_uppercase();
             // Auto-add ^ prefix for known indices when user omits it.
-            if !upper.starts_with('^')
-                && YAHOO_INDEX_BARE_NAMES
-                    .iter()
-                    .any(|idx| upper == *idx)
-            {
+            if !upper.starts_with('^') && YAHOO_INDEX_BARE_NAMES.iter().any(|idx| upper == *idx) {
                 format!("^{upper}")
             } else {
                 upper
