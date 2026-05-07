@@ -1,51 +1,62 @@
-# Market Search self-hosting
+# Market Search — Sovereign Self-Host
 
-> **STATUS: NOT IMPLEMENTED.** This document is a design spec for a future
-> sovereign self-host mode. It is **not** a runnable setup guide. The
-> `market-search mcp share --provider self-host` command currently exits
-> with an error pointing here.
->
-> If you ran `cargo install market-search` and want a public URL today, use
-> `--provider ngrok` (permanent, free with account) or `--provider cloudflare`
-> (instant temporary). See the README.
+Sovereign architecture for organizations that cannot accept third-party tunnel
+providers (ngrok, Cloudflare, tunnelmole) in the TLS trust chain. Designed for
+hedge funds, family offices, RIAs, treasury desks, and any firm running
+compliance-bound research on Market Search.
 
-## What works today vs what's planned
+The defining property: **third-party tunnel providers cannot decrypt MCP
+traffic** because TLS terminates on the user's laptop, not at any provider's
+edge. The gateway VPS sees only encrypted bytes plus SNI hostname / source
+IP / byte counts.
 
-| Mode | Command | Status | Who can decrypt MCP traffic? |
-|---|---|---:|---|
-| Local stdio MCP | `market-search mcp` | Shipped | No public network path — nobody but you |
-| Cloudflare quick tunnel | `market-search mcp share --provider cloudflare` | Shipped | Cloudflare terminates public TLS |
-| Tunnelmole | `market-search mcp share --provider tunnelmole` | Shipped (less reliable — dies after hours) | Tunnelmole terminates public TLS |
-| Ngrok with reserved subdomain | `market-search mcp share --provider ngrok --domain ...` | Shipped | Ngrok terminates public TLS |
-| **Sovereign self-host** | `market-search mcp share --provider self-host` | **Not shipped** | Planned: TLS terminates on YOUR laptop |
+This document is the architecture and engagement scope. **Eli Terminal
+deploys it in your environment as a paid implementation.** Everything stays
+inside your perimeter — your VPS, your domain, your DNS, your laptops, your
+TLS keys. Eli Terminal's role is implementing the architecture correctly so
+its security properties are actually realized in your specific stack.
 
-Self-host's distinguishing property is **NOT** that "data never leaves your
-machine" — your AI still sends MCP requests and receives responses, and
-market-search still fetches data from external providers like Yahoo / FRED.
-The actual property is: **third-party tunnel providers cannot decrypt MCP
-traffic** because TLS terminates on your laptop, not at their edge. The
-gateway VPS sees only encrypted bytes plus SNI hostname / source IP / byte
-counts.
+For scoping: **efoltyn@eliterminal.com**
 
-The rest of this document is the architectural design for that future mode.
+---
+
+## Tunnel modes
+
+| Mode | Command | Who can decrypt MCP traffic? | Provisioning |
+|---|---|---|---|
+| Local stdio MCP | `market-search mcp` | No public network path — nobody but you | Self-serve, OSS binary |
+| Cloudflare quick tunnel | `market-search mcp share --provider cloudflare` | Cloudflare terminates public TLS | Self-serve, OSS binary |
+| Tunnelmole | `market-search mcp share --provider tunnelmole` | Tunnelmole terminates public TLS | Self-serve, OSS binary |
+| Ngrok with reserved subdomain | `market-search mcp share --provider ngrok --domain ...` | Ngrok terminates public TLS | Self-serve, OSS binary |
+| **Sovereign self-host** | (custom deployment in your environment) | **TLS terminates on your laptop — gateway sees encrypted bytes only** | **Per-engagement implementation by Eli Terminal** |
+
+The first four modes are appropriate for individual users running public-data
+research. They ship in the open-source binary on crates.io as
+`cargo install market-search`.
+
+The fifth mode — sovereign self-host — is the architecture this document
+describes. It requires gateway code, domain configuration, certificate
+lifecycle setup, and per-environment hardening that Eli Terminal handles per
+engagement.
 
 ---
 
 ## Why self-host
 
-Even with ngrok or tunnelmole, your MCP traffic flows through their
-edge. They terminate TLS, which means they could in principle observe
-the contents of your queries and tool responses.
+Even with ngrok or Cloudflare, your MCP traffic flows through their edge.
+They terminate TLS, which means they could in principle observe the contents
+of your queries and tool responses, comply with subpoenas against that data,
+or be compromised in a way that exposes it.
 
-For most users that's fine — Market Search pulls public market data, so
-the privacy story is "hopeful disclosure of finance queries" not
-"sensitive personal data leaking." Acceptable trade-off for a free
-service.
+For individual users running public-data research, that's an acceptable
+trade-off. Market Search pulls public market data; the privacy story is
+"hopeful disclosure of finance queries," not "sensitive personal data
+leaking."
 
-For sensitive use (firm research, compliance-bound work, anything
-involving non-public watchlists or proprietary signals), the only
-acceptable posture is: **TLS terminates on YOUR laptop, the relay sees
-only encrypted bytes.** That's what self-host gives you.
+For firms running proprietary research, internal watchlists, or any work
+where the security team will not sign off on a third-party tunnel provider
+in the TLS trust chain, sovereign self-host is the architecture that
+satisfies both the technical and compliance requirements.
 
 ---
 
@@ -57,7 +68,7 @@ only encrypted bytes.** That's what self-host gives you.
                            │  https://device.mcp.yourdomain.com/c-<secret>/mcp
                            ▼
         ┌──────────────────────────────────────────────┐
-        │  eli-gateway on YOUR VPS                     │
+        │  Gateway on YOUR VPS                         │
         │                                              │
         │  - TCP :443 listener                         │
         │  - Reads TLS ClientHello                     │
@@ -71,7 +82,7 @@ only encrypted bytes.** That's what self-host gives you.
                            │  QUIC tunnel (long-lived outbound from laptop)
                            ▼
         ┌──────────────────────────────────────────────┐
-        │  eli on YOUR LAPTOP                          │
+        │  Market Search on YOUR LAPTOP                │
         │                                              │
         │  - TLS terminates here (rustls)              │
         │  - TLS private key generated locally,        │
@@ -79,12 +90,15 @@ only encrypted bytes.** That's what self-host gives you.
         │  - rustls-acme issues cert via TLS-ALPN-01   │
         │    (challenge traverses the SNI passthrough) │
         │  - Validates /c-<secret>/mcp path            │
-        │  - Runs the MCP server (existing MCP server)    │
+        │  - Runs the MCP server                       │
         └──────────────────────────────────────────────┘
 ```
 
-Cost: ~$5/mo for a VPS (e.g. Hetzner CAX11) + ~$10/yr for a domain.
-Software is free (AGPL).
+Operational cost (yours): ~$5/mo for a VPS (e.g. Hetzner CAX11) + ~$10/yr
+for a domain. Software is AGPL-3.0.
+
+Implementation cost (Eli Terminal): scoped per engagement. Email
+**efoltyn@eliterminal.com** for a quote.
 
 ---
 
@@ -108,12 +122,11 @@ A compromised gateway operator could in principle try to obtain a fresh
 certificate for `device.mcp.yourdomain.com` and start MITMing future
 connections.
 
-**Basic sovereign mitigation**: detection. Certificate Transparency logs
-publish every issued cert publicly; a `cert-watcher` script can alert
-you within seconds.
+**Basic mitigation**: detection. Certificate Transparency logs publish every
+issued cert publicly; a `cert-watcher` script can alert you within seconds.
 
-**Compliance-locked sovereign mitigation**: prevention via CAA account
-binding. Add a CAA record:
+**Compliance-locked mitigation**: prevention via CAA account binding. Add a
+CAA record:
 
 ```
 device.mcp.yourdomain.com.  CAA  0 issue "letsencrypt.org;accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/<your-laptop-acct-id>;validationmethods=tls-alpn-01"
@@ -125,66 +138,66 @@ TLS-ALPN-01 specifically. Even if the VPS is fully compromised, the
 attacker cannot issue a replacement cert without also having the
 laptop-side ACME account key.
 
-This is the kill shot for the active-MITM threat. Implementing it adds
-~5 minutes of one-time DNS configuration per device.
+This is the kill shot for the active-MITM threat. Adds ~5 minutes of
+one-time DNS configuration per device.
 
 ---
 
-## Roadmap
+## Engagement phases
 
-### Phase 0 — frp prototype (~1 weekend)
+A typical Eli Terminal in-house implementation runs across these stages.
+Total elapsed time is usually 4-6 weeks depending on your environment's
+DNS provider, change-management process, and security review cycle.
 
-Goal: prove the byte path works end-to-end with a real Let's Encrypt
-certificate.
+### Phase 0 — Architecture review + frp prototype (~1 week)
 
-- Hetzner CAX11 in Falkenstein, ~$5/mo
-- Wildcard DNS `*.mcp.yourdomain.com` → VPS
-- frp on the VPS doing HTTPS subdomain routing
+- Architecture review against your security policies
+- Threat-model walkthrough with your security team
+- Hetzner / your-cloud VPS provisioning
+- Wildcard DNS `*.mcp.yourdomain.com` → VPS, configured in your DNS provider
+- frp on the VPS doing HTTPS subdomain routing (used as scaffolding)
 - Local Rust HTTPS server using `rustls-acme` against Let's Encrypt
   staging, then production
-- Acceptance test: phone connects to
+- Acceptance test: a designated laptop connects from outside your network to
   `https://d-test.mcp.yourdomain.com/c-test/mcp`, MCP request roundtrips,
-  no TLS key on VPS, real Let's Encrypt production cert in browser
+  no TLS key on VPS, real Let's Encrypt production cert in the browser
 
-### Phase 1 — Replace frp with `eli-gateway` (~2 weekends)
+### Phase 1 — Custom gateway deployment (~2 weeks)
 
-Goal: own the gateway code so we control the security properties.
+Replace the frp scaffolding with the proper sovereign gateway:
 
-- New crate: `eli-gateway`
 - TCP :443 listener with TLS ClientHello parser
 - SNI extraction → routing table → raw byte forwarding via QUIC
 - Long-lived QUIC server using `quinn` for laptop tunnels
 - Device enrollment via one-time tokens, Ed25519 public key storage
 - Active session map, signed-nonce reauth on reconnect
-- Never terminates TLS, never parses HTTP, never holds device-hostname
-  TLS keys
+- Confirmed: gateway never terminates TLS, never parses HTTP, never holds
+  per-device TLS keys
 
-### Phase 2 — Permanence polish (~1 week)
+### Phase 2 — Service install + state management (~1 week)
 
-Goal: make it feel like infrastructure, not a script.
+- Laptop-side service install (launchd on macOS, systemd `--user` on Linux,
+  Windows Service on Windows)
+- VPS-side gateway service install with auto-restart
+- State file (`~/.eli/tunnel/state.json`) backup/restore tooling for
+  laptop replacement / device migration
+- ARI-aware ACME renewal (cert lifecycle automated)
+- End-to-end diagnostic command for your IT support
 
-- `market-search mcp share --provider self-host` boots the laptop side
-- `eli-gateway init` / `enroll` / `status` for VPS-side admin
-- Service install (launchd / systemd --user)
-- State backup/restore (`~/.eli/tunnel/state.json` is the continuity
-  guarantee — if the user loses it, the URL is gone forever)
-- ARI-aware ACME renewal
-- `eli doctor mcp` end-to-end diagnostic
+### Phase 3 — Documentation for your security team (~1 week)
 
-### Phase 3 — Documentation & institutional hardening (~1 week)
-
-Goal: make it auditable by a security team.
-
-- Threat-model writeup with explicit assumptions
-- CAA-locked tier walkthrough with exact DNS records
-- Compliance one-pager firms can hand to legal
-- Demo video showing the SanDisk physical-security analogy
+- Threat-model writeup with assumptions explicit and tied to your environment
+- CAA-locked tier walkthrough with the exact DNS records for your domain
+- Compliance one-pager your security team can hand to legal
+- Operational runbook for your IT / DevOps team
+- Optional: demo video showing the architecture for internal training
 
 ---
 
 ## State file (laptop)
 
-`~/.eli/tunnel/state.json` (when implemented):
+Each laptop running sovereign mode persists its identity in a state file
+under the user's profile (`~/.eli/tunnel/state.json` or platform equivalent):
 
 ```json
 {
@@ -205,28 +218,49 @@ Goal: make it auditable by a security team.
 ```
 
 The permanent URL is stable as long as this file (and the corresponding
-keychain entries) survive. `market-search mcp tunnel backup` / `restore` will
-ship in Phase 2 to make this a one-command operation.
+keychain entries) survive. Backup/restore tooling is included in Phase 2 to
+make device migration a one-command operation — critical for laptop
+replacement cycles or staff turnover.
 
 ---
 
-## What you can do today
+## Engaging Eli Terminal
 
-1. **Read the architecture above** — does it match your threat model?
-   File issues against this repo with concerns.
-2. **If you're already running a sovereign-shaped tunnel** (your own VPS
-   + cloudflared named tunnel + Cloudflare-issued cert), you have most
-   of the security properties already. The thing you don't have is
-   "TLS terminates on laptop" — Cloudflare does it for you, so they
-   could decrypt if compelled. Self-host fixes that.
-3. **Contribute** — Phase 0 is well-scoped and a single weekend's work
-   for someone comfortable with frp + ACME + Hetzner. PRs welcome.
+If your firm needs sovereign self-host deployed in your environment, the
+fastest path is:
+
+**Email: efoltyn@eliterminal.com**
+
+Subject: "Market Search self-host"
+
+Helpful information for the first reply:
+- Cloud or on-prem deployment? Which provider? (AWS / GCP / Azure / Hetzner / your own DC)
+- Which domain would the gateway live under? Is it managed in Cloudflare / Route53 / something else?
+- How many users (laptops) would be in scope at rollout?
+- Compliance framework you're working under (SOC 2, ISO 27001, sector-specific, etc.)
+- Timeline pressure (do you need this in 4 weeks, 4 months, or "exploring")?
+
+Engagements are scoped per-environment. AGPL-3.0 covers the open-source
+binary; in-house deployment work is contracted separately.
 
 ---
 
-## Why "self-host" not "sovereign"
+## Open-source contribution
 
-You'll see "sovereign" in the Phase 1+ commits and architecture talk —
-that's the security-property name (the user is sovereign over their
-data path). User-facing language is "self-host" because it's plainer.
-Both refer to the same thing.
+The first four tunnel modes (ngrok, cloudflare, tunnelmole, local stdio)
+ship in the open-source `market-search` crate on crates.io. The sovereign
+self-host architecture described above is currently implemented as
+per-engagement deployments by Eli Terminal; an OSS CLI version
+(`--provider self-host` self-serve) is on the contribution roadmap.
+
+Phase 0 is well-scoped weekend work for contributors comfortable with frp,
+ACME, and Hetzner. PRs welcome on github.com/efoltyn/market-search.
+
+---
+
+## "Self-host" vs "sovereign"
+
+You'll see "sovereign" in the architecture and code identifiers — that's
+the security-property name (the user is sovereign over their data path).
+"Self-host" is the user-facing language because it's plainer. Both refer
+to the same thing.
