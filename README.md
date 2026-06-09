@@ -1,4 +1,4 @@
-# market-search
+# market search
 
 Your AI has web search. Ask about recession risk or oil prices, it summarizes articles.
 
