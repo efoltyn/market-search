@@ -314,7 +314,8 @@ pub fn search_markets(
                  AND m.event_ticker NOT LIKE 'KXSOTU%' \
                  AND m.event_ticker NOT LIKE 'KXTWEET%' \
                  AND m.event_ticker NOT LIKE 'KXPRESMENTION%' \
-                 AND m.event_ticker NOT LIKE 'KXENTMENTION%'"
+                 AND m.event_ticker NOT LIKE 'KXENTMENTION%' \
+                 AND COALESCE(LOWER(m.category), '') != 'mentions'"
                     .to_string(),
             );
         }

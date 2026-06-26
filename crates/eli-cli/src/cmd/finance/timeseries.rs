@@ -14,6 +14,12 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     // Expand --preset into tickers (merged with any explicit --ticker values).
     let mut preset_tickers: Vec<String> = Vec::new();
     let preset_name = args.preset.as_deref().map(|s| s.trim().to_ascii_lowercase());
+    // preset=list (or presets/help) → return the self-documenting preset catalog and exit.
+    // This is the discovery path: presets were previously only learnable from the tool desc.
+    if matches!(preset_name.as_deref(), Some("list") | Some("presets") | Some("help")) {
+        println!("{}", serde_json::to_string_pretty(&list_timeseries_presets())?);
+        return Ok(());
+    }
     if let Some(ref preset) = preset_name {
         preset_tickers = expand_timeseries_preset(preset)?;
     }
@@ -489,9 +495,9 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }),
     };
 
-    let mut resp = eli_core::finance::fetch_timeseries(req, &cache_dir)
-        .await
-        .map(|mut r| {
+    let fetch_result = eli_core::finance::fetch_timeseries(req, &cache_dir).await;
+    let mut resp = match fetch_result {
+        Ok(mut r) => {
             if fred_granularity_downgraded {
                 let warn = format!(
                     "granularity downgraded from requested {:?} to 1d for FRED provider (sub-daily not supported)",
@@ -516,9 +522,58 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 }
             }
             r
-        })
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("fetch timeseries")?;
+        }
+        // IB Gateway down on a *preset* (energy/commodities/treasuries, which route purely to
+        // IBKR) → don't crash the whole call; transparently remap the preset's IBKR futures to
+        // their Yahoo front-month equivalents. Explicit IBKR: user tickers (no preset) still
+        // surface the real error so a power user debugging the Gateway sees it.
+        Err(e)
+            if preset_name.is_some()
+                && matches!(main_provider, eli_core::finance::ProviderKind::Ibkr)
+                && is_ibkr_unavailable(&e.to_string()) =>
+        {
+            let fallback: Vec<String> = ibkr_tickers
+                .iter()
+                .filter_map(|t| ibkr_to_yahoo_fallback(t))
+                .map(String::from)
+                .collect();
+            if fallback.is_empty() {
+                return Err(anyhow::anyhow!(e)).context(
+                    "fetch timeseries (IB Gateway unavailable; no Yahoo fallback for these tickers)",
+                );
+            }
+            eprintln!(
+                "warning: IB Gateway unreachable; serving Yahoo front-month equivalents for preset '{}'",
+                preset_name.as_deref().unwrap_or("")
+            );
+            let yahoo_req = eli_core::finance::TimeseriesRequest {
+                tickers: fallback,
+                range,
+                granularity,
+                as_of,
+                provider: eli_core::finance::ProviderKind::Yahoo,
+                max_points_per_ticker: args.max_points_per_ticker,
+                ibkr: None,
+            };
+            let mut r = eli_core::finance::fetch_timeseries(yahoo_req, &cache_dir)
+                .await
+                .map_err(|e2| anyhow::anyhow!(e2))
+                .context("fetch timeseries (Yahoo fallback after IB Gateway unavailable)")?;
+            r.errors.get_or_insert_with(Vec::new).push(
+                eli_core::finance::TimeseriesError {
+                    ticker: ibkr_tickers.join(","),
+                    stage: Some("ibkr_fallback".to_string()),
+                    message: format!(
+                        "IB Gateway unreachable; served Yahoo front-month equivalents instead. Underlying error: {e}"
+                    ),
+                },
+            );
+            r
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(e)).context("fetch timeseries");
+        }
+    };
 
     // If FRED is main and there are Yahoo tickers, fetch Yahoo separately and merge.
     if has_fred && !yahoo_tickers.is_empty() {
@@ -2333,10 +2388,100 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
             "IBKR:FUT:VIX:CFE",     // VIX Futures
         ],
         other => anyhow::bail!(
-            "unknown --preset '{other}' (supported: macro, forex_majors, yield_curve, liquidity, crypto, credit, financial_conditions, recession, fed_balance_sheet, housing, labor, inflation, real_rates, consumer_credit, energy, commodities, treasuries). For futures curves, pass the root symbol directly as a ticker (e.g. --tickers CL,GC,ZN) and the tool auto-expands to the curve."
+            "unknown --preset '{other}' (run with preset=list to see all presets + their contents). Supported: macro, forex_majors, yield_curve, liquidity, crypto, credit, financial_conditions, recession, fed_balance_sheet, housing, labor, inflation, real_rates, consumer_credit, energy, commodities, treasuries. For futures curves, pass the root symbol directly as a ticker (e.g. --tickers CL,GC,ZN) and the tool auto-expands to the curve."
         ),
     };
     Ok(tickers.into_iter().map(String::from).collect())
+}
+
+/// Machine-readable catalog of every timeseries preset, returned by `preset=list`.
+/// Preset names + one-line descriptions live here; the actual ticker expansion is pulled
+/// from `expand_timeseries_preset` so the contents have a single source of truth. This is
+/// the discovery path: presets were previously only learnable from the tool description.
+fn list_timeseries_presets() -> serde_json::Value {
+    // (canonical name, comma-separated aliases, one-line description)
+    let catalog: &[(&str, &str, &str)] = &[
+        ("macro", "", "34-series US macro dashboard: inflation, jobs, GDP, rates, debt, money, consumer, credit + live Pyth oil/gold/BTC"),
+        ("recession", "recession_indicators", "Recession gauges: Sahm rule, 10Y-2Y & 10Y-3M curves, claims, unemployment, industrial production, Chicago Fed NAI"),
+        ("credit", "credit_spreads,spreads", "Full ICE BofA OAS stack: IG, BBB, HY, BB, B, CCC, EM corporate spreads"),
+        ("financial_conditions", "conditions,nfci", "Financial conditions / stress: NFCI, ANFCI, St. Louis FSI, VIX"),
+        ("inflation", "", "Inflation deep-dive: headline & core CPI, core PCE, PPI, breakevens, 5y5y forward, UMich, sticky & median CPI"),
+        ("labor", "employment", "Labor market: payrolls, U-3/U-6, initial+continued claims, JOLTS openings/quits, participation, wages, hours"),
+        ("housing", "", "Housing: Case-Shiller national + 20-city, starts, permits, new & existing sales, 30y mortgage rate"),
+        ("yield_curve", "", "US Treasury par curve, 1mo through 30Y"),
+        ("real_rates", "tips", "TIPS real yields 5/7/10/20/30Y + 5Y & 10Y breakevens"),
+        ("consumer_credit", "banking", "Consumer credit & bank lending: total/revolving/nonrevolving, card & mortgage delinquency, C&I loans, SLOOS"),
+        ("fed_balance_sheet", "fed_bs,qe,qt", "Fed plumbing: total assets, Treasury & MBS holdings, reserves, RRP, TGA, M2, monetary base"),
+        ("liquidity", "", "Net-liquidity inputs: Fed total assets, Treasury General Account, ON RRP"),
+        ("forex_majors", "", "Nine USD majors: EUR, GBP, JPY, CHF, CAD, AUD, NZD, SEK, NOK"),
+        ("crypto", "", "BTC, ETH, SOL via Pyth (24/7)"),
+        ("energy", "oil", "Energy futures front-month via IBKR: WTI, Brent, heating oil, RBOB, natgas, gasoil (falls back to Yahoo =F when IBKR is down)"),
+        ("commodities", "cmdty", "Broad commodity futures via IBKR: WTI, gold, silver, copper, corn, wheat, soybeans, coffee, cotton, sugar (Yahoo fallback)"),
+        ("treasuries", "treasury_futures", "Treasury futures + VIX via IBKR: ZT, ZF, ZN, ZB, VIX (Yahoo fallback)"),
+    ];
+    let presets: Vec<serde_json::Value> = catalog
+        .iter()
+        .map(|(name, aliases, desc)| {
+            let tickers = expand_timeseries_preset(name).unwrap_or_default();
+            serde_json::json!({
+                "preset": name,
+                "aliases": aliases.split(',').filter(|s| !s.is_empty()).collect::<Vec<_>>(),
+                "description": desc,
+                "n_tickers": tickers.len(),
+                "tickers": tickers,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "presets": presets,
+        "count": presets.len(),
+        "usage": "Pass preset=<name> to pull the whole basket. Composes with tickers in the same call (e.g. preset=macro + tickers=NVDA,SMH). IBKR-backed presets (energy/commodities/treasuries) auto-fall-back to Yahoo front-month when IB Gateway is down.",
+    })
+}
+
+/// Map an IBKR:FUT:<root>:<exch> ticker to its Yahoo front-month continuous equivalent.
+/// Keeps the energy/commodities/treasuries presets working when IB Gateway is down
+/// (Yahoo futures are front-month continuous; for daily granularity the difference is
+/// negligible). Returns None for IBKR tickers with no clean Yahoo proxy.
+fn ibkr_to_yahoo_fallback(ibkr: &str) -> Option<&'static str> {
+    let stripped = ibkr
+        .strip_prefix("IBKR:FUT:")
+        .or_else(|| ibkr.strip_prefix("ibkr:fut:"))?;
+    let root = stripped.split(':').next()?;
+    Some(match root.to_ascii_uppercase().as_str() {
+        "CL" => "CL=F",
+        "COIL" => "BZ=F",
+        "HO" => "HO=F",
+        "RB" => "RB=F",
+        "NG" => "NG=F",
+        "GOIL" => "BZ=F",
+        "GC" => "GC=F",
+        "SI" => "SI=F",
+        "HG" => "HG=F",
+        "ZC" => "ZC=F",
+        "ZW" => "ZW=F",
+        "ZS" => "ZS=F",
+        "KC" => "KC=F",
+        "CT" => "CT=F",
+        "SB" => "SB=F",
+        "ZT" => "ZT=F",
+        "ZF" => "ZF=F",
+        "ZN" => "ZN=F",
+        "ZB" => "ZB=F",
+        "VIX" => "^VIX",
+        _ => return None,
+    })
+}
+
+/// True when a timeseries fetch error indicates IB Gateway / TWS is unreachable
+/// (vs. a genuine data error), so a preset can transparently fall back to Yahoo.
+fn is_ibkr_unavailable(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("gateway")
+        || m.contains("connection refused")
+        || m.contains("reachable tws")
+        || m.contains("no reachable")
+        || m.contains("os error 61")
 }
 
 /// Heuristic: FRED series IDs are ALL-CAPS alphanumeric (plus underscore),
@@ -2373,10 +2518,21 @@ fn is_fred_ticker(ticker: &str) -> bool {
     let looks_fred = t.len() <= 25
         && t.chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-    // Exclude common short Yahoo tickers (SPY, QQQ, AAPL, etc.)
-    // FRED tickers tend to be longer or have digits mixed in (DGS10, M2SL, WALCL)
-    if looks_fred && t.len() <= 4 && t.chars().all(|c| c.is_ascii_uppercase()) {
-        // Short all-alpha tickers (SPY, QQQ, AAPL, GLD, XLE) are almost certainly Yahoo
+    // Distinguish short equity tickers from short all-alpha FRED macro series.
+    // FRED series are otherwise >=6 chars (UNRATE, PAYEMS, INDPRO, GDPNOW) or
+    // contain digits (DGS10, M2SL, T10Y2Y). Equity tickers are open-ended but
+    // almost always <=5 all-alpha (SPY, QQQ, AAPL, GOOGL). So a short all-alpha
+    // ticker is an equity (Yahoo) UNLESS it is one of the handful of short
+    // all-alpha FRED series we recognize. This fixes GOOGL (was mis-routed to
+    // FRED and returned empty) and also ICSA/CCSA/MICH (short FRED series the
+    // old `len <= 4` rule wrongly sent to Yahoo).
+    let all_alpha = t.chars().all(|c| c.is_ascii_uppercase());
+    let has_digit = t.chars().any(|c| c.is_ascii_digit());
+    const SHORT_FRED_ALPHA: &[&str] = &[
+        "ICSA", "CCSA", "MICH", "CFNAI", "WALCL", "RSAFS", "HOUST", "PERMIT", "PPIFIS", "TREAST",
+        "GDPNOW", "PCENOW", "UNRATE", "PAYEMS", "INDPRO", "JTSJOL", "JTSQUL",
+    ];
+    if all_alpha && !has_digit && t.len() <= 5 && !SHORT_FRED_ALPHA.contains(&t) {
         return false;
     }
     looks_fred

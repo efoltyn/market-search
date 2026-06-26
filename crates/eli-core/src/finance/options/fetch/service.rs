@@ -49,6 +49,243 @@ struct YahooContract {
     in_the_money: Option<bool>,
 }
 
+fn yahoo_clean_implied_volatility(value: Option<f64>) -> Option<f64> {
+    value.and_then(|v| {
+        // Yahoo often returns placeholder IVs such as 0.00001, 0.007822421875,
+        // and 0.01563484375 when the option quote is not a usable volatility
+        // datapoint. Treat sub-5% annualized IV as missing for listed US equity
+        // options rather than surfacing false precision.
+        if (0.05..=5.0).contains(&v) {
+            Some(v)
+        } else {
+            None
+        }
+    })
+}
+
+fn yahoo_contract_has_bid_ask(contract: &YahooContract) -> bool {
+    contract.bid.unwrap_or(0.0) > 0.0 || contract.ask.unwrap_or(0.0) > 0.0
+}
+
+fn yahoo_clean_contract_implied_volatility(contract: &YahooContract) -> Option<f64> {
+    if yahoo_contract_has_bid_ask(contract) {
+        yahoo_clean_implied_volatility(contract.implied_volatility)
+    } else {
+        None
+    }
+}
+
+fn put_call_ratio(put_value: u64, call_value: u64) -> Option<f64> {
+    if call_value > 0 {
+        Some(put_value as f64 / call_value as f64)
+    } else if put_value > 0 {
+        Some(99.99)
+    } else {
+        None
+    }
+}
+
+fn nearest_yahoo_iv(candidates: &[YahooContract], underlying_price: f64) -> Option<f64> {
+    let mut with_iv: Vec<(&YahooContract, f64)> = candidates
+        .iter()
+        .filter_map(|contract| yahoo_clean_contract_implied_volatility(contract).map(|iv| (contract, iv)))
+        .collect();
+    with_iv.sort_by(|(a, _), (b, _)| {
+        (a.strike - underlying_price)
+            .abs()
+            .partial_cmp(&(b.strike - underlying_price).abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    with_iv.first().map(|(_, iv)| *iv)
+}
+
+fn yahoo_atm_iv(
+    calls: &[YahooContract],
+    puts: &[YahooContract],
+    underlying_price: f64,
+) -> Option<f64> {
+    match (
+        nearest_yahoo_iv(calls, underlying_price),
+        nearest_yahoo_iv(puts, underlying_price),
+    ) {
+        (Some(call_iv), Some(put_iv)) => Some((call_iv + put_iv) / 2.0),
+        (Some(call_iv), None) => Some(call_iv),
+        (None, Some(put_iv)) => Some(put_iv),
+        (None, None) => None,
+    }
+}
+
+pub(crate) fn options_as_of_snapshot_note(
+    as_of: Option<DateTime<Utc>>,
+    provider_name: &str,
+) -> Result<Option<String>> {
+    let Some(as_of) = as_of else {
+        return Ok(None);
+    };
+
+    let today = Utc::now().date_naive();
+    let as_of_date = as_of.date_naive();
+    if as_of_date < today {
+        return Err(Error::InvalidInput(format!(
+            "{provider_name} options does not support historical full-chain as_of={} snapshots. The provider path exposes current live/delayed chains only; use options without as_of for current chains or timeseries for historical underlying/contract bars.",
+            as_of.format("%Y-%m-%dT%H:%M:%SZ")
+        )));
+    }
+    if as_of_date > today {
+        return Err(Error::InvalidInput(format!(
+            "{provider_name} options as_of={} is in the future",
+            as_of.format("%Y-%m-%dT%H:%M:%SZ")
+        )));
+    }
+
+    Ok(Some(format!(
+        "{provider_name} options return current market quotes; point-in-time historical chains are not available."
+    )))
+}
+
+fn merge_notes(primary: Option<String>, secondary: Option<String>) -> Option<String> {
+    match (primary, secondary) {
+        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn option_contract_key(contract: &OptionContract) -> (String, String, i64) {
+    (
+        contract.expiry.clone(),
+        contract.option_type.clone(),
+        (contract.strike * 100.0).round() as i64,
+    )
+}
+
+fn overlay_ibkr_contracts(target: &mut [OptionContract], source: &[OptionContract]) -> usize {
+    let source_map: std::collections::BTreeMap<(String, String, i64), &OptionContract> = source
+        .iter()
+        .map(|contract| (option_contract_key(contract), contract))
+        .collect();
+    let mut changed = 0;
+
+    for contract in target {
+        let Some(ibkr) = source_map.get(&option_contract_key(contract)) else {
+            continue;
+        };
+        let mut contract_changed = false;
+        if contract.last <= 0.0 && ibkr.last > 0.0 {
+            contract.last = ibkr.last;
+            contract_changed = true;
+        }
+        if contract.implied_volatility.is_none() && ibkr.implied_volatility.is_some() {
+            contract.implied_volatility = ibkr.implied_volatility;
+            contract_changed = true;
+        }
+        if contract.delta.is_none() && ibkr.delta.is_some() {
+            contract.delta = ibkr.delta;
+            contract_changed = true;
+        }
+        if contract.gamma.is_none() && ibkr.gamma.is_some() {
+            contract.gamma = ibkr.gamma;
+            contract_changed = true;
+        }
+        if contract.theta.is_none() && ibkr.theta.is_some() {
+            contract.theta = ibkr.theta;
+            contract_changed = true;
+        }
+        if contract.vega.is_none() && ibkr.vega.is_some() {
+            contract.vega = ibkr.vega;
+            contract_changed = true;
+        }
+        if contract_changed {
+            changed += 1;
+        }
+    }
+
+    changed
+}
+
+fn nearest_contract_iv(contracts: &[OptionContract], underlying_price: f64) -> Option<f64> {
+    let mut candidates: Vec<&OptionContract> = contracts
+        .iter()
+        .filter(|contract| contract.implied_volatility.is_some())
+        .collect();
+    candidates.sort_by(|a, b| {
+        (a.strike - underlying_price)
+            .abs()
+            .partial_cmp(&(b.strike - underlying_price).abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    candidates.first().and_then(|contract| contract.implied_volatility)
+}
+
+fn refresh_overlay_iv_metrics(response: &mut OptionsResponse) {
+    let atm_iv_call = nearest_contract_iv(&response.calls, response.underlying_price);
+    let atm_iv_put = nearest_contract_iv(&response.puts, response.underlying_price);
+    let atm_iv = match (atm_iv_call, atm_iv_put) {
+        (Some(call_iv), Some(put_iv)) => Some((call_iv + put_iv) / 2.0),
+        (Some(call_iv), None) => Some(call_iv),
+        (None, Some(put_iv)) => Some(put_iv),
+        (None, None) => None,
+    };
+    response.atm_iv = atm_iv;
+    if let Some(metrics) = response.metrics.as_mut() {
+        metrics.atm_iv_call = atm_iv_call;
+        metrics.atm_iv_put = atm_iv_put;
+        metrics.atm_iv = atm_iv;
+        metrics.has_iv_data = atm_iv.is_some();
+    }
+}
+
+async fn maybe_overlay_ibkr_options(
+    req: &OptionsRequest,
+    response: &mut OptionsResponse,
+) -> Result<()> {
+    if !req.ibkr_overlay || req.ibkr.is_none() || req.list_expirations || req.multi_expiry {
+        return Ok(());
+    }
+
+    let mut ibkr_req = req.clone();
+    ibkr_req.provider = ProviderKind::Ibkr;
+    ibkr_req.ibkr_overlay = false;
+    if let Some(config) = ibkr_req.ibkr.as_mut() {
+        if config.timeout_secs.is_none() {
+            config.timeout_secs = Some(6);
+        }
+    }
+
+    match crate::finance::fetch_ibkr_options(&ibkr_req).await {
+        Ok(ibkr) => {
+            let changed = overlay_ibkr_contracts(&mut response.calls, &ibkr.calls)
+                + overlay_ibkr_contracts(&mut response.puts, &ibkr.puts);
+            if changed > 0 {
+                refresh_overlay_iv_metrics(response);
+                response.note = merge_notes(
+                    response.note.take(),
+                    Some(format!(
+                        "IBKR overlay added delayed/model fields to {changed} option contracts."
+                    )),
+                );
+            } else if let Some(note) = ibkr.note {
+                response.note = merge_notes(
+                    response.note.take(),
+                    Some(format!("IBKR overlay returned no matching fields. {note}")),
+                );
+            }
+        }
+        Err(err) => {
+            response.note = merge_notes(
+                response.note.take(),
+                {
+                    let _ = &err; // detail logged server-side, not surfaced to consumers
+                    Some("IBKR delayed/model overlay unavailable; prices reflect Yahoo data only.".to_string())
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
 async fn load_options_for_ts(
     client: &reqwest::Client,
     ticker: &str,
@@ -98,6 +335,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
     if matches!(req.provider, ProviderKind::Ibkr) {
         return crate::finance::fetch_ibkr_options(&req).await;
     }
+    let as_of_note = options_as_of_snapshot_note(req.as_of, "Yahoo")?;
     let ticker = req.ticker.trim().to_ascii_uppercase();
     if ticker.is_empty() {
         return Err(Error::InvalidInput("ticker is required".to_string()));
@@ -227,6 +465,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
 
     // If only listing expirations, return early
     if req.list_expirations {
+        let note = merge_notes(note, as_of_note.clone());
         return Ok(OptionsResponse {
             ticker,
             underlying_price,
@@ -263,7 +502,8 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
 
         let mut snapshots: Vec<ExpirySnapshot> = Vec::new();
         let mut aggregate_volume: u64 = 0;
-        let mut weighted_pc_sum: f64 = 0.0;
+        let mut aggregate_call_volume: u64 = 0;
+        let mut aggregate_put_volume: u64 = 0;
 
         // Fetch all expirations in parallel (batches of 8 to avoid Yahoo rate limits).
         // Yahoo throttles around ~10 concurrent; 8 is the safe ceiling.
@@ -328,16 +568,8 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
                                     .map(|v| v as u64)
                                     .sum();
 
-                                let pc_vol = if call_vol > 0 {
-                                    put_vol as f64 / call_vol as f64
-                                } else {
-                                    0.0
-                                };
-                                let pc_oi = if call_oi > 0 {
-                                    put_oi as f64 / call_oi as f64
-                                } else {
-                                    0.0
-                                };
+                                let pc_vol = put_call_ratio(put_vol, call_vol);
+                                let pc_oi = put_call_ratio(put_oi, call_oi);
 
                                 let total_vol = call_vol + put_vol;
 
@@ -395,16 +627,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
                                     None
                                 };
 
-                                // ATM IV
-                                let atm_iv = calls
-                                    .iter()
-                                    .min_by(|a, b| {
-                                        (a.strike - underlying_price)
-                                            .abs()
-                                            .partial_cmp(&(b.strike - underlying_price).abs())
-                                            .unwrap_or(std::cmp::Ordering::Equal)
-                                    })
-                                    .and_then(|c| c.implied_volatility);
+                                let atm_iv = yahoo_atm_iv(&calls, &puts, underlying_price);
 
                                 let expiry_date = Utc
                                     .timestamp_opt(exp_ts, 0)
@@ -419,7 +642,8 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
                                     .unwrap_or(0);
 
                                 aggregate_volume += total_vol;
-                                weighted_pc_sum += pc_vol * total_vol as f64;
+                                aggregate_call_volume += call_vol;
+                                aggregate_put_volume += put_vol;
 
                                 // Detect monthly OpEx (3rd Friday)
                                 let is_monthly = Utc
@@ -453,11 +677,8 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             // (parallel fetch already complete; no per-iteration sleep needed)
         }
 
-        let weighted_put_call_ratio = if aggregate_volume > 0 {
-            weighted_pc_sum / aggregate_volume as f64
-        } else {
-            0.0
-        };
+        let weighted_put_call_ratio =
+            put_call_ratio(aggregate_put_volume, aggregate_call_volume);
 
         // Compute cross-expiry analytics
         let aggregate_oi: u64 = snapshots.iter().map(|s| s.total_oi).sum();
@@ -542,12 +763,22 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             }
         };
 
-        // Top-level atm_iv for --all mode: pick the nearest non-expired snapshot that has IV.
-        let top_atm_iv = snapshots
+        // Top-level atm_iv for --all mode: prefer the nearest MONTHLY expiry with >=7 DTE —
+        // the economically meaningful front-month vol. The old "shortest non-expired" rule
+        // anchored to a 1-2 DTE weekly on holidays (e.g. NVDA 25.76% weekly vs 36.15% front
+        // monthly), misstating vol by ~10pp. Fall back to nearest non-expired if no monthly qualifies.
+        let nearest_monthly_atm_iv = snapshots
             .iter()
-            .filter(|s| s.atm_iv.is_some() && s.days_to_expiry >= 0)
+            .filter(|s| s.atm_iv.is_some() && s.days_to_expiry >= 7 && s.is_monthly == Some(true))
             .min_by_key(|s| s.days_to_expiry)
             .and_then(|s| s.atm_iv);
+        let top_atm_iv = nearest_monthly_atm_iv.or_else(|| {
+            snapshots
+                .iter()
+                .filter(|s| s.atm_iv.is_some() && s.days_to_expiry >= 0)
+                .min_by_key(|s| s.days_to_expiry)
+                .and_then(|s| s.atm_iv)
+        });
 
         let multi_summary = MultiExpirySummary {
             snapshots,
@@ -576,7 +807,7 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
             puts: vec![],
             atm_iv: top_atm_iv,
             metrics: None,
-            note,
+            note: merge_notes(note, as_of_note.clone()),
             multi_expiry_summary: Some(multi_summary),
         });
     }
@@ -695,10 +926,10 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
         let has_contracts = !calls.is_empty() || !puts.is_empty();
         let has_iv = calls
             .iter()
-            .any(|c| c.implied_volatility.unwrap_or(0.0) > 0.0)
+            .any(|c| yahoo_clean_contract_implied_volatility(c).is_some())
             || puts
                 .iter()
-                .any(|p| p.implied_volatility.unwrap_or(0.0) > 0.0);
+                .any(|p| yahoo_clean_contract_implied_volatility(p).is_some());
         let total_oi: i64 = calls
             .iter()
             .map(|c| c.open_interest.unwrap_or(0))
@@ -778,13 +1009,11 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
         // Validate IV range. Yahoo returns garbage IV (≈0) when markets are closed
         // and bid/ask are 0.0 — the previous "v <= 0.0" gate let through values like
         // 0.0001 (= 0.01% annualized, impossibly low for any liquid option). Discard
-        // anything below 0.005 (= 0.5% annualized) and anything above 5.0 (= 500%
+        // anything below 0.05 (= 5% annualized) and anything above 5.0 (= 500%
         // annualized, hyperinflation-tier or junk). Real liquid-option IV ranges
         // 0.05 – 2.0 (5% to 200%) annualized; thinly-traded or far-OTM contracts
         // can stretch the upper bound but rarely cross 5.0.
-        let iv = c
-            .implied_volatility
-            .and_then(|v| if v >= 0.005 && v <= 5.0 { Some(v) } else { None });
+        let iv = yahoo_clean_contract_implied_volatility(&c);
 
         OptionContract {
             contract_symbol: c.contract_symbol,
@@ -848,23 +1077,8 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
 
     // Use None when denominator is zero — 0.0 is misleading (looks like a computed
     // ratio of zero rather than "undefined").
-    let put_call_ratio_volume = if total_call_volume > 0 {
-        Some(total_put_volume as f64 / total_call_volume as f64)
-    } else if total_put_volume > 0 {
-        // All volume is puts, no call volume — extremely bearish; represent as high ratio.
-        Some(f64::INFINITY.min(99.99))
-    } else {
-        // No volume at all (weekend/holiday) — ratio is undefined.
-        None
-    };
-
-    let put_call_ratio_oi = if total_call_oi > 0 {
-        Some(total_put_oi as f64 / total_call_oi as f64)
-    } else if total_put_oi > 0 {
-        Some(f64::INFINITY.min(99.99))
-    } else {
-        None
-    };
+    let put_call_ratio_volume = put_call_ratio(total_put_volume, total_call_volume);
+    let put_call_ratio_oi = put_call_ratio(total_put_oi, total_call_oi);
 
     // Find ATM options — pick the closest strike that actually has IV data.
     // Previously we picked the absolute closest strike and then tried to read its IV,
@@ -983,9 +1197,9 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
 
     // Advisory `note` prose dropped — numeric fields (total_call_oi,
     // has_liquid_near_money, expirations) already convey the same info.
-    let note: Option<String> = note;
+    let note: Option<String> = merge_notes(note, as_of_note);
 
-    Ok(OptionsResponse {
+    let mut response = OptionsResponse {
         ticker,
         underlying_price,
         generated_at: Utc::now(),
@@ -1004,5 +1218,70 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
         metrics,
         note,
         multi_expiry_summary: None,
-    })
+    };
+
+    maybe_overlay_ibkr_options(&req, &mut response).await?;
+    Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn yahoo_contract(strike: f64, iv: Option<f64>) -> YahooContract {
+        YahooContract {
+            contract_symbol: format!("TEST{strike}"),
+            strike,
+            expiration: 0,
+            bid: Some(1.0),
+            ask: Some(1.1),
+            last_price: None,
+            change: None,
+            percent_change: None,
+            volume: None,
+            open_interest: None,
+            implied_volatility: iv,
+            in_the_money: None,
+        }
+    }
+
+    #[test]
+    fn yahoo_iv_cleaner_drops_placeholder_vols() {
+        assert_eq!(yahoo_clean_implied_volatility(Some(0.00001)), None);
+        assert_eq!(yahoo_clean_implied_volatility(Some(0.007822421875)), None);
+        assert_eq!(yahoo_clean_implied_volatility(Some(0.01563484375)), None);
+        assert_eq!(yahoo_clean_implied_volatility(Some(0.0312596875)), None);
+        assert_eq!(yahoo_clean_implied_volatility(Some(0.25)), Some(0.25));
+        assert_eq!(yahoo_clean_implied_volatility(Some(7.0)), None);
+    }
+
+    #[test]
+    fn yahoo_contract_iv_requires_bid_or_ask() {
+        let mut contract = yahoo_contract(100.0, Some(0.25));
+        assert_eq!(yahoo_clean_contract_implied_volatility(&contract), Some(0.25));
+        contract.bid = Some(0.0);
+        contract.ask = Some(0.0);
+        assert_eq!(yahoo_clean_contract_implied_volatility(&contract), None);
+    }
+
+    #[test]
+    fn put_call_ratio_preserves_undefined_vs_zero() {
+        assert_eq!(put_call_ratio(0, 0), None);
+        assert_eq!(put_call_ratio(0, 100), Some(0.0));
+        assert_eq!(put_call_ratio(50, 100), Some(0.5));
+        assert_eq!(put_call_ratio(100, 0), Some(99.99));
+    }
+
+    #[test]
+    fn yahoo_atm_iv_uses_nearest_clean_contract() {
+        let calls = vec![
+            yahoo_contract(100.0, Some(0.007822421875)),
+            yahoo_contract(105.0, Some(0.30)),
+        ];
+        let puts = vec![
+            yahoo_contract(100.0, Some(0.01563484375)),
+            yahoo_contract(95.0, Some(0.40)),
+        ];
+        assert_eq!(yahoo_atm_iv(&calls, &puts, 101.0), Some(0.35));
+    }
 }

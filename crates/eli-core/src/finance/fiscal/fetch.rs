@@ -124,9 +124,18 @@ pub async fn fetch_fiscal(req: FiscalRequest) -> Result<FiscalResponse> {
                 })
                 .collect();
 
+            let data_as_of = items.first().map(|i| i.record_date.clone());
+            let staleness_days = data_as_of.as_deref().and_then(|d| {
+                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                    .ok()
+                    .map(|nd| (Utc::now().date_naive() - nd).num_days())
+            });
             Ok(FiscalResponse {
                 generated_at: Utc::now(),
                 kind,
+                release_cadence: Some("daily".to_string()),
+                data_as_of,
+                staleness_days,
                 debt: Some(items),
                 statement: None,
                 interest: None,
@@ -161,9 +170,18 @@ pub async fn fetch_fiscal(req: FiscalRequest) -> Result<FiscalResponse> {
                 })
                 .collect();
 
+            let data_as_of = items.first().map(|i| i.record_date.clone());
+            let staleness_days = data_as_of.as_deref().and_then(|d| {
+                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                    .ok()
+                    .map(|nd| (Utc::now().date_naive() - nd).num_days())
+            });
             Ok(FiscalResponse {
                 generated_at: Utc::now(),
                 kind,
+                release_cadence: Some("daily".to_string()),
+                data_as_of,
+                staleness_days,
                 debt: None,
                 statement: Some(items),
                 interest: None,
@@ -193,9 +211,20 @@ pub async fn fetch_fiscal(req: FiscalRequest) -> Result<FiscalResponse> {
                 })
                 .collect();
 
+            let data_as_of = items.first().map(|i| i.record_date.clone());
+            let staleness_days = data_as_of.as_deref().and_then(|d| {
+                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                    .ok()
+                    .map(|nd| (Utc::now().date_naive() - nd).num_days())
+            });
             Ok(FiscalResponse {
                 generated_at: Utc::now(),
                 kind,
+                // interest is a MONTHLY series — the key staleness label, since it otherwise
+                // looks identical to the daily debt/statement feeds.
+                release_cadence: Some("monthly".to_string()),
+                data_as_of,
+                staleness_days,
                 debt: None,
                 statement: None,
                 interest: Some(items),

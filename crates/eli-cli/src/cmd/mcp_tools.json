@@ -1,13 +1,13 @@
 [
         {
             "name": "finance_timeseries",
-            "description": "Universal data spine: OHLCV time series with cross-asset correlation analytics. 8 providers auto-detected from ticker pattern: stocks/ETFs/futures→Yahoo, FRED macro series→FRED (also FRED: prefix), IBKR:→Interactive Brokers 15-min delayed futures/FX/equities (e.g. IBKR:FUT:CL:NYMEX, IBKR:CASH:EUR:IDEALPRO), CLEV:→Cleveland Fed daily inflation nowcast (CLEV:CPI, CLEV:COREPCE), KX*→Kalshi candlesticks, numeric 6+digit→Polymarket price history, PYTH:→24/7 oracle, BN:→Binance crypto (2019+ depth). Mix sources freely in one call — top-level `sources` field lists distinct providers actually returned. Every candle has a 't' timestamp — check it for data freshness. Presets expand to curated groups.",
+            "description": "Universal data spine: OHLCV time series for every asset class on ONE shared time axis (stocks, FRED macro, futures, crypto, and prediction-market odds), with per-series return and annualized-volatility stats. PRESETS ARE THE POWER FEATURE — the `preset` arg pulls a whole curated domain in ONE call (17 available) and composes with ad-hoc `tickers` in the same call (e.g. preset=macro + tickers=NVDA,SMH gives the macro backdrop plus your names). Key presets: `macro` (34 series — CPI/PCE/jobs/GDP/rates/debt/M2 + live oil/gold/BTC), `recession` (Sahm rule, 10Y-2Y & 10Y-3M, claims, Chicago Fed), `credit` (full ICE BofA OAS stack IG→BBB→HY→BB→B→CCC→EM), `financial_conditions` (NFCI/STLFSI/VIX), `inflation`, `labor`, `housing`, `yield_curve` (1mo–30Y), `real_rates` (TIPS+breakevens), `consumer_credit`, `fed_balance_sheet` (QE/QT plumbing), `liquidity`, `forex_majors`, `crypto`, plus IBKR futures baskets `energy`/`commodities`/`treasuries` (full list + aliases in the `preset` arg). Reach for a preset before hand-listing tickers. For ad-hoc tickers, 8 providers auto-detect by pattern: stocks/ETFs/futures→Yahoo, FRED→FRED (or FRED: prefix), IBKR:→Interactive Brokers 15-min-delayed futures/FX/equities (e.g. IBKR:FUT:CL:NYMEX, IBKR:CASH:EUR:IDEALPRO), CLEV:→Cleveland Fed inflation nowcast, KX*→Kalshi, numeric 6+digit→Polymarket, PYTH:→24/7 oracle, BN:→Binance. `sources` lists providers returned; every candle has a 't' timestamp — check it for freshness.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "preset": {
                         "type": "string",
-                        "description": "17 presets: macro, yield_curve, liquidity, credit (ICE BofA OAS), financial_conditions (NFCI/STLFSI4/VIX), recession (Sahm/spreads/claims), fed_balance_sheet (QE/QT), housing (Case-Shiller/starts/mortgage), labor (NFP/JOLTS/wages), inflation (CPI/PCE/sticky/median), real_rates (TIPS), consumer_credit (delinquency/SLOOS), forex_majors, crypto, energy (WTI/Brent/NG/RBOB/HO/Gasoil via IBKR), commodities (CL/GC/SI/HG/grains/softs via IBKR), treasuries (ZT/ZF/ZN/ZB/VIX futures via IBKR)."
+                        "description": "Pass preset=list to get the full catalog with each preset's exact tickers; preset=<name> pulls the basket and composes with `tickers` in the same call (e.g. preset=macro + tickers=NVDA,SMH). 17 presets: macro, yield_curve, liquidity, credit (ICE BofA OAS), financial_conditions (NFCI/STLFSI4/VIX), recession (Sahm/spreads/claims), fed_balance_sheet (QE/QT), housing (Case-Shiller/starts/mortgage), labor (NFP/JOLTS/wages), inflation (CPI/PCE/sticky/median), real_rates (TIPS), consumer_credit (delinquency/SLOOS), forex_majors, crypto, energy (WTI/Brent/NG/RBOB/HO/Gasoil via IBKR), commodities (CL/GC/SI/HG/grains/softs via IBKR), treasuries (ZT/ZF/ZN/ZB/VIX futures via IBKR). IBKR-backed baskets auto-fall-back to Yahoo front-month when IB Gateway is down."
                     },
                     "tickers": {
                         "type": "string",
@@ -258,13 +258,42 @@
         },
         {
             "name": "finance_options",
-            "description": "Options chain with IV (from Yahoo), put/call OI ratio, max pain, and vol skew. Defaults to summary mode with ±10% strikes around current price. No Greeks (no Black-Scholes) — IV is passthrough from exchange. Max pain filters out pre-split strike artifacts. For full chain across ALL expirations with IV term structure and OI concentration, pass all=true. Top-level `atm_iv` mirrors `metrics.atm_iv` (jq `.atm_iv`); in `all=true` mode it reflects the nearest non-expired snapshot's ATM IV.",
+            "description": "Options chain with provider-native quotes/IV where available, put/call OI ratio, max pain, and vol skew. Default provider is auto: Yahoo baseline plus opportunistic IBKR delayed/model overlay when Gateway/TWS is reachable. Use provider=yahoo for Yahoo-only or provider=ibkr for IBKR-only debugging. Yahoo IV is passthrough and filtered fail-closed for placeholder values; Yahoo does not provide Greeks. Max pain filters out pre-split strike artifacts. For full chain across ALL expirations with IV term structure and OI concentration, pass all=true. Top-level `atm_iv` mirrors `metrics.atm_iv` (jq `.atm_iv`); in `all=true` mode it reflects the nearest non-expired snapshot's ATM IV.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "ticker": {
                         "type": "string",
                         "description": "Underlying ticker (e.g. SPY, NVDA, AAPL, QQQ)"
+                    },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "yahoo", "ibkr"],
+                        "description": "Data provider. Default auto uses Yahoo baseline and overlays IBKR delayed/model fields when Gateway/TWS is reachable. Use yahoo for Yahoo-only or ibkr for direct IBKR-only."
+                    },
+                    "ibkr_account": {
+                        "type": "string",
+                        "description": "Optional IBKR account override when provider=ibkr."
+                    },
+                    "ibkr_host": {
+                        "type": "string",
+                        "description": "Optional IBKR host override when provider=ibkr."
+                    },
+                    "ibkr_port": {
+                        "type": "integer",
+                        "description": "Optional IBKR port override when provider=ibkr."
+                    },
+                    "ibkr_client_id": {
+                        "type": "integer",
+                        "description": "Optional IBKR client id override when provider=ibkr."
+                    },
+                    "ibkr_market_data_type": {
+                        "type": "integer",
+                        "description": "Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen."
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Optional as-of timestamp (YYYY-MM-DD or RFC3339). Current options providers support live/delayed snapshot chains only; historical full-chain as_of requests are rejected instead of relabeled."
                     },
                     "all": {
                         "type": "boolean",
@@ -322,6 +351,31 @@
                     "query": {
                         "type": "string",
                         "description": "Search query (e.g. tesla, unemployment, S&P 500, crude oil)"
+                    },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "yahoo", "ibkr"],
+                        "description": "Search provider. Default auto uses the normal Yahoo+FRED discovery path; ibkr uses IBKR contract search when Gateway/TWS is reachable."
+                    },
+                    "ibkr_account": {
+                        "type": "string",
+                        "description": "Optional IBKR account override when provider=ibkr."
+                    },
+                    "ibkr_host": {
+                        "type": "string",
+                        "description": "Optional IBKR host override when provider=ibkr."
+                    },
+                    "ibkr_port": {
+                        "type": "integer",
+                        "description": "Optional IBKR port override when provider=ibkr."
+                    },
+                    "ibkr_client_id": {
+                        "type": "integer",
+                        "description": "Optional IBKR client id override when provider=ibkr."
+                    },
+                    "ibkr_market_data_type": {
+                        "type": "integer",
+                        "description": "Optional IBKR market data type: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen."
                     }
                 },
                 "required": ["query"]
@@ -329,7 +383,7 @@
         },
         {
             "name": "finance_filings",
-            "description": "Download recent SEC filings by ticker. Returns SEC metadata, filing URLs, local primary-document paths, saved filing index JSON, and optionally all filing attachments. No filing text parsing or inline excerpting.",
+            "description": "Download recent SEC filings by ticker. Returns SEC metadata, filing URLs, local primary-document paths, saved filing index JSON, optionally all filing attachments, and optionally inline raw primary-document text with raw_text=true.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -349,17 +403,29 @@
                         "type": "boolean",
                         "description": "Download primary filing documents and index JSON to local cache. Default: true"
                     },
+                    "single_file": {
+                        "type": "boolean",
+                        "description": "Download exactly one file: the primary document for the most recent matching filing. Forces limit=1 and skips index/exhibits. Default: false"
+                    },
                     "download_all": {
                         "type": "boolean",
                         "description": "Download every file listed in each filing index, including exhibits/attachments. Default: false"
+                    },
+                    "important_exhibits": {
+                        "type": "boolean",
+                        "description": "Download filtered useful text exhibits such as EX-99, earnings releases, and slides while skipping image/XBRL/support noise. Default: true unless download=false"
                     },
                     "include_text": {
                         "type": "boolean",
                         "description": "Deprecated alias for download=true; no text parsing or inline excerpt is performed"
                     },
+                    "raw_text": {
+                        "type": "boolean",
+                        "description": "Include the primary filing document's raw decoded text inline. Use max_chars to cap response size."
+                    },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Deprecated; ignored because filings are downloaded raw"
+                        "description": "Maximum characters of inline raw_text to return when raw_text=true."
                     },
                     "user_agent": {
                         "type": "string",
@@ -544,7 +610,7 @@
         },
         {
             "name": "finance_eia",
-            "description": "EIA (U.S. Energy Information Administration): weekly petroleum inventories (crude oil, gasoline, distillate stocks) and natural gas storage. Requires EIA_API_KEY env var (free registration at eia.gov/opendata).",
+            "description": "EIA (U.S. Energy Information Administration): weekly petroleum inventories (crude oil, gasoline, distillate stocks) and natural gas storage. Preset-driven: crude | gasoline | distillate | all | nat_gas (or a custom `route`). Requires EIA_API_KEY env var (free registration at eia.gov/opendata).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -569,7 +635,7 @@
         },
         {
             "name": "finance_bis",
-            "description": "BIS (Bank for International Settlements): global central bank policy rates, total assets, credit-to-GDP gaps, property prices, real effective exchange rates. Covers 40-50 economies. No auth.",
+            "description": "BIS (Bank for International Settlements): global central bank policy rates, total assets, credit-to-GDP gaps, property prices, real effective exchange rates. Covers 40-50 economies. Preset-driven: policy_rates | assets | credit_gap | property | eer (or a custom SDMX dataset+key). No auth.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -598,7 +664,7 @@
         },
         {
             "name": "finance_boj",
-            "description": "Bank of Japan: monetary base, BOJ balance sheet (total assets, JGB holdings, ETF holdings), TANKAN business sentiment DI, call rate, M2/M3 money stock, USD/JPY. New Feb 2026 API, no auth.",
+            "description": "Bank of Japan: monetary base, BOJ balance sheet (total assets, JGB holdings, ETF holdings), TANKAN business sentiment DI, call rate, M2/M3 money stock, USD/JPY. Preset-driven: policy_rate | call_rate | monetary_base | balance_sheet | money_stock | tankan | fx (or custom db+codes). New Feb 2026 API, no auth.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -623,7 +689,7 @@
         },
         {
             "name": "finance_boe",
-            "description": "Bank of England: Bank Rate, SONIA, gilt yields (5Y/10Y/20Y par and zero-coupon), M4 money supply, GBP exchange rates. CSV endpoint, no auth.",
+            "description": "Bank of England: Bank Rate, SONIA, gilt yields (5Y/10Y/20Y par and zero-coupon), M4 money supply, GBP exchange rates. Preset-driven: bank_rate | sonia | gilts | m4 | fx | all (or custom `codes`). CSV endpoint, no auth.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

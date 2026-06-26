@@ -87,9 +87,10 @@ async fn cmd_finance_search(args: FinanceSearchArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!(e))
         .context("parse --policy-mode")?;
     let provider = match args.provider.trim().to_ascii_lowercase().as_str() {
+        "auto" | "" => eli_core::finance::ProviderKind::Yahoo,
         "yahoo" => eli_core::finance::ProviderKind::Yahoo,
         "ibkr" => eli_core::finance::ProviderKind::Ibkr,
-        other => anyhow::bail!("unsupported --provider '{other}' (supported: yahoo, ibkr)"),
+        other => anyhow::bail!("unsupported --provider '{other}' (supported: auto, yahoo, ibkr)"),
     };
     let use_ibkr = matches!(provider, eli_core::finance::ProviderKind::Ibkr);
     let req = eli_core::finance::SearchRequest {
@@ -163,9 +164,17 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
     let req = eli_core::finance::FilingsRequest {
         ticker: args.ticker,
         forms: args.forms,
-        limit: Some(args.limit),
-        download: !args.no_download || args.include_text || args.download_all,
+        limit: Some(if args.single_file { 1 } else { args.limit }),
+        download: !args.no_download
+            || args.include_text
+            || args.download_all
+            || args.single_file
+            || args.press_release_text,
         download_all: args.download_all,
+        important_exhibits: !args.primary_only && !args.single_file,
+        single_file: args.single_file,
+        raw_text: args.raw_text,
+        press_release_text: args.press_release_text,
         include_text: args.include_text,
         max_chars: args.max_chars,
         user_agent,

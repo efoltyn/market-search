@@ -39,24 +39,40 @@ async fn cmd_finance_options(args: FinanceOptionsArgs) -> Result<()> {
     };
 
     let ticker_for_meta = args.ticker.clone();
-    let provider = match args.provider.trim().to_ascii_lowercase().as_str() {
+    let provider_raw = args.provider.trim().to_ascii_lowercase();
+    let provider = match provider_raw.as_str() {
+        "auto" => eli_core::finance::ProviderKind::Yahoo,
         "yahoo" => eli_core::finance::ProviderKind::Yahoo,
         "ibkr" => eli_core::finance::ProviderKind::Ibkr,
-        other => anyhow::bail!("unsupported --provider '{other}' (supported: yahoo, ibkr)"),
+        other => anyhow::bail!("unsupported --provider '{other}' (supported: auto, yahoo, ibkr)"),
     };
-    let use_ibkr = matches!(provider, eli_core::finance::ProviderKind::Ibkr);
+    let as_of = match args.as_of.as_ref() {
+        Some(raw) => Some(
+            eli_core::finance::parse_as_of(raw)
+                .map_err(|e| anyhow::anyhow!("invalid --as-of: {e}"))?,
+        ),
+        None => None,
+    };
+    let ibkr_overlay = provider_raw == "auto";
+    let use_ibkr = matches!(provider, eli_core::finance::ProviderKind::Ibkr) || ibkr_overlay;
     let req = eli_core::finance::OptionsRequest {
         ticker: args.ticker,
         provider,
         ibkr: use_ibkr.then(|| {
-            build_options_ibkr_connection_config(
+            let mut config = build_options_ibkr_connection_config(
                 args.ibkr_account.clone(),
                 args.ibkr_host.clone(),
                 args.ibkr_port,
                 args.ibkr_client_id,
                 args.ibkr_market_data_type,
-            )
+            );
+            if ibkr_overlay && config.timeout_secs.is_none() {
+                config.timeout_secs = Some(6);
+            }
+            config
         }),
+        ibkr_overlay,
+        as_of,
         expiry: args.expiry,
         target_dte_days: args.target_dte,
         option_type,

@@ -124,6 +124,24 @@ struct OptionQuoteAccumulator {
     vega: Option<f64>,
 }
 
+impl OptionQuoteAccumulator {
+    fn has_observation(&self) -> bool {
+        self.bid.is_some()
+            || self.ask.is_some()
+            || self.last.is_some()
+            || self.volume.is_some()
+            || self.open_interest.is_some()
+            || self.iv_bid.is_some()
+            || self.iv_ask.is_some()
+            || self.iv_last.is_some()
+            || self.iv_model.is_some()
+            || self.delta.is_some()
+            || self.gamma.is_some()
+            || self.theta.is_some()
+            || self.vega.is_some()
+    }
+}
+
 pub fn resolve_ibkr_connection(
     overrides: Option<&IbkrConnectionConfig>,
 ) -> Result<IbkrConnectionConfig> {
@@ -137,6 +155,22 @@ pub async fn invoke_ibkr_bridge(
 ) -> Result<Value> {
     let connection = resolve_ibkr_connection(overrides)?;
     dispatch_ibkr_action(action, payload, &connection).await
+}
+
+fn is_ibkr_market_data_not_subscribed(err: &Error) -> bool {
+    matches!(err, Error::Provider(msg) if msg.contains("ibkr market data not subscribed"))
+}
+
+fn is_market_data_entitlement_code(code: i32) -> bool {
+    matches!(code, 354 | 10089 | 10090 | 10091 | 10168)
+}
+
+async fn switch_to_delayed_frozen_market_data(client: &Client) -> Result<()> {
+    client
+        .switch_market_data_type(MarketDataType::DelayedFrozen)
+        .await
+        .map_err(map_ibapi_error)
+        .map_err(Error::Provider)
 }
 
 /// Parse an IBKR ticker spec.  Supports rich syntax:
@@ -594,11 +628,14 @@ pub async fn fetch_ibkr_options(req: &OptionsRequest) -> Result<OptionsResponse>
             "ibkr provider does not support multi-expiry options summary yet".to_string(),
         ));
     }
+    let as_of_note = super::options::options_as_of_snapshot_note(req.as_of, "IBKR")?;
 
     let connection = resolve_ibkr_connection(req.ibkr.as_ref())?;
     let client = connect_client(&connection).await?;
     apply_market_data_type(&client, &connection).await?;
     let timeout_secs = connection.timeout_secs.unwrap_or(20);
+    let requested_type = requested_market_data_type(&connection);
+    let mut effective_market_data_type = requested_type;
     let ticker = req.ticker.trim().to_ascii_uppercase();
     if ticker.is_empty() {
         return Err(Error::InvalidInput("ticker is required".to_string()));
@@ -616,28 +653,37 @@ pub async fn fetch_ibkr_options(req: &OptionsRequest) -> Result<OptionsResponse>
     )
     .await?;
 
-    let underlying_snapshot =
-        fetch_contract_snapshot(&client, &detail.contract, timeout_secs).await?;
-    let underlying_price = underlying_snapshot
+    let (underlying_snapshot, fallback_used) = fetch_contract_snapshot_with_market_data_fallback(
+        &client,
+        &detail.contract,
+        requested_type,
+        timeout_secs,
+        &format!("{ticker} underlying"),
+    )
+    .await?;
+    if fallback_used {
+        effective_market_data_type = 4;
+    }
+    let mut underlying_price = underlying_snapshot
         .current_price
         .or(underlying_snapshot.previous_close)
         .unwrap_or(0.0);
+    if underlying_price <= 0.0 {
+        if let Some(close) =
+            fetch_contract_historical_close(&client, &detail.contract, timeout_secs).await?
+        {
+            underlying_price = close;
+        }
+    }
 
-    let mut chain_subscription = timeout(
-        StdDuration::from_secs(timeout_secs),
-        client.option_chain(
-            &ticker,
-            "SMART",
-            detail.contract.security_type.clone(),
-            detail.contract.contract_id,
-        ),
+    let mut chains = request_option_chains(
+        &client,
+        &ticker,
+        detail.contract.security_type.clone(),
+        detail.contract.contract_id,
+        timeout_secs,
     )
-    .await
-    .map_err(|_| Error::Provider("timeout requesting ibkr option chain".to_string()))?
-    .map_err(map_ibapi_error)
-    .map_err(Error::Provider)?;
-
-    let mut chains = collect_option_chains(&mut chain_subscription, timeout_secs).await?;
+    .await?;
     let chain = if let Some(idx) = chains
         .iter()
         .position(|chain| chain.exchange.eq_ignore_ascii_case("SMART"))
@@ -676,7 +722,7 @@ pub async fn fetch_ibkr_options(req: &OptionsRequest) -> Result<OptionsResponse>
             puts: vec![],
             atm_iv: None,
             metrics: None,
-            note: None,
+            note: as_of_note,
             multi_expiry_summary: None,
         });
     }
@@ -730,7 +776,25 @@ pub async fn fetch_ibkr_options(req: &OptionsRequest) -> Result<OptionsResponse>
         if include_calls {
             let contract =
                 build_option_contract(&detail, &chain, &selected_expiry_raw, strike, "C")?;
-            let quote = fetch_option_quote_snapshot(&client, &contract, true, timeout_secs).await?;
+            let contract = qualify_option_contract(
+                &client,
+                contract,
+                timeout_secs,
+                &format!("{ticker} {selected_expiry} C {strike}"),
+            )
+            .await?;
+            let (quote, fallback_used) = fetch_option_quote_snapshot_with_market_data_fallback(
+                &client,
+                &contract,
+                true,
+                effective_market_data_type,
+                timeout_secs,
+                &format!("{ticker} {selected_expiry} C {strike}"),
+            )
+            .await?;
+            if fallback_used {
+                effective_market_data_type = 4;
+            }
             calls.push(build_option_contract_row(
                 &ticker,
                 &selected_expiry,
@@ -743,8 +807,25 @@ pub async fn fetch_ibkr_options(req: &OptionsRequest) -> Result<OptionsResponse>
         if include_puts {
             let contract =
                 build_option_contract(&detail, &chain, &selected_expiry_raw, strike, "P")?;
-            let quote =
-                fetch_option_quote_snapshot(&client, &contract, false, timeout_secs).await?;
+            let contract = qualify_option_contract(
+                &client,
+                contract,
+                timeout_secs,
+                &format!("{ticker} {selected_expiry} P {strike}"),
+            )
+            .await?;
+            let (quote, fallback_used) = fetch_option_quote_snapshot_with_market_data_fallback(
+                &client,
+                &contract,
+                false,
+                effective_market_data_type,
+                timeout_secs,
+                &format!("{ticker} {selected_expiry} P {strike}"),
+            )
+            .await?;
+            if fallback_used {
+                effective_market_data_type = 4;
+            }
             puts.push(build_option_contract_row(
                 &ticker,
                 &selected_expiry,
@@ -768,7 +849,7 @@ pub async fn fetch_ibkr_options(req: &OptionsRequest) -> Result<OptionsResponse>
         selection_reason,
         calls,
         puts,
-        None,
+        as_of_note,
     )
 }
 
@@ -788,6 +869,90 @@ async fn collect_option_chains(
         }
     }
     Ok(chains)
+}
+
+async fn request_option_chains(
+    client: &Client,
+    ticker: &str,
+    security_type: SecurityType,
+    contract_id: i32,
+    timeout_secs: u64,
+) -> Result<Vec<ibapi::contracts::OptionChain>> {
+    let contract_ids: Vec<i32> = if contract_id > 0 {
+        vec![contract_id, 0]
+    } else {
+        vec![0]
+    };
+    let mut attempts = Vec::new();
+    let mut best_chains: Option<(usize, Vec<ibapi::contracts::OptionChain>)> = None;
+    let chain_timeout_secs = timeout_secs.min(5).max(1);
+
+    for exchange in ["SMART", "", "CBOE", "ARCA"] {
+        for candidate_contract_id in &contract_ids {
+            let attempt = format!(
+                "exchange={},contract_id={}",
+                if exchange.is_empty() {
+                    "<empty>"
+                } else {
+                    exchange
+                },
+                candidate_contract_id
+            );
+            let subscription_result = timeout(
+                StdDuration::from_secs(chain_timeout_secs),
+                client.option_chain(
+                    ticker,
+                    exchange,
+                    security_type.clone(),
+                    *candidate_contract_id,
+                ),
+            )
+            .await;
+
+            let mut subscription = match subscription_result {
+                Ok(Ok(subscription)) => subscription,
+                Ok(Err(err)) => {
+                    attempts.push(format!("{attempt}: {}", map_ibapi_error(err)));
+                    continue;
+                }
+                Err(_) => {
+                    attempts.push(format!("{attempt}: timeout"));
+                    continue;
+                }
+            };
+
+            let chains = match collect_option_chains(&mut subscription, chain_timeout_secs).await {
+                Ok(chains) => chains,
+                Err(err) => {
+                    attempts.push(format!("{attempt}: {err}"));
+                    continue;
+                }
+            };
+            attempts.push(format!("{attempt}: {} chains", chains.len()));
+            if !chains.is_empty() {
+                let score = chains
+                    .iter()
+                    .map(|chain| chain.expirations.len() + chain.strikes.len())
+                    .sum();
+                if best_chains
+                    .as_ref()
+                    .map(|(best_score, _)| score > *best_score)
+                    .unwrap_or(true)
+                {
+                    best_chains = Some((score, chains));
+                }
+            }
+        }
+    }
+
+    if let Some((_, chains)) = best_chains {
+        return Ok(chains);
+    }
+
+    Err(Error::Provider(format!(
+        "no option chain returned for {ticker} (tried {})",
+        attempts.join("; ")
+    )))
 }
 
 fn select_ibkr_expiry(
@@ -879,7 +1044,7 @@ fn build_option_contract(
         } else {
             chain.exchange.clone()
         }),
-        primary_exchange: non_empty(detail.contract.primary_exchange.to_string()),
+        primary_exchange: None,
         currency: non_empty(detail.contract.currency.to_string()),
         expiry: Some(expiry_raw.to_string()),
         strike: Some(strike),
@@ -889,19 +1054,54 @@ fn build_option_contract(
     })
 }
 
+async fn qualify_option_contract(
+    client: &Client,
+    contract: Contract,
+    timeout_secs: u64,
+    context: &str,
+) -> Result<Contract> {
+    let details = timeout(
+        StdDuration::from_secs(timeout_secs.min(8).max(1)),
+        client.contract_details(&contract),
+    )
+    .await
+    .map_err(|_| Error::Provider(format!("timeout qualifying ibkr option contract {context}")))?
+    .map_err(map_ibapi_error)
+    .map_err(Error::Provider)?;
+
+    let mut all: Vec<ContractDetails> = details.into_iter().collect();
+    if all.is_empty() {
+        return Err(Error::Provider(format!(
+            "no IBKR contract details found for option {context}"
+        )));
+    }
+    all.sort_by_key(|detail| {
+        let exchange_penalty = if detail
+            .contract
+            .exchange
+            .to_string()
+            .eq_ignore_ascii_case("SMART")
+        {
+            0
+        } else {
+            1
+        };
+        (exchange_penalty, -detail.contract.contract_id)
+    });
+    let qualified = all.remove(0).contract;
+    Ok(qualified)
+}
+
 async fn fetch_option_quote_snapshot(
     client: &Client,
     contract: &Contract,
     is_call: bool,
+    market_data_type: i32,
     timeout_secs: u64,
 ) -> Result<OptionQuoteAccumulator> {
     let mut subscription = timeout(
         StdDuration::from_secs(timeout_secs),
-        client
-            .market_data(contract)
-            .generic_ticks(&["100", "101"])
-            .snapshot()
-            .subscribe(),
+        client.market_data(contract).subscribe(),
     )
     .await
     .map_err(|_| Error::Provider("timeout creating ibkr option snapshot".to_string()))?
@@ -909,10 +1109,16 @@ async fn fetch_option_quote_snapshot(
     .map_err(Error::Provider)?;
 
     let deadline = Instant::now() + StdDuration::from_secs(timeout_secs);
+    let idle_timeout = StdDuration::from_millis(750);
     let mut quote = OptionQuoteAccumulator::default();
     loop {
         let remaining = remaining_time(deadline)?;
-        match timeout(remaining, subscription.next()).await {
+        let wait = if quote.has_observation() {
+            remaining.min(idle_timeout)
+        } else {
+            remaining
+        };
+        match timeout(wait, subscription.next()).await {
             Ok(Some(Ok(TickTypes::Price(price)))) => {
                 apply_option_price_tick(&mut quote, price.tick_type, price.price)
             }
@@ -932,7 +1138,17 @@ async fn fetch_option_quote_snapshot(
                 apply_option_computation_tick(&mut quote, computation)
             }
             Ok(Some(Ok(TickTypes::SnapshotEnd))) => break,
-            Ok(Some(Ok(TickTypes::Notice(_)))) => {}
+            Ok(Some(Ok(TickTypes::Notice(notice)))) => {
+                if is_market_data_entitlement_code(notice.code) {
+                    if market_data_type == 1 {
+                        return Err(Error::Provider(format!(
+                            "ibkr market data not subscribed (code {}: {}). Retry with --market-data-type 3 (delayed) or --market-data-type 4 (delayed-frozen).",
+                            notice.code, notice.message
+                        )));
+                    }
+                    continue;
+                }
+            }
             Ok(Some(Ok(_))) => {}
             Ok(Some(Err(err))) => return Err(Error::Provider(map_ibapi_error(err))),
             Ok(None) => break,
@@ -940,6 +1156,42 @@ async fn fetch_option_quote_snapshot(
         }
     }
     Ok(quote)
+}
+
+async fn fetch_option_quote_snapshot_with_market_data_fallback(
+    client: &Client,
+    contract: &Contract,
+    is_call: bool,
+    requested_market_data_type: i32,
+    timeout_secs: u64,
+    context: &str,
+) -> Result<(OptionQuoteAccumulator, bool)> {
+    let quote_timeout_secs = if requested_market_data_type == 1 {
+        timeout_secs
+    } else {
+        timeout_secs.min(4).max(1)
+    };
+    match fetch_option_quote_snapshot(
+        client,
+        contract,
+        is_call,
+        requested_market_data_type,
+        quote_timeout_secs,
+    )
+    .await
+    {
+        Ok(quote) => Ok((quote, false)),
+        Err(err) if requested_market_data_type == 1 && is_ibkr_market_data_not_subscribed(&err) => {
+            switch_to_delayed_frozen_market_data(client).await?;
+            eprintln!(
+                "[ibkr options] {context}: live entitlement denied, retrying with delayed-frozen ({err})"
+            );
+            fetch_option_quote_snapshot(client, contract, is_call, 4, timeout_secs.min(4).max(1))
+                .await
+                .map(|quote| (quote, true))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn apply_option_price_tick(quote: &mut OptionQuoteAccumulator, tick_type: TickType, price: f64) {
@@ -1127,6 +1379,14 @@ fn build_options_response(
     let has_iv_data = atm_iv_call.is_some() || atm_iv_put.is_some();
     let has_liquid_near_money =
         (total_call_volume + total_put_volume + total_call_oi + total_put_oi) > 0;
+    let has_price_quote = calls
+        .iter()
+        .chain(puts.iter())
+        .any(|contract| contract.bid > 0.0 || contract.ask > 0.0 || contract.last > 0.0);
+    let has_bid_ask = calls
+        .iter()
+        .chain(puts.iter())
+        .any(|contract| contract.bid > 0.0 || contract.ask > 0.0);
     let all_strikes: std::collections::BTreeSet<i64> = calls
         .iter()
         .map(|c| (c.strike * 100.0).round() as i64)
@@ -1173,6 +1433,27 @@ fn build_options_response(
         max_pain,
         expirations_analyzed: Some(1),
     });
+
+    let mut note = note;
+    if calls.is_empty() && puts.is_empty() {
+        let msg = "IBKR returned expirations but no option strikes for the selected chain; use provider=yahoo for a public-chain fallback or check IBKR's option-chain permissions.";
+        note = Some(match note {
+            Some(existing) => format!("{existing} {msg}"),
+            None => msg.to_string(),
+        });
+    } else if !has_price_quote && !has_iv_data && !has_liquid_near_money {
+        let msg = "IBKR returned option contract definitions but no quote, IV, volume, or open-interest ticks; this usually means the Gateway session lacks options market-data entitlement. Use provider=yahoo for public delayed quotes or enable the relevant IBKR options market data.";
+        note = Some(match note {
+            Some(existing) => format!("{existing} {msg}"),
+            None => msg.to_string(),
+        });
+    } else if has_price_quote && !has_bid_ask {
+        let msg = "IBKR returned delayed option last/model ticks but no bid/ask ticks for this request; bid/ask may require additional market-data permission or a market-hours retry.";
+        note = Some(match note {
+            Some(existing) => format!("{existing} {msg}"),
+            None => msg.to_string(),
+        });
+    }
 
     Ok(OptionsResponse {
         ticker,
@@ -1703,9 +1984,8 @@ async fn drain_snapshot_ticks(
                 //  10090   Part of requested market data is not subscribed
                 //  10091   Requested market data is not subscribed; delayed available
                 //  10168   Requested market data is not subscribed; display delayed
-                const ENTITLEMENT_CODES: [i32; 5] = [354, 10089, 10090, 10091, 10168];
                 let code = notice.code;
-                if ENTITLEMENT_CODES.contains(&code) {
+                if is_market_data_entitlement_code(code) {
                     return Err(Error::Provider(format!(
                         "ibkr market data not subscribed (code {code}: {}). Retry with --market-data-type 3 (delayed) or --market-data-type 4 (delayed-frozen).",
                         notice.message
@@ -1747,6 +2027,57 @@ async fn fetch_contract_snapshot(
     let mut data = SnapshotAccumulator::default();
     drain_snapshot_ticks(&mut subscription, &mut data, timeout_secs).await?;
     Ok(data)
+}
+
+async fn fetch_contract_snapshot_with_market_data_fallback(
+    client: &Client,
+    contract: &Contract,
+    requested_market_data_type: i32,
+    timeout_secs: u64,
+    context: &str,
+) -> Result<(SnapshotAccumulator, bool)> {
+    match fetch_contract_snapshot(client, contract, timeout_secs).await {
+        Ok(data) => Ok((data, false)),
+        Err(err) if requested_market_data_type == 1 && is_ibkr_market_data_not_subscribed(&err) => {
+            switch_to_delayed_frozen_market_data(client).await?;
+            eprintln!(
+                "[ibkr options] {context}: live entitlement denied, retrying with delayed-frozen ({err})"
+            );
+            fetch_contract_snapshot(client, contract, timeout_secs)
+                .await
+                .map(|data| (data, true))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn fetch_contract_historical_close(
+    client: &Client,
+    contract: &Contract,
+    timeout_secs: u64,
+) -> Result<Option<f64>> {
+    let history = timeout(
+        StdDuration::from_secs(timeout_secs),
+        client.historical_data(
+            contract,
+            None,
+            HistoricalDuration::days(5),
+            HistoricalBarSize::Day,
+            Some(HistoricalWhatToShow::Trades),
+            TradingHours::Extended,
+        ),
+    )
+    .await
+    .map_err(|_| Error::Provider("timeout retrieving ibkr historical close".to_string()))?
+    .map_err(map_ibapi_error)
+    .map_err(Error::Provider)?;
+
+    Ok(history
+        .bars
+        .iter()
+        .rev()
+        .find(|bar| bar.close.is_finite() && bar.close > 0.0)
+        .map(|bar| bar.close))
 }
 
 fn apply_tick_price(data: &mut SnapshotAccumulator, tick_type: TickType, price: f64) {

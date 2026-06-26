@@ -155,20 +155,66 @@ pub(crate) async fn fetch_fred_macro_api_events(
                 .append_pair("sort_order", "asc")
                 .append_pair("limit", "100");
 
-            let resp = client
-                .get(url.clone())
-                .send()
-                .await
-                .map_err(|e| Error::Provider(format!("fred api release dates fetch failed: {e}")))?;
-            let status = resp.status();
-            let body = resp.text().await.map_err(|e| {
-                Error::Provider(format!("fred api release dates read failed: {e}"))
-            })?;
-            if !status.is_success() {
-                return Err(Error::Provider(format!(
-                    "fred api release dates fetch failed for rid {}: http {}",
-                    spec.release_id, status
-                )));
+            // Retry on 429 / 5xx with exponential backoff. FRED's release-dates
+            // endpoint rate-limits aggressively when several release ids are
+            // requested at once; a single transient 429 must not abort the rest.
+            let mut body = String::new();
+            let mut ok = false;
+            let mut last_err: Option<String> = None;
+            for attempt in 0..4u32 {
+                let resp = match client.get(url.clone()).send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        last_err =
+                            Some(format!("fred api release dates fetch failed: {e}"));
+                        if attempt < 3 {
+                            sleep(TokioDuration::from_millis(
+                                600u64.saturating_mul(1u64 << attempt),
+                            ))
+                            .await;
+                            continue;
+                        }
+                        break;
+                    }
+                };
+                let status = resp.status();
+                let text = resp.text().await.map_err(|e| {
+                    Error::Provider(format!("fred api release dates read failed: {e}"))
+                })?;
+                let looks_rate_limited =
+                    text.to_ascii_lowercase().contains("too many requests");
+                let retryable = status.as_u16() == 429 || status.as_u16() >= 500;
+                if !status.is_success() && (looks_rate_limited || retryable) {
+                    last_err = Some(format!(
+                        "fred api release dates fetch failed for rid {}: http {}",
+                        spec.release_id, status
+                    ));
+                    if attempt < 3 {
+                        sleep(TokioDuration::from_millis(
+                            600u64.saturating_mul(1u64 << attempt),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    break;
+                }
+                if !status.is_success() {
+                    return Err(Error::Provider(format!(
+                        "fred api release dates fetch failed for rid {}: http {}",
+                        spec.release_id, status
+                    )));
+                }
+                body = text;
+                ok = true;
+                break;
+            }
+            if !ok {
+                return Err(Error::Provider(last_err.unwrap_or_else(|| {
+                    format!(
+                        "fred api release dates fetch failed for rid {}",
+                        spec.release_id
+                    )
+                })));
             }
             let parsed: FredReleaseDatesResp = serde_json::from_str(&body).map_err(|e| {
                 Error::Provider(format!(
@@ -198,8 +244,27 @@ pub(crate) async fn fetch_fred_macro_api_events(
     });
 
     let mut out = Vec::new();
+    let mut errs: Vec<String> = Vec::new();
+    let mut successes = 0usize;
     for result in futures::future::join_all(futs).await {
-        out.extend(result?);
+        match result {
+            Ok(events) => {
+                successes += 1;
+                out.extend(events);
+            }
+            Err(e) => errs.push(e.to_string()),
+        }
+    }
+    // Resilient aggregation: a single release failing (e.g. a 429 that
+    // survived retries) drops only that release, not the whole calendar.
+    // An empty calendar is a valid answer when releases simply have no dates
+    // in the requested window, so only hard-fail when EVERY release errored.
+    if successes == 0 && !errs.is_empty() {
+        return Err(Error::Provider(format!(
+            "fred api release dates: all {} release(s) failed: {}",
+            errs.len(),
+            errs.join("; ")
+        )));
     }
     Ok(out)
 }

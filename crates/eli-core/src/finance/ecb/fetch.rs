@@ -15,6 +15,7 @@ pub struct EcbObservation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EcbSeries {
     pub key: String,
+    #[serde(skip)] // internal SDMX dataflow id — not surfaced to consumers
     pub dataset: String,
     pub label: String,
     pub frequency: String,

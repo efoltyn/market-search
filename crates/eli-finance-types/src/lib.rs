@@ -457,7 +457,8 @@ pub struct TimeseriesResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analytics: Option<TimeseriesAnalytics>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // Cache hit/path/key are internal plumbing (incl. a local file path) — never surfaced.
+    #[serde(skip_serializing)]
     pub cache: Option<CacheInfo>,
 }
 
@@ -642,6 +643,23 @@ pub struct FilingsRequest {
     #[serde(default)]
     pub download_all: bool,
 
+    /// If true, download likely useful text exhibits such as EX-99, earnings releases, and slides.
+    #[serde(default = "default_true")]
+    pub important_exhibits: bool,
+
+    /// If true, download only one file: the primary document for the latest matching filing.
+    #[serde(default)]
+    pub single_file: bool,
+
+    /// If true, include the primary filing document's raw decoded text inline.
+    #[serde(default)]
+    pub raw_text: bool,
+
+    /// If true, for earnings 8-Ks (item 2.02), locate and inline the press-release exhibit
+    /// (typically EX-99.1) as parsed plain text in `press_release_text`. Skips the XBRL cover.
+    #[serde(default)]
+    pub press_release_text: bool,
+
     /// Deprecated compatibility alias for download. No text parsing or excerpting is performed.
     #[serde(default)]
     pub include_text: bool,
@@ -716,6 +734,23 @@ pub struct FilingDoc {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_path: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_text: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_text_bytes: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_text_truncated: Option<bool>,
+
+    /// Path to the detected press-release exhibit, set when --press-release-text was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub press_release_path: Option<String>,
+
+    /// Parsed plain text of the press-release exhibit, set when --press-release-text was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub press_release_text: Option<String>,
 
     /// Deprecated. No filing text is parsed into an excerpt.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -849,6 +884,16 @@ pub struct FundamentalsMetrics {
     /// Trailing-twelve-month dividend yield, expressed as a decimal (0.04 = 4%).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dividend_yield: Option<f64>,
+    /// Timestamp (RFC3339) of the price used to compute the price-derived multiples
+    /// (current_price, market_cap, trailing_pe, price_to_book, enterprise_value, EV ratios).
+    /// Sourced from Yahoo's v8 chart `regularMarketTime`. Lets a consumer see exactly how
+    /// fresh the price is (live, prior close, or stale) instead of guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_as_of: Option<String>,
+    /// The data provider behind the price (e.g. "yahoo"). Freshness is conveyed by
+    /// `price_as_of`; the internal endpoint is not named in output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_provider: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -962,11 +1007,11 @@ pub struct MacroResponse {
     pub schema_version: String,
     #[serde(default)]
     pub freshness_summary: FreshnessSummary,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub applied_policy: AppliedPolicy,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing)]
     pub decision_trace: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub run_meta: RunMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compare_to: Option<NaiveDate>,
@@ -1700,6 +1745,15 @@ pub struct OptionsRequest {
     pub provider: ProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ibkr: Option<IbkrConnectionConfig>,
+    /// If true, fetch Yahoo as the baseline and opportunistically overlay IBKR
+    /// fields such as delayed last/model ticks and Greeks when Gateway is reachable.
+    #[serde(default)]
+    pub ibkr_overlay: bool,
+    /// Optional as-of timestamp. Current providers expose live/delayed option-chain
+    /// snapshots, not historical full-chain snapshots, so past dates are rejected
+    /// by the provider layer instead of returning current data under a past label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<DateTime<Utc>>,
     /// Specific expiration date (YYYY-MM-DD). If None, returns first available expiry.
     #[serde(default)]
     pub expiry: Option<String>,
@@ -1832,8 +1886,10 @@ pub struct ExpirySnapshot {
     pub total_oi: u64,
     pub call_oi: u64,
     pub put_oi: u64,
-    pub put_call_ratio_volume: f64,
-    pub put_call_ratio_oi: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub put_call_ratio_volume: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub put_call_ratio_oi: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_pain: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1847,7 +1903,8 @@ pub struct MultiExpirySummary {
     pub snapshots: Vec<ExpirySnapshot>,
     pub aggregate_volume: u64,
     pub aggregate_oi: u64,
-    pub weighted_put_call_ratio: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weighted_put_call_ratio: Option<f64>,
     /// Top 3 expirations by OI — where the action concentrates
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oi_concentration: Option<Vec<OiConcentration>>,
@@ -2130,11 +2187,11 @@ pub struct OddsResponse {
     pub schema_version: String,
     #[serde(default)]
     pub freshness_summary: FreshnessSummary,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub applied_policy: AppliedPolicy,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing)]
     pub decision_trace: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub run_meta: RunMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<OddsSeries>,
@@ -2517,11 +2574,11 @@ pub struct OddsSyncResponse {
     pub schema_version: String,
     #[serde(default)]
     pub freshness_summary: FreshnessSummary,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub applied_policy: AppliedPolicy,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing)]
     pub decision_trace: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub run_meta: RunMeta,
     #[serde(default)]
     pub sync_status: OddsSyncStatus,
@@ -2865,7 +2922,7 @@ pub struct CotResponse {
     pub next_release: Option<String>,
     /// How stale the data is in human-readable form
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub staleness: Option<String>,
+    pub staleness_days: Option<i64>,
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -3055,6 +3112,17 @@ pub struct FiscalInterestItem {
 pub struct FiscalResponse {
     pub generated_at: DateTime<Utc>,
     pub kind: String,
+    /// Release cadence of this series: "daily" (debt, statement) or "monthly" (interest).
+    /// Without this, the monthly `interest` feed (≈2-3 weeks stale at release) looks identical
+    /// to the daily debt/statement feeds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_cadence: Option<String>,
+    /// Date of the latest record returned (YYYY-MM-DD).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_as_of: Option<String>,
+    /// Days between data_as_of and the time of the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staleness_days: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debt: Option<Vec<FiscalDebtItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]

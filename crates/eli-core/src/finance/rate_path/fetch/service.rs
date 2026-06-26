@@ -20,11 +20,9 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
             > 86400;
 
     if !csv_exists || csv_stale {
-        let live_label = if csv_exists { "stale CSV; using live API" } else { "no CSV cache; using live API" };
         match fetch_rate_path_live(current_rate).await {
             Ok((meetings, cumulative_signals, mut live_warnings, extras)) => {
                 if !meetings.is_empty() {
-                    live_warnings.push(live_label.to_string());
                     // Filter out meetings whose date has passed. Also drop
                     // pure-noise far-future meetings (single-binary <$3K vol
                     // pins on 2027/2028 dates) — they have no information

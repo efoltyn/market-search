@@ -58,6 +58,39 @@ async fn fetch_v7_quote(ticker: &str) -> V7Quote {
     }
 }
 
+/// Fetch the freshest last-trade price and its timestamp from Yahoo's v8 chart
+/// `meta` block. This needs no crumb/cookie and is the same endpoint the timeseries
+/// path uses, so it is the authoritative "last price + as-of" for a ticker. The v10
+/// quoteSummary price (`financialData.currentPrice`) can lag the live tape intraday;
+/// v8 `regularMarketPrice`/`regularMarketTime` does not. Returns (price, epoch_secs).
+async fn fetch_live_price(ticker: &str) -> Option<(f64, i64)> {
+    let client = reqwest::Client::builder()
+        .timeout(StdDuration::from_secs(10))
+        .user_agent("Mozilla/5.0")
+        .build()
+        .ok()?;
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?range=1d&interval=1d",
+        urlencoding::encode(ticker),
+    );
+    let body: serde_json::Value = client.get(&url).send().await.ok()?.json().await.ok()?;
+    let meta = body
+        .get("chart")?
+        .get("result")?
+        .get(0)?
+        .get("meta")?;
+    let price = meta.get("regularMarketPrice").and_then(|p| p.as_f64())?;
+    let ts = meta
+        .get("regularMarketTime")
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
+    if price.is_finite() && price > 0.0 {
+        Some((price, ts))
+    } else {
+        None
+    }
+}
+
 pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<FundamentalsResponse> {
     let ticker = req.ticker.trim().to_ascii_uppercase();
     if ticker.is_empty() {
@@ -72,7 +105,8 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
     // which is what Yahoo's UI shows as "Forward P/E".
     let info_fut = connector.get_ticker_info(&ticker);
     let v7_fut = fetch_v7_quote(&ticker);
-    let (info_res, v7) = tokio::join!(info_fut, v7_fut);
+    let live_fut = fetch_live_price(&ticker);
+    let (info_res, v7, live_price) = tokio::join!(info_fut, v7_fut, live_fut);
     let info = info_res
         .map_err(|e| Error::Provider(format!("yahoo fundamentals failed for '{ticker}': {e}")))?;
 
@@ -103,7 +137,7 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
     let is_etf = qt_str.eq_ignore_ascii_case("ETF")
         || qt_str.eq_ignore_ascii_case("MUTUALFUND")
         || qt_str.eq_ignore_ascii_case("INDEX");
-    let note = if is_etf {
+    let mut note = if is_etf {
         Some(format!(
             "{ticker} is an {qt} — financial statements are not available. Use `eli finance timeseries` for price data instead.",
             qt = qt_str
@@ -117,8 +151,11 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
     };
 
     let statement = FinancialStatement {
-        date: Utc::now().date_naive().format("%Y-%m-%d").to_string(),
-        period: "current".to_string(),
+        // Yahoo's financialData figures are trailing-twelve-month, not a single fiscal
+        // period. Stamping today's date misled consumers into reading this as a fresh
+        // period report; label it TTM instead.
+        date: "ttm".to_string(),
+        period: "ttm".to_string(),
         total_revenue: fin.and_then(|f| f.total_revenue).map(|v| v as i64),
         cost_of_revenue: None,
         gross_profit: fin.and_then(|f| f.gross_profits).map(|v| v as i64),
@@ -142,7 +179,7 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
         free_cash_flow: fin.and_then(|f| f.free_cashflow),
     };
 
-    let metrics = eli_finance_types::FundamentalsMetrics {
+    let mut metrics = eli_finance_types::FundamentalsMetrics {
         current_price: fin.and_then(|f| f.current_price),
         market_cap: summary.and_then(|s| s.market_cap),
         enterprise_value: stats.and_then(|s| s.enterprise_value),
@@ -186,7 +223,106 @@ pub async fn fetch_fundamentals(req: FundamentalsRequest) -> Result<Fundamentals
         recommendation_key: fin.and_then(|f| f.recommendation_key.clone()),
         analyst_count: fin.and_then(|f| f.number_of_analyst_opinions),
         dividend_yield: summary.and_then(|s| s.dividend_yield),
+        price_as_of: None,
+        price_provider: None,
     };
+
+    // ── Freshness + price-derived recompute ──────────────────────────────────
+    // The v10 quoteSummary delivers most metrics, but its price-derived multiples
+    // can be stale: `enterprise_value` (and EV/rev, EV/ebitda) come from a semi-daily
+    // batch field that lags the live market cap by up to ~10% on fast movers, and
+    // nothing in the response stamps how fresh the price is. We pull the freshest
+    // last-trade from Yahoo v8, recompute the price-derived multiples from it for
+    // USD reporters (so they are internally consistent with that one price), and
+    // always expose `price_as_of` so a consumer can see the data's age.
+    let round2 = |x: f64| (x * 100.0).round() / 100.0;
+    let is_usd = currency
+        .as_deref()
+        .map(|c| c.eq_ignore_ascii_case("USD"))
+        .unwrap_or(true);
+    let (live_px, price_as_of, price_provider) = match live_price {
+        Some((px, ts)) if ts > 0 => (
+            Some(px),
+            chrono::DateTime::from_timestamp(ts, 0).map(|d: DateTime<Utc>| d.to_rfc3339()),
+            Some("yahoo".to_string()),
+        ),
+        Some((px, _)) => (Some(px), None, Some("yahoo".to_string())),
+        None => (metrics.current_price, None, Some("yahoo".to_string())),
+    };
+    if let Some(px) = live_px {
+        metrics.current_price = Some(round2(px));
+        if is_usd && !is_etf {
+            // Recompute every price-derived multiple from this one fresh price so the
+            // snapshot is internally consistent (market_cap = price×shares, etc.).
+            if let Some(sh) = metrics.shares_outstanding {
+                metrics.market_cap = Some((px * sh as f64).round() as u64);
+            }
+            metrics.trailing_pe = metrics
+                .trailing_eps
+                .filter(|&eps| eps > 0.0)
+                .map(|eps| round2(px / eps));
+            metrics.price_to_book = metrics
+                .book_value_per_share
+                .filter(|&bv| bv != 0.0)
+                .map(|bv| round2(px / bv))
+                // A P/B that rounds below 0.01 is never a real "0x book" — it signals a
+                // share-class / units mismatch (e.g. Yahoo reports BRK-B's book on the
+                // A-share basis, ~1500x the B price). Null rather than print "0.0".
+                .filter(|&pb| pb >= 0.01);
+            // EV = market_cap + total_debt − cash, recomputed from the fresh market cap
+            // (Yahoo's batch EV is the stale field we are replacing).
+            if let (Some(mc), Some(debt), Some(cash)) = (
+                metrics.market_cap,
+                statement.total_debt,
+                statement.cash_and_equivalents,
+            ) {
+                let ev = mc as i64 + debt - cash;
+                metrics.enterprise_value = Some(ev);
+                metrics.enterprise_to_revenue = statement
+                    .total_revenue
+                    .filter(|&r| r != 0)
+                    .map(|r| round2(ev as f64 / r as f64));
+                // Only a positive EBITDA yields a meaningful EV/EBITDA. A negative one
+                // produces a negative multiple (RIVN, SNAP) that reads as a confident
+                // number but is meaningless — null it, same as the negative-forward_pe guard.
+                metrics.enterprise_to_ebitda = statement
+                    .ebitda
+                    .filter(|&e| e > 0)
+                    .map(|e| round2(ev as f64 / e as f64));
+            }
+        }
+    }
+    metrics.price_as_of = price_as_of;
+    metrics.price_provider = price_provider;
+
+    // Currency guard: for non-USD reporters (e.g. TWD-denominated ADRs like TSM),
+    // Yahoo divides a USD price by a local-currency book value, producing a
+    // dimensionally meaningless price_to_book and EV-ratio set. Null those rather
+    // than emit a confidently wrong number, and say why.
+    if !is_usd {
+        metrics.price_to_book = None;
+        metrics.enterprise_value = None;
+        metrics.enterprise_to_revenue = None;
+        metrics.enterprise_to_ebitda = None;
+        let ccy = currency.as_deref().unwrap_or("a non-USD currency");
+        let msg = format!(
+            "financials reported in {ccy}; price_to_book and enterprise-value ratios are nulled because mixing a USD price with {ccy} book/statement values is not meaningful."
+        );
+        note = Some(match note {
+            Some(n) => format!("{n} | {msg}"),
+            None => msg,
+        });
+    }
+
+    // Drop a negative forward P/E for loss-makers: when both trailing and forward EPS
+    // are negative the ratio is algebraically real but semantically useless and reads
+    // as a confident number to an agent. Null it.
+    if matches!(metrics.trailing_eps, Some(e) if e < 0.0)
+        && matches!(metrics.forward_eps, Some(e) if e < 0.0)
+    {
+        metrics.forward_pe = None;
+    }
+
     let profile = eli_finance_types::FundamentalsProfile {
         sector: profile.and_then(|p| p.sector.clone()),
         industry: profile.and_then(|p| p.industry.clone()),

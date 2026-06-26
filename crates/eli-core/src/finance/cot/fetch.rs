@@ -432,7 +432,7 @@ pub async fn fetch_cot(req: CotRequest) -> Result<CotResponse> {
 
     // Compute freshness metadata from the latest position date.
     // CFTC reports positions as-of Tuesday, released the following Friday at 3:30 PM ET.
-    let (data_as_of, released_on, next_release, staleness) =
+    let (data_as_of, released_on, next_release, staleness_days) =
         if let Some(latest) = all_positions.first() {
             let as_of = &latest.report_date;
             // Parse the as-of date to compute release dates
@@ -443,18 +443,14 @@ pub async fn fetch_cot(req: CotRequest) -> Result<CotResponse> {
                 // Next release is the following Friday (10 days after as-of, i.e. 7 days after released)
                 let next = released + chrono::Duration::days(7);
                 let days_stale = (now - as_of_date).num_days();
-                let stale_str = if days_stale <= 3 {
-                    format!("{}d old (current — released this week)", days_stale)
-                } else if days_stale <= 7 {
-                    format!("{}d old (last week's positions)", days_stale)
-                } else {
-                    format!("{}d old (stale — multiple weeks behind)", days_stale)
-                };
+                // Emit the age as a plain number (consistent with finance_fiscal's
+                // staleness_days). The consumer decides what counts as "stale" — the tool
+                // does not editorialize "multiple weeks behind".
                 (
                     Some(as_of_date.format("%Y-%m-%d").to_string()),
                     Some(released.format("%Y-%m-%d (Fri 3:30 PM ET)").to_string()),
                     Some(next.format("%Y-%m-%d (Fri 3:30 PM ET)").to_string()),
-                    Some(stale_str),
+                    Some(days_stale),
                 )
             } else {
                 (Some(as_of[..10].to_string()), None, None, None)
@@ -472,7 +468,7 @@ pub async fn fetch_cot(req: CotRequest) -> Result<CotResponse> {
         data_as_of,
         released_on,
         next_release,
-        staleness,
+        staleness_days,
     })
 }
 

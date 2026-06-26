@@ -116,7 +116,7 @@ pub async fn fetch_timeseries(
                     error: "TickerFetchFailed".to_string(),
                     message: "All tickers failed to fetch timeseries data.".to_string(),
                     hint: Some(
-                        "All requested tickers must be valid for this provider.".to_string(),
+                        "All requested tickers must be valid for this provider. An empty result is also expected when a short intraday window (e.g. range=1d with 15m/1h granularity) falls entirely on a weekend or US market holiday — widen to range=5d or use granularity=1d to capture the last trading session.".to_string(),
                     ),
                     debug: None,
                 }),

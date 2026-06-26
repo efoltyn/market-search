@@ -1,0 +1,56 @@
+name: release
+
+# Builds prebuilt market-search binaries for every platform the npm wrapper
+# (npm/install.js) and install.sh download, and attaches them to the GitHub
+# release for the pushed tag. Trigger by pushing a tag like `v0.3.0`
+# (must match npm/package.json version).
+#
+# Asset names MUST match npm/install.js TARGETS and install.sh:
+#   market-search-<rust-target>[.exe]
+#
+# This repo is flat (Cargo.toml at root), so cargo runs from the repo root.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build (release)
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} --bin market-search
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          src="target/${{ matrix.target }}/release/market-search"
+          out="market-search-${{ matrix.target }}"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then src="$src.exe"; out="$out.exe"; fi
+          cp "$src" "$out"
+          ls -lh "$out"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: market-search-${{ matrix.target }}*
+          fail_on_unmatched_files: true

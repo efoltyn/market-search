@@ -24,7 +24,7 @@ async fn cmd_mcp() -> Result<()> {
             .unwrap_or(serde_json::Value::Null);
 
         let response = match method.as_str() {
-            "initialize" => mcp_initialize(id),
+            "initialize" => mcp_initialize(id, &request),
             "tools/list" => mcp_tools_list(id),
             "tools/call" => mcp_tools_call(id, &request).await,
             _ => json!({
@@ -69,14 +69,62 @@ fn mcp_write_response<W: std::io::Write>(out: &mut W, response: &serde_json::Val
     Ok(())
 }
 
-fn mcp_initialize(id: serde_json::Value) -> serde_json::Value {
+/// The eli-terminal wordmark, embedded so the binary is self-contained. Served at
+/// /favicon.ico + /favicon.png (so a connector UI fetching the domain favicon gets the
+/// eli mark instead of falling back to the ngrok-free.dev favicon) and also handed to the
+/// client via serverInfo.icons below (MCP SEP-973, the spec-correct path).
+const FAVICON_PNG: &[u8] = include_bytes!("favicon.png");
+
+fn mcp_initialize(id: serde_json::Value, request: &serde_json::Value) -> serde_json::Value {
+    // Version negotiation (MCP spec): when the client sends a protocolVersion, echo it
+    // back rather than forcing our own — a strict client that requested an older version
+    // can reject a newer one it doesn't recognize. Fall back to our latest when absent.
+    // Our surface is tools/* only (declared in capabilities), stable across these versions.
+    let protocol_version = request
+        .get("params")
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("2025-11-25")
+        .to_string();
+
+    let mut server_info = json!({
+        "name": "market-search",
+        "title": "eli terminal",
+        "version": env!("CARGO_PKG_VERSION"),
+    });
+
+    // SEP-973 serverInfo.icons/websiteUrl: claude.ai's web/mobile connector currently
+    // REJECTS an initialize result that carries serverInfo.icons (claude-ai-mcp #474:
+    // "your account was authorized, but … returned an error when connecting / ofid_")
+    // and does not render it anyway (#152) — so strip the branding block for the
+    // claude.ai client (it still gets the logo from /favicon.ico). Other clients
+    // (Claude Code/Desktop) keep it, with the spec-correct `sizes` ARRAY shape.
+    // claude.ai sends clientInfo.name = "Anthropic/ClaudeAI".
+    let client_name = request
+        .get("params")
+        .and_then(|p| p.get("clientInfo"))
+        .and_then(|c| c.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if client_name != "Anthropic/ClaudeAI" {
+        use base64::Engine as _;
+        let icon_data_uri = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(FAVICON_PNG)
+        );
+        server_info["websiteUrl"] = json!("https://eliterminal.com");
+        server_info["icons"] =
+            json!([{ "src": icon_data_uri, "mimeType": "image/png", "sizes": ["256x256"] }]);
+    }
+
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "protocolVersion": "2025-11-25",
+            "protocolVersion": protocol_version,
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "market-search", "version": env!("CARGO_PKG_VERSION") }
+            "serverInfo": server_info
         }
     })
 }
@@ -125,7 +173,7 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
         }
     };
 
-    let args = params
+    let mut args = params
         .get("arguments")
         .cloned()
         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
@@ -133,6 +181,27 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
     // ── data_query: jq on cached /tmp/eli_* files (no subprocess needed) ──
     if tool_name == "data_query" {
         return mcp_data_query(id, &args).await;
+    }
+
+    // claude.ai / web (full_output, no file access) can't read the local files finance_filings
+    // downloads — its default response is local paths + URLs with no inline content, which sends
+    // a no-file-access client bouncing to WebSearch+WebFetch. So in HTTP mode, when the caller
+    // didn't already ask for text, auto-return the cleaned filing TEXT inline (and skip the
+    // pointless server-side download). Stdio (Claude Code, file access) is untouched: it keeps
+    // the download + local paths to explore the raw file directly.
+    if full_output && tool_name == "finance_filings" {
+        if let Some(obj) = args.as_object_mut() {
+            let has_text = obj.get("raw_text").and_then(|v| v.as_bool()).unwrap_or(false)
+                || obj
+                    .get("press_release_text")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+            if !has_text {
+                obj.insert("raw_text".to_string(), serde_json::Value::Bool(true));
+                obj.entry("max_chars").or_insert(serde_json::json!(50_000));
+                obj.entry("download").or_insert(serde_json::Value::Bool(false));
+            }
+        }
     }
 
     let cli_args = match mcp_build_cli_args(&tool_name, &args) {
@@ -156,8 +225,59 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
             const INLINE_THRESHOLD: usize = 2_000;
 
             let response_text = if full_output {
-                // HTTP mode: return everything inline
-                output
+                // HTTP mode (claude.ai / web): return everything inline. For a large
+                // timeseries, also inject a precomputed `_summary` (start/end/high/low +
+                // freshness `last_t` + the turning-point `path`) into the JSON. These
+                // clients can't run code over the raw candle array, so without this they
+                // can't see the shape of a move — only the wall of numbers. Additive and
+                // fallback-safe: on any parse hiccup we return the raw output unchanged.
+                if tool_name == "finance_timeseries" && output.len() > INLINE_THRESHOLD {
+                    match (
+                        serde_json::from_str::<serde_json::Value>(&output),
+                        mcp_timeseries_summary(&output),
+                    ) {
+                        (Ok(mut v), Some(sum)) => {
+                            match (v.as_object_mut(), serde_json::from_str::<serde_json::Value>(&sum))
+                            {
+                                (Some(obj), Ok(sum_v)) => {
+                                    obj.insert("_summary".to_string(), sum_v);
+                                    serde_json::to_string(&v).unwrap_or(output)
+                                }
+                                _ => output,
+                            }
+                        }
+                        _ => output,
+                    }
+                } else if tool_name == "finance_filings" {
+                    // No-file-access client: drop the local-only path fields (download_dir,
+                    // primary_doc_path, etc.) — they're unreachable over MCP and just crowd out
+                    // the inline `raw_text` we auto-returned above. Keep the SEC `url`/index URL.
+                    match serde_json::from_str::<serde_json::Value>(&output) {
+                        Ok(mut v) => {
+                            if let Some(arr) = v.get_mut("filings").and_then(|f| f.as_array_mut()) {
+                                for f in arr.iter_mut() {
+                                    if let Some(o) = f.as_object_mut() {
+                                        for k in [
+                                            "download_dir",
+                                            "primary_doc_path",
+                                            "index_json_path",
+                                            "downloaded_files",
+                                            "text_path",
+                                        ] {
+                                            o.remove(k);
+                                        }
+                                    }
+                                }
+                                serde_json::to_string(&v).unwrap_or(output)
+                            } else {
+                                output
+                            }
+                        }
+                        Err(_) => output,
+                    }
+                } else {
+                    output
+                }
             } else if output.len() <= INLINE_THRESHOLD {
                 // Small outputs: return inline (yield_curve, rate_path, auctions, etc.)
                 output
@@ -196,8 +316,9 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
             // always knows the current date/time without a separate call.
             let now_local = chrono::Local::now();
             let response_text = format!(
-                "[current_time: {}]\n{}",
+                "[current_time: {} | {}]\n{}",
                 now_local.format("%A %B %-d, %Y %l:%M %p %Z"),
+                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
                 response_text
             );
             json!({
@@ -290,7 +411,7 @@ async fn mcp_data_query(id: serde_json::Value, args: &serde_json::Value) -> serd
                 let out_path = format!("/tmp/eli_query_{ts}.json");
                 let _ = std::fs::write(&out_path, &stdout);
                 format!(
-                    "{{\"_file\":\"{}\",\"_chars\":{},\"_note\":\"query result saved — read file for full data\"}}",
+                    "{{\"_file\":\"{}\",\"_chars\":{}}}",
                     out_path, stdout.len()
                 )
             };
@@ -373,6 +494,47 @@ fn mcp_strip_metadata(output: &str) -> Option<String> {
     serde_json::to_string(&root).ok()
 }
 
+/// Detect turning points (swings) in a close series via a dual-extreme ZigZag.
+/// `reversal` is the minimum move (price units) away from a running extreme that
+/// confirms a pivot. Returns pivot indices, always including the first and last point.
+/// This is what powers the compact "76>80>42>90" path in the timeseries summary:
+/// start/end/high/low alone hide the ORDER of moves; the pivot path shows the shape.
+fn zigzag_pivots(values: &[f64], reversal: f64) -> Vec<usize> {
+    let n = values.len();
+    if n <= 2 {
+        return (0..n).collect();
+    }
+    let mut pivots: Vec<usize> = vec![0];
+    let mut last_pivot = 0usize;
+    let mut max_i = 0usize;
+    let mut min_i = 0usize;
+    for i in 1..n {
+        if values[i] > values[max_i] {
+            max_i = i;
+        }
+        if values[i] < values[min_i] {
+            min_i = i;
+        }
+        // A top is confirmed when price falls `reversal` below the running max that
+        // formed after the last pivot; symmetrically for a bottom.
+        if max_i > last_pivot && values[max_i] - values[i] >= reversal {
+            pivots.push(max_i);
+            last_pivot = max_i;
+            min_i = i;
+            max_i = i;
+        } else if min_i > last_pivot && values[i] - values[min_i] >= reversal {
+            pivots.push(min_i);
+            last_pivot = min_i;
+            max_i = i;
+            min_i = i;
+        }
+    }
+    if *pivots.last().unwrap() != n - 1 {
+        pivots.push(n - 1);
+    }
+    pivots
+}
+
 /// Compute per-ticker summary stats from a timeseries JSON response.
 /// Returns a JSON string like `{"SPY":{"start":550.0,"end":530.0,...},...}` or None on parse failure.
 fn mcp_timeseries_summary(output: &str) -> Option<String> {
@@ -452,6 +614,48 @@ fn mcp_timeseries_summary(output: &str) -> Option<String> {
         // Truncate timestamps to date-only for readability (first 10 chars = YYYY-MM-DD)
         let high_date_short = if high_date.len() >= 10 { &high_date[..10] } else { &high_date };
         let low_date_short = if low_date.len() >= 10 { &low_date[..10] } else { &low_date };
+
+        // Freshness stamp + turning-point path. start/end/high/low cannot convey the
+        // ORDER of moves (V-bottom vs late spike); the path makes the shape explicit
+        // for a consumer that can't recompute it from the raw file (e.g. claude.ai).
+        let pairs: Vec<(String, f64)> = candles
+            .iter()
+            .filter_map(|c| Some((get_ts(c), get_close(c)?)))
+            .collect();
+        let first_t = pairs
+            .first()
+            .map(|(t, _)| if t.len() >= 16 { t[..16].to_string() } else { t.clone() })
+            .unwrap_or_default();
+        let last_t = pairs
+            .last()
+            .map(|(t, _)| if t.len() >= 16 { t[..16].to_string() } else { t.clone() })
+            .unwrap_or_default();
+        let path = {
+            let vals: Vec<f64> = pairs.iter().map(|(_, c)| *c).collect();
+            if vals.len() >= 2 {
+                let rng = high - low;
+                // Start the reversal threshold at ~10% of the high-low range and widen
+                // until the path is compact (<=8 pivots), so it stays readable.
+                let mut rev = if rng > 0.0 { rng * 0.10 } else { f64::INFINITY };
+                let mut piv = zigzag_pivots(&vals, rev);
+                let mut guard = 0;
+                while piv.len() > 8 && guard < 6 {
+                    rev *= 1.6;
+                    piv = zigzag_pivots(&vals, rev);
+                    guard += 1;
+                }
+                piv.iter()
+                    .map(|&i| {
+                        let d = &pairs[i].0;
+                        let d_short = if d.len() >= 10 { &d[..10] } else { d.as_str() };
+                        format!("{}({})", (vals[i] * 100.0).round() / 100.0, d_short)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(">")
+            } else {
+                String::new()
+            }
+        };
         map.insert(
             ticker.to_string(),
             serde_json::json!({
@@ -465,6 +669,9 @@ fn mcp_timeseries_summary(output: &str) -> Option<String> {
                 "position_pct": position_pct,
                 "vol_ann_pct": vol_ann,
                 "n_candles": candles.len(),
+                "first_t": first_t,
+                "last_t": last_t,
+                "path": path,
             }),
         );
     }
@@ -482,12 +689,14 @@ fn mcp_timeseries_summary(output: &str) -> Option<String> {
 fn mcp_build_summary(tool: &str, output: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(output) {
         Ok(v) => v,
-        Err(_) => return format!("\"_summary\":\"parse error — read full file for data\""),
+        Err(_) => return format!("\"_summary\":null"),
     };
 
     match tool {
         "finance_odds" => {
-            // Extract: top markets by volume with probability
+            // Preserve odds search ranking. The search layer already combines provider
+            // rank, live hydration, relevance, freshness, and source diversity; MCP
+            // should not re-rank by volume or literal title substring.
             let mut lines = Vec::new();
             let mut total_vol_usd: f64 = 0.0;
             let mut kalshi_count: usize = 0;
@@ -502,45 +711,7 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                         _ => {}
                     }
                 }
-                // Sort by volume descending
-                let mut sorted: Vec<&serde_json::Value> = markets.iter().collect();
-                sorted.sort_by(|a, b| {
-                    let va = a.get("volume_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let vb = b.get("volume_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
-                });
-                // Filter: prefer markets where the query term appears in the title
-                // or event_ticker. This catches markets whose parent event matched
-                // the query even when the individual market title uses an abbreviation
-                // (e.g. "BTC" vs "bitcoin", "CPI" vs "inflation").
-                let query_str = v.get("query").and_then(|q| q.as_str()).unwrap_or("");
-                let query_lower = query_str.to_lowercase();
-                let relevance_match = |mkt: &&serde_json::Value| -> bool {
-                    if query_lower.is_empty() { return true; }
-                    let title_ok = mkt.get("title").and_then(|t| t.as_str())
-                        .map(|t| t.to_lowercase().contains(&query_lower))
-                        .unwrap_or(false);
-                    let ticker_ok = mkt.get("event_ticker").and_then(|t| t.as_str())
-                        .map(|t| t.to_lowercase().contains(&query_lower))
-                        .unwrap_or(false);
-                    title_ok || ticker_ok
-                };
-                let relevant: Vec<_> = sorted.iter().filter(|m| relevance_match(m)).collect();
-                let skipped = sorted.len() - relevant.len();
-                // If the title/ticker filter removes ALL results, fall back to showing
-                // unfiltered results — the search function already validated event-level
-                // relevance, so these markets ARE topical.
-                let display: &Vec<_> = if relevant.is_empty() && !sorted.is_empty() {
-                    if skipped > 0 {
-                        lines.push(format!("_note:{} results filtered (title did not contain query '{}'), showing unfiltered", skipped, query_str));
-                    }
-                    &sorted.iter().collect()
-                } else {
-                    if skipped > 0 {
-                        lines.push(format!("_note:{} results filtered (title did not contain query '{}')", skipped, query_str));
-                    }
-                    &relevant
-                };
+                let display: Vec<&serde_json::Value> = markets.iter().collect();
                 for mkt in display.iter().take(10) {
                     let title = mkt.get("title").and_then(|t| t.as_str()).unwrap_or("?");
                     let title_short: String = title.chars().take(120).collect();
@@ -559,8 +730,11 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                             format!(" id:{}", trimmed)
                         })
                         .unwrap_or_default();
-                    let delta_str = mkt.get("delta_since_last_sync")
-                        .and_then(|d| d.get("probability_delta_pct_points"))
+                    let delta_str = mkt.get("change_since")
+                        .and_then(|d| {
+                            d.get("prob_delta_pp")
+                                .or_else(|| d.get("probability_delta_pct_points"))
+                        })
                         .and_then(|d| d.as_f64())
                         .map(|d| format!(" d:{:+.1}pp", d))
                         .unwrap_or_default();
@@ -571,11 +745,17 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 }
             }
             let query = v.get("query").and_then(|q| q.as_str()).unwrap_or("?");
-            let total = v.get("total_markets").and_then(|t| t.as_u64()).unwrap_or(0);
-            // Surface sync age so delta_pp can be interpreted correctly
-            let sync_age = v.get("cache_synced_at").or_else(|| v.get("generated_at"))
+            let total = v
+                .get("total_markets")
+                .or_else(|| v.get("total_matches"))
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            // Anchor the per-market delta to the absolute baseline timestamp (the prior
+            // snapshot it is measured against), not the current catalog time.
+            let sync_age = v.get("delta_context")
+                .and_then(|dc| dc.get("baseline_as_of"))
                 .and_then(|s| s.as_str())
-                .map(|s| format!(",\"delta_as_of\":\"{}\"", &s[..16.min(s.len())]))
+                .map(|s| format!(",\"change_baseline_as_of\":\"{}\"", &s[..16.min(s.len())]))
                 .unwrap_or_default();
             format!(
                 "\"query\":\"{}\",\"total_markets\":{},\"total_vol_usd\":{:.0},\"sources\":\"kalshi:{} poly:{}\"{},\"_schema\":\".markets[].{{title,probability_yes,volume_usd,source,ticker,event_ticker}}\",\"top\":[{}]",
@@ -587,29 +767,78 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             )
         }
         "finance_options" => {
-            // Extract: ticker, price, P/C ratio, max pain, IV, ATM straddle
+            // Extract: ticker, price, P/C ratio, max pain, IV, and multi-expiry
+            // aggregates from the current nested schema. Keep old top-level keys
+            // as fallback for compatibility with older saved artifacts.
             let ticker = v.get("ticker").and_then(|t| t.as_str()).unwrap_or("?");
             let price = v.get("underlying_price").and_then(|p| p.as_f64()).unwrap_or(0.0);
+            let metrics = v.get("metrics");
+            let multi = v.get("multi_expiry_summary");
 
-            // Look for summary fields
-            let pc_vol = v.get("put_call_volume_ratio").and_then(|p| p.as_f64());
-            let pc_oi = v.get("put_call_oi_ratio").and_then(|p| p.as_f64());
-            let max_pain = v.get("max_pain").and_then(|p| p.as_f64());
-            let iv = v.get("implied_volatility").and_then(|i| i.as_f64())
+            let pc_vol = metrics
+                .and_then(|m| m.get("put_call_ratio_volume"))
+                .and_then(|p| p.as_f64())
+                .or_else(|| {
+                    multi
+                        .and_then(|m| m.get("weighted_put_call_ratio"))
+                        .and_then(|p| p.as_f64())
+                })
+                .or_else(|| v.get("put_call_ratio_volume").and_then(|p| p.as_f64()));
+            let pc_oi = metrics
+                .and_then(|m| m.get("put_call_ratio_oi"))
+                .and_then(|p| p.as_f64())
+                .or_else(|| v.get("put_call_ratio_oi").and_then(|p| p.as_f64()));
+            let max_pain = metrics
+                .and_then(|m| m.get("max_pain"))
+                .and_then(|p| p.as_f64())
+                .or_else(|| v.get("max_pain").and_then(|p| p.as_f64()));
+            let iv = v
+                .get("atm_iv")
+                .and_then(|i| i.as_f64())
+                .or_else(|| metrics.and_then(|m| m.get("atm_iv")).and_then(|i| i.as_f64()))
+                .or_else(|| v.get("implied_volatility").and_then(|i| i.as_f64()))
                 .or_else(|| v.get("iv").and_then(|i| i.as_f64()));
-            let total_oi = v.get("total_open_interest").and_then(|o| o.as_u64());
-            let total_vol = v.get("total_volume").and_then(|o| o.as_u64());
+            let total_oi = metrics
+                .and_then(|m| {
+                    Some(
+                        m.get("total_call_oi")?.as_u64()?
+                            + m.get("total_put_oi")?.as_u64()?,
+                    )
+                })
+                .or_else(|| multi.and_then(|m| m.get("aggregate_oi")).and_then(|o| o.as_u64()))
+                .or_else(|| v.get("total_open_interest").and_then(|o| o.as_u64()));
+            let total_vol = metrics
+                .and_then(|m| {
+                    Some(
+                        m.get("total_call_volume")?.as_u64()?
+                            + m.get("total_put_volume")?.as_u64()?,
+                    )
+                })
+                .or_else(|| {
+                    multi
+                        .and_then(|m| m.get("aggregate_volume"))
+                        .and_then(|o| o.as_u64())
+                })
+                .or_else(|| v.get("total_volume").and_then(|o| o.as_u64()));
 
             // Expiration dates available
             let exp_count = v.get("expirations").and_then(|e| e.as_array()).map(|a| a.len())
+                .or_else(|| {
+                    multi
+                        .and_then(|m| m.get("snapshots"))
+                        .and_then(|s| s.as_array())
+                        .map(|a| a.len())
+                })
                 .or_else(|| v.get("chains").and_then(|c| c.as_array()).map(|a| a.len()))
                 .unwrap_or(0);
 
             let selected_exp = v.get("selected_expiry").and_then(|e| e.as_str());
+            let selected_dte = v.get("selected_days_to_expiry").and_then(|e| e.as_i64());
             let sel_reason = v.get("selection_reason").and_then(|e| e.as_str());
 
             let mut parts = vec![format!("\"ticker\":\"{}\",\"price\":{:.2}", ticker, price)];
             if let Some(exp) = selected_exp { parts.push(format!("\"selected_expiry\":\"{}\"", exp)); }
+            if let Some(dte) = selected_dte { parts.push(format!("\"selected_dte\":{}", dte)); }
             if let Some(reason) = sel_reason { parts.push(format!("\"selection_reason\":\"{}\"", reason)); }
             if let Some(r) = pc_vol { parts.push(format!("\"pc_vol_ratio\":{:.2}", r)); }
             if let Some(r) = pc_oi { parts.push(format!("\"pc_oi_ratio\":{:.2}", r)); }
@@ -620,8 +849,22 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             if let Some(i) = iv { parts.push(format!("\"iv_pct\":{:.1}", i * 100.0)); }
             if let Some(oi) = total_oi { parts.push(format!("\"total_oi\":{}", oi)); }
             if let Some(vol) = total_vol { parts.push(format!("\"total_vol\":{}", vol)); }
+            if let Some(snap_count) = multi
+                .and_then(|m| m.get("snapshots"))
+                .and_then(|s| s.as_array())
+                .map(|a| a.len())
+            {
+                parts.push(format!("\"multi_expiry_snapshots\":{}", snap_count));
+            }
+            if let Some(nearest_monthly_pain) = multi
+                .and_then(|m| m.get("max_pain_range"))
+                .and_then(|r| r.get("nearest_monthly_pain"))
+                .and_then(|p| p.as_f64())
+            {
+                parts.push(format!("\"nearest_monthly_pain\":{:.2}", nearest_monthly_pain));
+            }
             if exp_count > 0 { parts.push(format!("\"exp_dates\":{}", exp_count)); }
-            parts.push("\"_schema\":\".chains[].{expiry,calls[].{strike,bid,ask,iv,oi,volume},puts[]}\"".to_string());
+            parts.push("\"_schema\":\".{metrics,calls[],puts[],multi_expiry_summary.snapshots[]}\"".to_string());
             parts.join(",")
         }
         "finance_timeseries" => {
@@ -630,7 +873,7 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                     "\"_schema\":\".series[].{{ticker,candles[].{{t,o,h,l,c,v}}}}\",\"_summary\":{}",
                     summary
                 ),
-                None => format!("\"_summary\":\"timeseries parse failed — read file\""),
+                None => format!("\"_summary\":null"),
             }
         }
         "finance_movers" => {
@@ -745,9 +988,19 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             }
 
             let report_type = v.get("report_type").and_then(|r| r.as_str()).unwrap_or("?");
+            // Surface the staleness fields that already exist in the full COT output but
+            // were missing from the summary — COT is released weekly (Fri for prior Tue),
+            // so a summary with no freshness signal can be read as current when it is 10d+ old.
+            let data_as_of = v.get("data_as_of").and_then(|d| d.as_str()).unwrap_or("");
+            let staleness_days = v.get("staleness_days").and_then(|s| s.as_i64());
+            let next_release = v.get("next_release").and_then(|n| n.as_str()).unwrap_or("");
             format!(
-                "\"report\":\"{}\",\"contracts\":{},\"_schema\":\".positions[].{{contract_name,report_date,spec_net,spec_net_change,spec_net_pct_oi,comm_net}}\",\"latest\":[{}]",
-                report_type, contract_list.len(),
+                "\"report\":\"{}\",\"data_as_of\":\"{}\",\"staleness_days\":{},\"next_release\":\"{}\",\"contracts\":{},\"_schema\":\".positions[].{{contract_name,report_date,spec_net,spec_net_change,spec_net_pct_oi,comm_net}}\",\"latest\":[{}]",
+                report_type,
+                data_as_of.replace('"', "'"),
+                staleness_days.map(|n| n.to_string()).unwrap_or_else(|| "null".to_string()),
+                next_release.replace('"', "'"),
+                contract_list.len(),
                 lines.iter()
                     .map(|l| format!("\"{}\"", l.replace('"', "'")))
                     .collect::<Vec<_>>()
@@ -999,7 +1252,7 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             )
         }
         "finance_boe" => {
-            // BOE: series[].{code, label, observations[].{date, value}}
+            // BOE: series[].{code, label, observations[].{period, value}}
             let preset = v.get("preset").and_then(|p| p.as_str()).unwrap_or("custom");
             let mut lines = Vec::new();
             if let Some(series) = v.get("series").and_then(|s| s.as_array()) {
@@ -1007,7 +1260,7 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                     let label = s.get("label").and_then(|l| l.as_str()).unwrap_or("?");
                     let label_short: String = label.chars().take(25).collect();
                     if let Some(obs) = s.get("observations").and_then(|o| o.as_array()).and_then(|a| a.last()) {
-                        let date = obs.get("date").and_then(|d| d.as_str()).unwrap_or("?");
+                        let date = obs.get("period").and_then(|d| d.as_str()).unwrap_or("?");
                         let val = obs.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
                         // BOE series: rates in %, FX as levels, M4 in millions
                         let val_str = if label.contains("Rate") || label.contains("Yield") || label.contains("SONIA") {
@@ -1179,15 +1432,19 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 }
                 _ => {}
             }
+            let cadence = v.get("release_cadence").and_then(|c| c.as_str()).unwrap_or("");
+            let data_as_of = v.get("data_as_of").and_then(|d| d.as_str()).unwrap_or("");
+            let staleness = v.get("staleness_days").and_then(|s| s.as_i64());
             format!(
-                "\"kind\":\"{}\",\"_schema\":\".{{debt[],statement[],interest[]}}\",\"data\":[{}]",
-                kind,
+                "\"kind\":\"{}\",\"release_cadence\":\"{}\",\"data_as_of\":\"{}\",\"staleness_days\":{},\"_schema\":\".{{debt[],statement[],interest[]}}\",\"data\":[{}]",
+                kind, cadence, data_as_of,
+                staleness.map(|n| n.to_string()).unwrap_or_else(|| "null".to_string()),
                 lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
             )
         }
         _ => {
             // No custom summary for this tool — data is in the file, read it.
-            format!("\"_hint\":\"no summary for {tool} — use data_query or read file directly\"")
+            format!("\"_note\":\"no compact summary for {tool}; the full structured result is in this response\"")
         }
     }
 }
@@ -1336,6 +1593,8 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
                 let live = args.get("live").and_then(|l| l.as_bool()).unwrap_or(true);
                 if live {
                     v.push(s("--live"));
+                } else {
+                    v.push(s("--local"));
                 }
             } else if args.get("live").and_then(|l| l.as_bool()).unwrap_or(false) {
                 v.push(s("--live"));
@@ -1434,6 +1693,23 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             if let Some(account) = args.get("ibkr_account").and_then(|a| a.as_str()) {
                 v.extend([s("--ibkr-account"), s(account)]);
+            }
+            if let Some(host) = args.get("ibkr_host").and_then(|a| a.as_str()) {
+                v.extend([s("--ibkr-host"), s(host)]);
+            }
+            if let Some(port) = args.get("ibkr_port").and_then(|a| a.as_u64()) {
+                v.extend([s("--ibkr-port"), port.to_string()]);
+            }
+            if let Some(client_id) = args.get("ibkr_client_id").and_then(|a| a.as_i64()) {
+                v.extend([s("--ibkr-client-id"), client_id.to_string()]);
+            }
+            if let Some(market_data_type) =
+                args.get("ibkr_market_data_type").and_then(|a| a.as_i64())
+            {
+                v.extend([s("--ibkr-market-data-type"), market_data_type.to_string()]);
+            }
+            if let Some(as_of) = args.get("as_of").and_then(|a| a.as_str()) {
+                v.extend([s("--as-of"), s(as_of)]);
             }
             // --expirations and --summary are mutually exclusive in the CLI.
             // Skip --summary when caller is asking just for expiration dates.
@@ -1808,6 +2084,18 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if let Some(account) = args.get("ibkr_account").and_then(|a| a.as_str()) {
                 v.extend([s("--ibkr-account"), s(account)]);
             }
+            if let Some(host) = args.get("ibkr_host").and_then(|h| h.as_str()) {
+                v.extend([s("--ibkr-host"), s(host)]);
+            }
+            if let Some(port) = args.get("ibkr_port").and_then(|p| p.as_u64()) {
+                v.extend([s("--ibkr-port"), port.to_string()]);
+            }
+            if let Some(client_id) = args.get("ibkr_client_id").and_then(|c| c.as_i64()) {
+                v.extend([s("--ibkr-client-id"), client_id.to_string()]);
+            }
+            if let Some(mdt) = args.get("ibkr_market_data_type").and_then(|m| m.as_i64()) {
+                v.extend([s("--ibkr-market-data-type"), mdt.to_string()]);
+            }
             Ok(v)
         }
         "finance_filings" => {
@@ -1822,26 +2110,52 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if let Some(limit) = args.get("limit").and_then(|n| n.as_u64()) {
                 v.extend([s("--limit"), limit.to_string()]);
             }
-            if args
+            let single_file = args
+                .get("single_file")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            if !single_file
+                && args
                 .get("download")
                 .and_then(|b| b.as_bool())
                 .is_some_and(|download| !download)
             {
                 v.push(s("--no-download"));
             }
-            if args
+            if !single_file
+                && args
                 .get("download_all")
                 .and_then(|b| b.as_bool())
                 .unwrap_or(false)
             {
                 v.push(s("--download-all"));
             }
-            if args
+            if single_file {
+                v.push(s("--single-file"));
+            }
+            if !single_file
+                && args
+                .get("important_exhibits")
+                .and_then(|b| b.as_bool())
+                .is_some_and(|enabled| !enabled)
+            {
+                v.push(s("--primary-only"));
+            }
+            let include_text = args
                 .get("include_text")
                 .and_then(|b| b.as_bool())
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            if include_text {
                 v.push(s("--include-text"));
+            }
+            let raw_text = args
+                .get("raw_text")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            if raw_text {
+                v.push(s("--raw-text"));
+            }
+            if include_text || raw_text {
                 if let Some(mc) = args.get("max_chars").and_then(|n| n.as_u64()) {
                     v.extend([s("--max-chars"), mc.to_string()]);
                 }
@@ -2127,7 +2441,7 @@ async fn mcp_run_subprocess(args: Vec<String>) -> anyhow::Result<String> {
 async fn cmd_mcp_http(port: u16) -> Result<()> {
     use axum::{
         extract::Json as AxumJson,
-        http::{header, Method, StatusCode},
+        http::{header, HeaderName, Method, StatusCode},
         response::IntoResponse,
         routing::{get, post},
         Router,
@@ -2136,12 +2450,66 @@ async fn cmd_mcp_http(port: u16) -> Result<()> {
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION]);
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS, Method::DELETE])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::AUTHORIZATION,
+            HeaderName::from_static("mcp-session-id"),
+            HeaderName::from_static("mcp-protocol-version"),
+        ])
+        // The claude.ai web client runs in-browser; CORS hides response headers from
+        // JS unless they are explicitly exposed, so the connector cannot read the
+        // Mcp-Session-Id off the initialize response without this. Expose the session
+        // + protocol headers (and WWW-Authenticate for the OAuth challenge path).
+        .expose_headers([
+            HeaderName::from_static("mcp-session-id"),
+            HeaderName::from_static("mcp-protocol-version"),
+            header::WWW_AUTHENTICATE,
+        ]);
 
     let app = Router::new()
         .route("/", get(mcp_http_health))
-        .route("/mcp", get(mcp_http_health).post(mcp_http_handle))
+        // MCP Streamable HTTP: GET /mcp must open an SSE stream or return 405. We push no
+        // server-initiated messages, so registering POST only makes axum auto-return 405
+        // (with Allow: POST) on GET — the spec-correct "no stream here, POST only" answer.
+        // The old GET→health handler returned 200 JSON, which made claude.ai's connector
+        // probe reject the endpoint as "not a valid MCP server." Health stays on GET /.
+        .route("/mcp", post(mcp_http_handle))
+        .route("/favicon.ico", get(mcp_favicon))
+        .route("/favicon.png", get(mcp_favicon))
+        // ── OAuth-discovery stub (added 2026-06-25) ──────────────────────────────
+        // claude.ai's WEB connector regressed in the June-2026 connector/auth wave:
+        // "Add connector" now runs a MANDATORY OAuth-discovery preflight (RFC 9728
+        // PRM → RFC 8414 AS metadata → RFC 7591 DCR) and treats 404s on these as a
+        // HARD validation failure — a flat-200 authless server that 404s here is
+        // rejected as "not a valid MCP server" (GitHub claude-ai-mcp #402/#172/#143).
+        // Claude Code + Desktop still tolerate authless, which is why only the web/
+        // phone connector broke. We rubber-stamp the whole flow so the preflight
+        // completes while the server stays effectively open: any/no bearer is
+        // accepted on /mcp, and /authorize auto-approves. POST /mcp stays 200 (NO
+        // 401) so the existing authless runtime path is unbroken (and we dodge the
+        // HTTP/2 WWW-Authenticate case-sensitivity bug #219). Discovery URLs are
+        // derived per-request from X-Forwarded-Host/Proto, so this is tunnel-agnostic.
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth_authorization_server),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/mcp",
+            get(oauth_authorization_server),
+        )
+        .route("/register", post(oauth_register))
+        .route("/authorize", get(oauth_authorize))
+        .route("/token", post(oauth_token))
         .layer(cors);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
@@ -2156,6 +2524,18 @@ async fn cmd_mcp_http(port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Serve the embedded eli wordmark at /favicon.ico and /favicon.png. A connector UI that
+/// fetches the server domain's favicon now gets this instead of falling through to ngrok's.
+async fn mcp_favicon() -> impl axum::response::IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        FAVICON_PNG,
+    )
+}
+
 async fn mcp_http_health() -> impl axum::response::IntoResponse {
     axum::Json(serde_json::json!({
         "status": "ok",
@@ -2164,49 +2544,247 @@ async fn mcp_http_health() -> impl axum::response::IntoResponse {
     }))
 }
 
-async fn mcp_http_handle(
-    axum::extract::Json(request): axum::extract::Json<serde_json::Value>,
+// ── OAuth-discovery stub handlers ────────────────────────────────────────────
+// See the route table in cmd_mcp_http for why these exist. They make claude.ai's
+// post-June-2026 OAuth preflight complete against an effectively-authless server.
+// Nothing here grants real security — every token is accepted and /authorize
+// auto-approves. The point is purely to satisfy the connector-add discovery gate.
+
+/// Reconstruct the public base URL ("https://host") the client dialed, from the
+/// reverse-proxy headers ngrok/Cloudflare set. The server binds 0.0.0.0:<port>
+/// and never sees its own public hostname otherwise, so the RFC 9728 `resource`
+/// (which MUST exactly match the URL claude.ai points at) is derived per request.
+fn mcp_public_base(headers: &axum::http::HeaderMap) -> String {
+    let host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+        })
+        .unwrap_or("localhost:8484");
+    let is_local = host.starts_with("localhost") || host.starts_with("127.0.0.1");
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(if is_local { "http" } else { "https" });
+    format!("{proto}://{host}")
+}
+
+/// Minimal percent-decoder for a single query-string value (RFC 3986 + '+'→space).
+fn mcp_percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                match (mcp_hex_val(bytes[i + 1]), mcp_hex_val(bytes[i + 2])) {
+                    (Some(a), Some(b)) => {
+                        out.push(a * 16 + b);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn mcp_hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// RFC 9728 Protected Resource Metadata. `authorization_servers` points back at
+/// this same origin, where the AS metadata below lives.
+async fn oauth_protected_resource(
+    headers: axum::http::HeaderMap,
 ) -> impl axum::response::IntoResponse {
-    let method = match request.get("method").and_then(|m| m.as_str()) {
-        Some(m) => m.to_string(),
-        None => {
-            // No method — might be a notification or malformed
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": { "code": -32600, "message": "Missing method" }
-                })),
-            );
+    let base = mcp_public_base(&headers);
+    axum::Json(serde_json::json!({
+        "resource": format!("{base}/mcp"),
+        "authorization_servers": [base],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": []
+    }))
+}
+
+/// RFC 8414 Authorization Server Metadata. Advertises the rubber-stamp endpoints.
+async fn oauth_authorization_server(
+    headers: axum::http::HeaderMap,
+) -> impl axum::response::IntoResponse {
+    let base = mcp_public_base(&headers);
+    axum::Json(serde_json::json!({
+        "issuer": base,
+        "authorization_endpoint": format!("{base}/authorize"),
+        "token_endpoint": format!("{base}/token"),
+        "registration_endpoint": format!("{base}/register"),
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": []
+    }))
+}
+
+/// RFC 7591 Dynamic Client Registration. Accept anyone; echo back the redirect_uris
+/// the client sent (claude.ai expects its own callback echoed) and return a fixed
+/// public client_id.
+async fn oauth_register(
+    body: Option<axum::extract::Json<serde_json::Value>>,
+) -> impl axum::response::IntoResponse {
+    let redirect_uris = body
+        .as_ref()
+        .and_then(|b| b.get("redirect_uris").cloned())
+        .unwrap_or_else(|| serde_json::json!(["https://claude.ai/api/mcp/auth_callback"]));
+    (
+        axum::http::StatusCode::CREATED,
+        axum::Json(serde_json::json!({
+            "client_id": "eli-anon",
+            "token_endpoint_auth_method": "none",
+            "redirect_uris": redirect_uris,
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"]
+        })),
+    )
+}
+
+/// Authorization endpoint. Auto-approve: 302 straight back to the client's
+/// redirect_uri with a fixed code, preserving `state` byte-for-byte (we read it
+/// from the RAW query so claude.ai's base64url state round-trips unchanged).
+async fn oauth_authorize(
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> impl axum::response::IntoResponse {
+    let query = query.unwrap_or_default();
+    let mut redirect_uri = String::new();
+    let mut state_raw = String::new();
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        match k {
+            "redirect_uri" => redirect_uri = mcp_percent_decode(v),
+            "state" => state_raw = v.to_string(), // keep RAW (still percent-encoded)
+            _ => {}
+        }
+    }
+    if redirect_uri.is_empty() {
+        redirect_uri = "https://claude.ai/api/mcp/auth_callback".to_string();
+    }
+    let sep = if redirect_uri.contains('?') { '&' } else { '?' };
+    let location = if state_raw.is_empty() {
+        format!("{redirect_uri}{sep}code=eli-anon-code")
+    } else {
+        format!("{redirect_uri}{sep}code=eli-anon-code&state={state_raw}")
+    };
+    (
+        axum::http::StatusCode::FOUND,
+        [(axum::http::header::LOCATION, location)],
+    )
+}
+
+/// Token endpoint. Ignore the request entirely (no PKCE verification — it's a
+/// rubber stamp) and mint a bearer token claude.ai will then send to /mcp.
+async fn oauth_token() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        axum::Json(serde_json::json!({
+            "access_token": "eli-anon-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": ""
+        })),
+    )
+}
+
+async fn mcp_http_handle(
+    headers: axum::http::HeaderMap,
+    axum::extract::Json(request): axum::extract::Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::http::{HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+
+    // Streamable-HTTP session: claude.ai's runtime client treats the connection as
+    // "established" only once an Mcp-Session-Id rides on the responses, and loops on
+    // initialize forever without it. We are effectively stateless/single-user, so a
+    // constant id suffices — claude.ai only needs it PRESENT. Reflect the client's id
+    // when it sends one; never 400 on a missing id (claude.ai's runtime intermittently
+    // drops it — claude-code#41836), which keeps us as tolerant as the authless path.
+    let session_id = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "eli-mcp-session".to_string());
+    let proto = headers
+        .get("mcp-protocol-version")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            request
+                .get("params")
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "2025-11-25".to_string());
+
+    let method = request
+        .get("method")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string());
+
+    let mut response = match method.as_deref() {
+        None => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "jsonrpc": "2.0", "id": null,
+                "error": { "code": -32600, "message": "Missing method" }
+            })),
+        )
+            .into_response(),
+        // JSON-RPC notifications/responses: HTTP 202 Accepted with NO body (spec).
+        Some(m) if m.starts_with("notifications/") => StatusCode::ACCEPTED.into_response(),
+        Some(m) => {
+            let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let body = match m {
+                "initialize" => mcp_initialize(id, &request),
+                "tools/list" => mcp_tools_list(id),
+                "tools/call" => mcp_tools_call_full(id, &request).await,
+                _ => json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": { "code": -32601, "message": "Method not found" }
+                }),
+            };
+            (StatusCode::OK, axum::Json(body)).into_response()
         }
     };
 
-    // Notifications have no response
-    if method.starts_with("notifications/") {
-        return (
-            axum::http::StatusCode::ACCEPTED,
-            axum::Json(serde_json::json!({"ok": true})),
-        );
+    // Attach the session headers to EVERY /mcp response (initialize + follow-ups) so
+    // claude.ai can establish and carry the session.
+    let h = response.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(&session_id) {
+        h.insert("mcp-session-id", v);
     }
-
-    let id = request
-        .get("id")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-
-    let response = match method.as_str() {
-        "initialize" => mcp_initialize(id),
-        "tools/list" => mcp_tools_list(id),
-        "tools/call" => mcp_tools_call_full(id, &request).await,
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32601, "message": "Method not found" }
-        }),
-    };
-
-    (axum::http::StatusCode::OK, axum::Json(response))
+    if let Ok(v) = HeaderValue::from_str(&proto) {
+        h.insert("mcp-protocol-version", v);
+    }
+    response
 }
 
 #[cfg(test)]
@@ -2265,6 +2843,83 @@ mod mcp_tool_tests {
     }
 
     #[test]
+    fn mcp_build_cli_args_maps_finance_options_ibkr_overrides() {
+        let args = serde_json::json!({
+            "ticker": "SPY",
+            "provider": "ibkr",
+            "ibkr_account": "U1234567",
+            "ibkr_host": "127.0.0.1",
+            "ibkr_port": 7497,
+            "ibkr_client_id": 42,
+            "ibkr_market_data_type": 3,
+            "as_of": "2026-05-08",
+            "summary": true,
+            "near_money": 5
+        });
+        let built = mcp_build_cli_args("finance_options", &args).expect("build args");
+        assert_eq!(built[0], "finance");
+        assert_eq!(built[1], "options");
+        assert!(built.contains(&"--provider".to_string()));
+        assert!(built.contains(&"ibkr".to_string()));
+        assert!(built.contains(&"--ibkr-account".to_string()));
+        assert!(built.contains(&"U1234567".to_string()));
+        assert!(built.contains(&"--ibkr-host".to_string()));
+        assert!(built.contains(&"127.0.0.1".to_string()));
+        assert!(built.contains(&"--ibkr-port".to_string()));
+        assert!(built.contains(&"7497".to_string()));
+        assert!(built.contains(&"--ibkr-client-id".to_string()));
+        assert!(built.contains(&"42".to_string()));
+        assert!(built.contains(&"--ibkr-market-data-type".to_string()));
+        assert!(built.contains(&"3".to_string()));
+        assert!(built.contains(&"--as-of".to_string()));
+        assert!(built.contains(&"2026-05-08".to_string()));
+    }
+
+    #[test]
+    fn mcp_build_cli_args_maps_finance_filings_raw_text() {
+        let args = serde_json::json!({
+            "ticker": "AAPL",
+            "forms": "10-K",
+            "limit": 1,
+            "raw_text": true,
+            "max_chars": 500
+        });
+        let built = mcp_build_cli_args("finance_filings", &args).expect("build args");
+        assert_eq!(built[0], "finance");
+        assert_eq!(built[1], "filings");
+        assert!(built.contains(&"--ticker".to_string()));
+        assert!(built.contains(&"AAPL".to_string()));
+        assert!(built.contains(&"--raw-text".to_string()));
+        assert!(built.contains(&"--max-chars".to_string()));
+        assert!(built.contains(&"500".to_string()));
+    }
+
+    #[test]
+    fn mcp_build_cli_args_maps_finance_search_ibkr_overrides() {
+        let args = serde_json::json!({
+            "query": "AAPL",
+            "provider": "ibkr",
+            "ibkr_host": "127.0.0.1",
+            "ibkr_port": 4001,
+            "ibkr_client_id": 17,
+            "ibkr_market_data_type": 4
+        });
+        let built = mcp_build_cli_args("finance_search", &args).expect("build args");
+        assert_eq!(built[0], "finance");
+        assert_eq!(built[1], "search");
+        assert!(built.contains(&"--provider".to_string()));
+        assert!(built.contains(&"ibkr".to_string()));
+        assert!(built.contains(&"--ibkr-host".to_string()));
+        assert!(built.contains(&"127.0.0.1".to_string()));
+        assert!(built.contains(&"--ibkr-port".to_string()));
+        assert!(built.contains(&"4001".to_string()));
+        assert!(built.contains(&"--ibkr-client-id".to_string()));
+        assert!(built.contains(&"17".to_string()));
+        assert!(built.contains(&"--ibkr-market-data-type".to_string()));
+        assert!(built.contains(&"4".to_string()));
+    }
+
+    #[test]
     fn mcp_build_cli_args_maps_web_search_advanced_filters() {
         let args = serde_json::json!({
             "query": "fed decision",
@@ -2315,6 +2970,76 @@ mod mcp_tool_tests {
         assert!(built_batch.contains(&"--max-chars".to_string()));
         assert!(built_batch.contains(&"1600".to_string()));
         assert!(built_batch.contains(&"--full".to_string()));
+    }
+
+    #[test]
+    fn mcp_finance_odds_summary_preserves_search_rank_without_literal_filter_note() {
+        let input = serde_json::json!({
+            "query": "jobs report",
+            "total_markets": 2,
+            "markets": [
+                {
+                    "source": "polymarket",
+                    "ticker": "LOWVOL",
+                    "event_ticker": "JOBS",
+                    "title": "Will the US add between 150k and 200k jobs in April",
+                    "probability_yes": 0.11,
+                    "volume_usd": 1000.0
+                },
+                {
+                    "source": "kalshi",
+                    "ticker": "HIGHVOL",
+                    "event_ticker": "NFP",
+                    "title": "Large unrelated-looking payroll market",
+                    "probability_yes": 0.62,
+                    "volume_usd": 100000.0
+                }
+            ]
+        });
+
+        let summary = mcp_build_summary("finance_odds", &serde_json::to_string(&input).unwrap());
+        assert!(
+            !summary.contains("_note:"),
+            "literal title filtering should not add noise"
+        );
+        let first = summary
+            .find("Will the US add between 150k and 200k jobs in April")
+            .expect("ranked first market should be present");
+        let second = summary
+            .find("Large unrelated-looking payroll market")
+            .expect("second market should be present");
+        assert!(first < second, "MCP summary should preserve search rank");
+    }
+
+    #[test]
+    fn mcp_finance_options_summary_reads_nested_metrics() {
+        let input = serde_json::json!({
+            "ticker": "SPY",
+            "underlying_price": 731.58,
+            "selected_expiry": "2026-07-17",
+            "selected_days_to_expiry": 70,
+            "selection_reason": "nearest_monthly_opex_gte_14dte",
+            "expirations": ["2026-05-08", "2026-07-17"],
+            "atm_iv": 0.18,
+            "metrics": {
+                "put_call_ratio_volume": 0.95,
+                "put_call_ratio_oi": 1.12,
+                "total_call_volume": 100,
+                "total_put_volume": 95,
+                "total_call_oi": 1000,
+                "total_put_oi": 1120,
+                "max_pain": 730.0,
+                "atm_iv": 0.18
+            }
+        });
+
+        let summary = mcp_build_summary("finance_options", &serde_json::to_string(&input).unwrap());
+        assert!(summary.contains("\"pc_vol_ratio\":0.95"));
+        assert!(summary.contains("\"pc_oi_ratio\":1.12"));
+        assert!(summary.contains("\"iv_pct\":18.0"));
+        assert!(summary.contains("\"total_oi\":2120"));
+        assert!(summary.contains("\"total_vol\":195"));
+        assert!(summary.contains("\"selected_dte\":70"));
     }
 
     #[test]

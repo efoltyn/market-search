@@ -171,6 +171,15 @@ struct CurveResponse {
     back_month_price: Option<f64>,
     spread: Option<f64>,
     spread_pct: Option<f64>,
+    /// Highest-priced contract on the curve. For seasonal commodities (e.g. natgas) this
+    /// is NOT the back month — the front-vs-back `spread` alone hides a winter premium.
+    peak_contract: Option<String>,
+    peak_price: Option<f64>,
+    /// Peak premium vs the front month, in percent (positive = contango at the peak).
+    peak_pct: Option<f64>,
+    trough_contract: Option<String>,
+    trough_price: Option<f64>,
+    trough_pct: Option<f64>,
     contracts: Vec<ContractPoint>,
 }
 
@@ -370,6 +379,21 @@ async fn cmd_finance_curve(args: FinanceCurveArgs) -> Result<()> {
     let spread = back_price.map(|b| b - front_price);
     let spread_pct = back_price.map(|b| (b - front_price) / front_price * 100.0);
 
+    // Peak/trough across the whole curve. For seasonal commodities the highest contract
+    // is a winter (or summer) month, not the back month — the front-vs-back spread hides
+    // it entirely. Trough excludes the front month so it reflects the curve's low point.
+    let cmp = |a: &&ContractPoint, b: &&ContractPoint| {
+        a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    let peak = contracts.iter().max_by(cmp);
+    let trough = contracts.iter().skip(1).min_by(cmp);
+    let peak_contract = peak.map(|c| c.contract.clone());
+    let peak_price = peak.map(|c| c.price);
+    let peak_pct = peak.map(|c| (c.price - front_price) / front_price * 100.0);
+    let trough_contract = trough.map(|c| c.contract.clone());
+    let trough_price = trough.map(|c| c.price);
+    let trough_pct = trough.map(|c| (c.price - front_price) / front_price * 100.0);
+
     let response = CurveResponse {
         commodity: spec.name.to_string(),
         unit: spec.unit.to_string(),
@@ -379,6 +403,12 @@ async fn cmd_finance_curve(args: FinanceCurveArgs) -> Result<()> {
         back_month_price: back_price,
         spread,
         spread_pct,
+        peak_contract,
+        peak_price,
+        peak_pct,
+        trough_contract,
+        trough_price,
+        trough_pct,
         contracts,
     };
 

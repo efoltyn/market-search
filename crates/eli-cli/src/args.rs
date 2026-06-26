@@ -1346,8 +1346,8 @@ struct FinanceSearchArgs {
     #[arg(index = 1, required = false)]
     query_positional: Option<String>,
 
-    /// Data provider (yahoo | ibkr).
-    #[arg(long, default_value = "yahoo")]
+    /// Data provider (auto | yahoo | ibkr). Auto uses the normal Yahoo+FRED search path.
+    #[arg(long, default_value = "auto")]
     provider: String,
 
     /// Optional IBKR account code (e.g. U1234567). Used when --provider ibkr.
@@ -1452,7 +1452,7 @@ struct FinanceOddsArgs {
     country: Option<String>,
 
     /// Minimum market volume in USD (local CSV search).
-    #[arg(long = "min-volume")]
+    #[arg(long = "min-volume", alias = "min_volume")]
     min_volume: Option<f64>,
 
     /// Return top N markets after ranking (local CSV search).
@@ -1461,7 +1461,7 @@ struct FinanceOddsArgs {
 
     /// Ranking for local CSV search output.
     /// Options: relevance, volume, delta_prob, delta_yes_price, delta_volume.
-    #[arg(long = "sort-by", default_value = "relevance")]
+    #[arg(long = "sort-by", alias = "sort_by", default_value = "relevance")]
     sort_by: String,
     /// Query profile: auto | macro | broad.
     #[arg(long, default_value = "auto")]
@@ -1488,9 +1488,13 @@ struct FinanceOddsArgs {
     #[arg(long, default_value_t = false)]
     explain: bool,
 
-    /// Upgrade CSV search results to live API prices (fresh bid/ask/volume).
+    /// Upgrade cache search results to live API prices (fresh bid/ask/volume). Default for --search.
     #[arg(long, default_value_t = false)]
     live: bool,
+
+    /// Use only the local FTS cache for --search; faster but can be stale and skips live fallback.
+    #[arg(long, conflicts_with = "live")]
+    local: bool,
 
     /// Include mention/speech-prediction markets (filtered by default).
     #[arg(long, default_value_t = false)]
@@ -1543,6 +1547,10 @@ struct FinanceOptionsArgs {
     #[arg(long = "target-dte")]
     target_dte: Option<i64>,
 
+    /// As-of timestamp. Options providers currently support current live/delayed snapshots only.
+    #[arg(long = "as-of")]
+    as_of: Option<String>,
+
     /// Filter: calls | puts | both (default: both).
     #[arg(long = "type", value_name = "calls|puts|both")]
     option_type: Option<String>,
@@ -1564,8 +1572,8 @@ struct FinanceOptionsArgs {
     #[arg(long)]
     all: bool,
 
-    /// Data provider (yahoo | ibkr).
-    #[arg(long, default_value = "yahoo")]
+    /// Data provider (auto | yahoo | ibkr). Auto uses Yahoo baseline plus IBKR overlay when reachable.
+    #[arg(long, default_value = "auto")]
     provider: String,
 
     /// Optional IBKR account code (e.g. U1234567). Used when --provider ibkr.
@@ -1729,6 +1737,13 @@ struct FinanceFilingsArgs {
     #[arg(long, default_value_t = 5)]
     limit: usize,
 
+    /// Download exactly one file: the primary document for the most recent matching filing.
+    #[arg(
+        long,
+        conflicts_with_all = ["no_download", "download_all", "primary_only", "include_text"]
+    )]
+    single_file: bool,
+
     /// Do not download filing files; return SEC metadata and URLs only.
     #[arg(long)]
     no_download: bool,
@@ -1737,11 +1752,24 @@ struct FinanceFilingsArgs {
     #[arg(long)]
     download_all: bool,
 
+    /// Only download the filing index JSON and primary document; skip filtered exhibits.
+    #[arg(long)]
+    primary_only: bool,
+
     /// Deprecated alias for the old text mode. Now downloads raw filing files without parsing.
     #[arg(long)]
     include_text: bool,
 
-    /// Deprecated. Filings are downloaded raw; no inline excerpt is generated.
+    /// Include the primary filing document's raw decoded text inline. Use --max-chars to cap it.
+    #[arg(long)]
+    raw_text: bool,
+
+    /// For earnings 8-Ks (item 2.02), inline the press-release exhibit (EX-99.1) as parsed
+    /// plain text in `press_release_text`. The XBRL cover (primary doc) is bypassed.
+    #[arg(long)]
+    press_release_text: bool,
+
+    /// Cap inline raw filing text when --raw-text is set.
     #[arg(long)]
     max_chars: Option<usize>,
 
@@ -1764,7 +1792,12 @@ struct FinanceFilingsArgs {
 
 #[derive(clap::Args, Debug)]
 struct FinanceTimeseriesArgs {
-    /// Preset ticker group (macro, forex_majors, yield_curve, liquidity, crypto).
+    /// Preset ticker group. 17 presets: macro, yield_curve, liquidity, crypto, forex_majors,
+    /// credit (ICE BofA OAS), financial_conditions (NFCI/STLFSI4/VIX), recession (Sahm/spreads/claims),
+    /// fed_balance_sheet (QE/QT/TGA/RRP), housing (Case-Shiller/starts/mortgage), labor (NFP/JOLTS/wages),
+    /// inflation (CPI/PCE/sticky/median/breakevens), real_rates (TIPS yields), consumer_credit (delinquency/SLOOS),
+    /// energy (WTI/Brent/NG/RBOB/HO/Gasoil via IBKR), commodities (CL/GC/SI/HG/grains/softs via IBKR),
+    /// treasuries (ZT/ZF/ZN/ZB + VIX futures via IBKR).
     /// Expands to predefined tickers with default range/granularity. User flags override defaults.
     #[arg(long)]
     preset: Option<String>,

@@ -29,6 +29,7 @@ pub struct BisSeries {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BisResponse {
     pub generated_at: DateTime<Utc>,
+    #[serde(skip)] // internal SDMX dataflow id — not surfaced to consumers
     pub dataset: String,
     pub series: Vec<BisSeries>,
     pub warnings: Vec<String>,

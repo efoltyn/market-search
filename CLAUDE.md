@@ -5,33 +5,61 @@ because someone just asked you to set up Market Search. Walk the user
 through the steps below in order. Pause where this file says PAUSE —
 those are the spots that need a human action you can't do yourself.
 
-Tell the user up front: "I'll get you a working setup in about 5
-minutes. There are two parts — local tools for me (instant) and a public
-URL if you want to use Market Search inside claude.ai web or ChatGPT
-custom apps (~3 min for permanent, instant for temporary)."
+Tell the user up front: "There are two parts. Local tools for me (this
+Claude Code / Codex session) — that's a binary install plus one config
+line. And, if you want Market Search inside claude.ai web or ChatGPT, a
+public URL — that part needs the v0.3.0 binary and a terminal that stays
+open, because the link only lives while the process runs."
 
 ---
 
 ## Step 1 — Verify prerequisites
 
-Run these checks. If anything fails, print the install instruction and stop.
+Only one thing is required: git. The prebuilt binary and the `npx` path
+need no Rust toolchain — `cargo` matters only if the user wants to
+compile from source (Step 2, option b).
 
 | Check | Command | Fix if missing |
 |---|---|---|
-| Rust toolchain | `which cargo` | macOS: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh`<br/>Linux: same as macOS<br/>Windows: https://rustup.rs |
-| git | `which git` | macOS: `xcode-select --install`<br/>Linux: `apt install git` or distro equivalent |
+| git (required) | `which git` | macOS: `xcode-select --install`<br/>Linux: `apt install git` or distro equivalent |
+| cargo (optional — source build only) | `which cargo` | Skip unless they want to compile. macOS/Linux: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh`<br/>Windows: https://rustup.rs |
+
+Don't stop the setup if `cargo` is missing — just take the prebuilt path below.
 
 ## Step 2 — Install the binary
+
+Try these in order. The first one that works is the one to use — only
+fall through if a step isn't available.
+
+**(a) Prebuilt binary (no Rust needed):**
+
+```bash
+curl -fsSL https://eliterminal.com/install.sh | sh
+```
+
+Or grab the binary for your platform straight from the latest GitHub
+release: https://github.com/efoltyn/market-search/releases/latest —
+download, `chmod +x`, and move it onto your `PATH`.
+
+**(b) From source, if they already have Rust:**
 
 ```bash
 cargo install market-search
 ```
 
-This compiles and installs `market-search` into `~/.cargo/bin/`. It takes 1–3
-minutes on first install (Rust is downloading dependencies). Watch for
-"Installed package `market-search`" at the end.
+This compiles `market-search` into `~/.cargo/bin/`. First build takes a
+few minutes while Cargo pulls dependencies; watch for "Installed package
+`market-search`" at the end.
 
-Verify: `market-search --version` should print a version string.
+**(c) Via npx (once published to npm):**
+
+```bash
+npx -y market-search mcp
+```
+
+Verify any path with: `market-search --version` — it should print a
+version string. For the claude.ai / phone URL in Step 4, that version
+must be **0.3.0 or newer** (see the note there).
 
 ## Step 3 — Wire local stdio MCP into the user's coding agent
 
@@ -41,8 +69,21 @@ this Claude Code/Codex session.
 
 ### For Claude Code
 
-Read `~/.claude/settings.json`. Find the `mcpServers` block (create it if
-it doesn't exist). Add or merge:
+One line (current 2026 syntax) — `market-search` is on `PATH` from Step 2:
+
+```bash
+claude mcp add market-search -- market-search mcp
+```
+
+Add `--scope user` to make it available in every project, not just this
+directory:
+
+```bash
+claude mcp add --scope user market-search -- market-search mcp
+```
+
+If you'd rather edit config by hand, the equivalent entry in
+`~/.claude/settings.json` (or any `.mcp.json`) is:
 
 ```json
 {
@@ -55,7 +96,7 @@ it doesn't exist). Add or merge:
 }
 ```
 
-Tell the user: "I added Market Search to your Claude Code config.
+Tell the user: "Market Search is in your Claude Code config now.
 **Restart Claude Code** so it picks up the new server, then come back
 here and we'll continue."
 
@@ -63,7 +104,9 @@ PAUSE — wait for the user to confirm restart.
 
 After restart, verify in this session by listing tools — you should see
 `finance_timeseries`, `finance_odds`, etc. If you don't, the config
-didn't take. Check syntax of the JSON file you edited.
+didn't take: run `claude mcp list` to confirm `market-search` is
+registered, and if you edited JSON by hand, re-read it and check for a
+syntax error (stray comma, mismatched braces).
 
 ### For Codex
 
@@ -82,13 +125,31 @@ Same JSON shape as Claude Code above.
 This step is OPTIONAL. Skip if the user only uses Claude Code / Codex /
 Claude Desktop locally — Step 3 was sufficient.
 
+**Version gate — check this first.** The claude.ai connector handshake
+(OAuth and the `Mcp-Session-Id` header) was only fixed in **0.3.0**. An
+older binary — including one from an earlier `cargo install` — gets
+rejected by claude.ai. Run `market-search --version`; if it's below
+0.3.0, reinstall from Step 2 before going further.
+
+**Persistence reality — say this to the user before they pick.** There
+is no background keep-alive service yet. The public link is alive only
+while the `market-search mcp share` process is running. Close the
+terminal, log out, or reboot, and the link goes dead. For an always-on
+phone connector, run it on a machine that stays on (and keep the process
+up — e.g. `nohup market-search mcp share … &`). What ngrok adds is a
+permanent *address* you can reserve; it does not keep the *process*
+alive for you.
+
 If they want Market Search in claude.ai web or ChatGPT, ask:
 
-> "How do you want to connect this? Two options:
-> 1. **Temporary URL (instant, 5 sec)** — best for trying it out once.
->    URL dies when you close the terminal.
-> 2. **Permanent URL (free, ~3 min setup)** — best for everyday use.
->    Requires a one-time email or Google/GitHub signup at ngrok.com.
+> "How do you want to connect this? Two options, and note neither runs
+> on its own — the link lives only while the share process is running:
+> 1. **Temporary URL (instant)** — good for trying it once. A fresh
+>    random URL each time; gone when the terminal closes.
+> 2. **Reserved address (free ngrok account)** — same URL every run, so
+>    you don't re-paste into the connector. Needs a one-time
+>    Google/GitHub/email signup at ngrok.com. Still only live while the
+>    process runs.
 >
 > (A third 'self-host' mode where TLS keys live on the user's laptop
 > and a VPS gateway only routes encrypted bytes is described in
@@ -121,7 +182,7 @@ close it or your machine reboots, you'll need to re-run `market-search mcp share
 and paste the new URL into the connector dialog (it'll be different
 each time)."
 
-### If they pick option 2 (permanent ngrok):
+### If they pick option 2 (reserved ngrok address):
 
 First check if ngrok is installed: `which ngrok`. If missing:
 - macOS: `brew install ngrok/ngrok/ngrok`
@@ -153,16 +214,22 @@ just use the auto-assigned one.
 Run:
 
 ```bash
-market-search mcp share --provider ngrok --authtoken <pasted-token>
+market-search mcp share --provider ngrok --authtoken <pasted-token> --domain mysub.ngrok-free.dev
 ```
 
-(Without `--domain`, ngrok uses a random URL. To pin to your reserved
-subdomain, re-run with `--domain mysub.ngrok-free.dev`.)
+Use the reserved subdomain from their dashboard's Domains page in place
+of `mysub`. Without `--domain`, ngrok hands out a random URL that
+changes each run — defeating the point of signing up.
 
-The command prints the same paste-ready block. The URL persists across
-restarts as long as you keep your ngrok account and stay under the
-free-tier limits (1 GB/mo data, 20K requests/mo — typical Market Search
-use is far below this).
+The command prints the same paste-ready block. The *address* stays the
+same across restarts as long as they keep the ngrok account and stay
+under the free-tier limits (1 GB/mo data, 20K requests/mo — typical
+Market Search use is well below this). But the connector only reaches a
+live process: when this command isn't running, the URL is dead. Tell
+them plainly: "Same URL every time, so you paste it into the connector
+once. It only answers while this `share` command is running, so keep it
+up on an always-on box (or `nohup … &`) if you want it on your phone
+later."
 
 Have them paste the URL into claude.ai or ChatGPT as described above.
 
@@ -201,10 +268,14 @@ real-time data" or similar, the connector isn't working — check:
 - **`cargo install` fails with linker errors**: User probably needs
   build tools. macOS: Xcode CLT (`xcode-select --install`). Linux: `apt
   install build-essential` or distro equivalent.
-- **MCP tools don't appear in Claude Code after editing settings.json**:
-  They didn't restart Claude Code, OR the JSON file has a syntax error
-  (a stray comma, mismatched braces). Read the file back and parse it
-  to confirm.
+- **MCP tools don't appear in Claude Code after Step 3**: They didn't
+  restart Claude Code. If they restarted and it's still missing, run
+  `claude mcp list` to confirm `market-search` registered; if they wired
+  it via hand-edited JSON, the file likely has a syntax error (a stray
+  comma, mismatched braces) — read it back and parse to confirm.
+- **claude.ai rejects the connector / OAuth fails**: The binary is older
+  than 0.3.0. `market-search --version`, then reinstall from Step 2. A
+  binary from an earlier `cargo install` is the usual culprit.
 - **`market-search mcp share --provider tunnelmole` errors with "npx not found"**:
   Node.js isn't installed. Just use the default `--provider cloudflare` instead
   (no Node dependency, more reliable).
@@ -224,3 +295,7 @@ real-time data" or similar, the connector isn't working — check:
   <token>` does for you).
 - Do not promise that the temporary URL will keep working — it won't.
   Be explicit about persistence in every option.
+- Do not imply the phone/claude.ai connector survives a reboot or a
+  closed terminal. There is no background keep-alive service yet — even
+  the reserved ngrok address only answers while the `share` process is
+  up. Don't sell turnkey phone persistence.

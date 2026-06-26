@@ -1,0 +1,45 @@
+{
+  "name": "market-search",
+  "version": "0.3.0",
+  "description": "Live markets in your AI: prediction-market odds + prices + macro on one timeseries axis. Local MCP server, free, no API keys.",
+  "bin": {
+    "market-search": "bin/market-search.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/market-search.js",
+    "install.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "finance",
+    "markets",
+    "polymarket",
+    "kalshi",
+    "stocks",
+    "prediction-markets",
+    "ai"
+  ],
+  "homepage": "https://eliterminal.com",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/efoltyn/market-search.git"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

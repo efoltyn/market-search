@@ -1,6 +1,6 @@
 [package]
 name = "market-search"
-version = "0.2.9"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -29,7 +29,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/efoltyn/market-search"
@@ -68,9 +68,9 @@ axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-eli-cli = { path = "crates/eli-cli", version = "0.2.4" }
-eli-core = { path = "crates/eli-core", version = "0.2.1" }
-eli-finance-types = { path = "crates/eli-finance-types", version = "0.2.0" }
+eli-cli = { path = "crates/eli-cli", version = "0.3.0" }
+eli-core = { path = "crates/eli-core", version = "0.3.0" }
+eli-finance-types = { path = "crates/eli-finance-types", version = "0.3.0" }
 
 # ── dev build speed ────────────────────────────────────────────────────────────
 [profile.dev]
@@ -89,3 +89,12 @@ debug = false
 # `-C strip=debuginfo`, which is currently crashing rustc with SIGBUS while
 # linking crates like `syn`. Keep strip disabled for dev deps.
 strip = "none"
+
+# ── distribution build (used by CI release + npx prebuilt binaries) ──────────────
+# Small, self-contained binary for download distribution. Slower to build (LTO),
+# but built once in CI. Local dev uses [profile.dev] above and is unaffected.
+[profile.release]
+opt-level = "s"      # optimize for size (this tool is I/O-bound, not CPU-bound)
+lto = true           # link-time optimization → smaller, faster
+codegen-units = 1    # better optimization at the cost of build time (fine in CI)
+strip = true         # drop symbols → much smaller binary

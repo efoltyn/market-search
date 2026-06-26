@@ -240,7 +240,8 @@ async fn cmd_finance_movers(args: FinanceMoversArgs) -> Result<()> {
                 if provider_arg == "ibkr" {
                     return Err(err);
                 }
-                warnings.push(format!("IBKR unavailable; using Yahoo candidates: {err}"));
+                eprintln!("movers: IBKR unavailable ({err}); using Yahoo candidates");
+                warnings.push("IBKR unavailable; using Yahoo candidates".to_string());
             }
         }
     }

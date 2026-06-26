@@ -63,7 +63,10 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         let db_path = cache_dir.join("markets.db");
         let has_db = db_path.exists();
 
-        if args.live {
+        // For search, freshness is the safe default. Agents were calling the
+        // CLI without --live and getting stale/empty cache results for live
+        // macro terms like "jobs report"; --local keeps the fast cache-only path.
+        if args.live || !args.local {
             // --orderbook: pass depth (1+) to live paths so Polymarket books
             // get attached. None disables. --depth defaults to 5.
             let orderbook_depth = args.orderbook.then(|| args.depth.unwrap_or(5).max(1));
@@ -285,19 +288,11 @@ fn odds_search_freshness_summary(
 ) -> serde_json::Value {
     let mut data_as_of = generated_at;
     let mut max_age_seconds = 0i64;
-    let mut stale_count = 0usize;
 
     for market in markets {
         let Some(freshness) = market.get("freshness") else {
             continue;
         };
-        if freshness
-            .get("state")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s.eq_ignore_ascii_case("stale"))
-        {
-            stale_count = stale_count.saturating_add(1);
-        }
         if let Some(age) = freshness.get("age_seconds").and_then(|v| v.as_i64()) {
             max_age_seconds = max_age_seconds.max(age);
         }
@@ -314,7 +309,6 @@ fn odds_search_freshness_summary(
     serde_json::json!({
         "data_as_of": data_as_of,
         "max_age_seconds": max_age_seconds,
-        "stale_count": stale_count,
     })
 }
 
@@ -453,8 +447,8 @@ fn odds_market_stdout_row(row: &serde_json::Value) -> serde_json::Value {
         "volume_usd": odds_market_volume_usd(row),
         "status": row.get("status").cloned().unwrap_or(serde_json::Value::Null),
     });
-    // Attach compact delta (prob_delta_pp + vol_delta) if present
-    if let Some(delta) = row.get("delta_since_last_sync") {
+    // Attach compact change_since (prob_delta_pp + vol_delta + the absolute baseline timestamp)
+    if let Some(delta) = row.get("change_since") {
         let mut compact = serde_json::Map::new();
         if let Some(pp) = delta
             .get("probability_delta_pct_points")
@@ -468,8 +462,13 @@ fn odds_market_stdout_row(row: &serde_json::Value) -> serde_json::Value {
         if let Some(vd) = delta.get("volume_delta").and_then(|v| v.as_i64()) {
             compact.insert("vol_delta".to_string(), serde_json::json!(vd));
         }
+        if let Some(as_of) = delta.get("as_of") {
+            if !as_of.is_null() {
+                compact.insert("as_of".to_string(), as_of.clone());
+            }
+        }
         if !compact.is_empty() {
-            out["delta"] = serde_json::Value::Object(compact);
+            out["change_since"] = serde_json::Value::Object(compact);
         }
     }
     out
@@ -675,15 +674,17 @@ fn load_sync_delta_lookup(cache_dir: &std::path::Path) -> Option<SyncDeltaLookup
         by_market.insert(sync_delta_key(&delta.source, &delta.ticker), delta);
     }
 
+    // Neutral, world-facing delta context: when the catalog snapshot was taken, the absolute
+    // timestamp the per-market deltas are measured against, and the span between them. No
+    // sync/cache/file-path plumbing, no internal counters, no catalog-wide mover blobs.
+    let baseline_age_seconds = parsed
+        .previous_sync_at
+        .map(|prev| (parsed.current_sync_at - prev).num_seconds());
     let context = serde_json::json!({
-        "available": true,
-        "path": path.display().to_string(),
-        "previous_sync_at": parsed.previous_sync_at,
-        "current_sync_at": parsed.current_sync_at,
-        "changed_markets": parsed.changed_markets,
-        "top_probability_moves": parsed.top_probability_moves,
-        "top_yes_price_moves": parsed.top_yes_price_moves,
-        "top_volume_moves": parsed.top_volume_moves,
+        "baseline_available": true,
+        "catalog_as_of": parsed.current_sync_at,
+        "baseline_as_of": parsed.previous_sync_at,
+        "baseline_age_seconds": baseline_age_seconds,
     });
     Some(SyncDeltaLookup { by_market, context })
 }
@@ -699,8 +700,20 @@ fn attach_market_delta(
     };
     let key = sync_delta_key(source, ticker);
     if let Some(delta) = lookup.by_market.get(&key) {
-        if let Ok(delta_value) = serde_json::to_value(delta) {
-            row_json["delta_since_last_sync"] = delta_value;
+        if let Ok(mut delta_value) = serde_json::to_value(delta) {
+            // Anchor the delta to the absolute baseline timestamp so a consumer reading this
+            // market in isolation knows the time span it covers (not "since last sync").
+            if let Some(obj) = delta_value.as_object_mut() {
+                obj.insert(
+                    "as_of".to_string(),
+                    lookup
+                        .context
+                        .get("baseline_as_of")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            row_json["change_since"] = delta_value;
         }
     }
 }
@@ -849,17 +862,22 @@ fn enrich_odds_response_with_sync_delta(
                 if let Some(vd) = vol_d {
                     compact.insert("vol_delta".to_string(), serde_json::json!(vd));
                 }
-                item["delta"] = serde_json::Value::Object(compact);
+                // Anchor to the absolute baseline timestamp (the prior snapshot the live
+                // prices are compared against) — not "since last sync".
+                compact.insert("as_of".to_string(), serde_json::json!(lookup.sync_at));
+                item["change_since"] = serde_json::Value::Object(compact);
             }
             attached = attached.saturating_add(1);
         }
     }
 
-    // Top-level delta context: compact summary instead of per-item blobs
+    // Top-level delta context: neutral world-facing anchor (the prior snapshot the deltas are
+    // measured against) + a count of returned markets that moved.
     if attached > 0 {
         value["delta_context"] = serde_json::json!({
-            "sync_at": lookup.sync_at,
-            "markets_with_changes": attached,
+            "baseline_available": true,
+            "baseline_as_of": lookup.sync_at,
+            "markets_with_change": attached,
         });
     }
 
@@ -1213,6 +1231,95 @@ fn macro_relevance_score(
     score
 }
 
+fn live_query_has_term(query_terms: &[String], needle: &str) -> bool {
+    query_terms.iter().any(|term| term == needle)
+}
+
+fn live_query_has_country_scope(query_terms: &[String]) -> bool {
+    query_terms.iter().any(|term| {
+        matches!(
+            term.as_str(),
+            "america"
+                | "american"
+                | "australia"
+                | "australian"
+                | "britain"
+                | "british"
+                | "canada"
+                | "canadian"
+                | "china"
+                | "chinese"
+                | "euro"
+                | "europe"
+                | "european"
+                | "france"
+                | "french"
+                | "germany"
+                | "global"
+                | "imf"
+                | "india"
+                | "japan"
+                | "japanese"
+                | "uk"
+                | "usa"
+                | "world"
+        )
+    })
+}
+
+fn live_text_has_us_macro_reference(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("u.s.") || lower.contains("united states") || lower.contains("nber") {
+        return true;
+    }
+    live_ascii_tokens(&lower)
+        .iter()
+        .any(|token| matches!(token.as_str(), "us" | "usa" | "america" | "american"))
+}
+
+fn live_text_has_non_us_country_reference(text: &str) -> bool {
+    live_ascii_tokens(text).iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "australia"
+                | "australian"
+                | "britain"
+                | "british"
+                | "canada"
+                | "canadian"
+                | "china"
+                | "chinese"
+                | "euro"
+                | "europe"
+                | "european"
+                | "france"
+                | "french"
+                | "germany"
+                | "global"
+                | "imf"
+                | "india"
+                | "japan"
+                | "japanese"
+                | "uk"
+                | "world"
+        )
+    })
+}
+
+fn live_default_us_recession_score(title: &str, event_title: &str, query_terms: &[String]) -> i64 {
+    if !live_query_has_term(query_terms, "recession") || live_query_has_country_scope(query_terms) {
+        return 0;
+    }
+    let text = format!("{title} {event_title}");
+    if live_text_has_us_macro_reference(&text) {
+        return 80;
+    }
+    if live_text_has_non_us_country_reference(&text) {
+        return -70;
+    }
+    0
+}
+
 /// Search the local SQLite FTS5 index (from `eli finance sync`).
 /// Returns matching markets as JSON, sorted by FTS5 BM25 relevance + volume.
 fn cmd_finance_odds_search_fts(
@@ -1243,8 +1350,24 @@ fn cmd_finance_odds_search_fts(
     };
 
     let final_limit = top.or(limit).unwrap_or(25);
-    let results = eli_core::finance::odds_db::search_markets(&conn, query, final_limit, &filters)
-        .map_err(|e| anyhow::anyhow!("FTS search: {e}"))?;
+    let mut query_used = query.to_string();
+    let mut fallback_query_used: Option<String> = None;
+    let mut results =
+        eli_core::finance::odds_db::search_markets(&conn, query, final_limit, &filters)
+            .map_err(|e| anyhow::anyhow!("FTS search: {e}"))?;
+    if results.is_empty() {
+        for fallback_query in live_search_fallback_queries(query) {
+            let fallback_results =
+                eli_core::finance::odds_db::search_markets(&conn, &fallback_query, final_limit, &filters)
+                    .map_err(|e| anyhow::anyhow!("FTS fallback search: {e}"))?;
+            if !fallback_results.is_empty() {
+                query_used = fallback_query.clone();
+                fallback_query_used = Some(fallback_query);
+                results = fallback_results;
+                break;
+            }
+        }
+    }
 
     let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -1283,6 +1406,7 @@ fn cmd_finance_odds_search_fts(
 
     let response = serde_json::json!({
         "query": query,
+        "query_used": query_used,
         "source": "fts5",
         "generated_at": generated_at
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -1293,7 +1417,10 @@ fn cmd_finance_odds_search_fts(
         "limit": final_limit,
         "top": top,
         "markets": markets,
-        "decision_trace": serde_json::Value::Array(Vec::new()),
+        "decision_trace": fallback_query_used
+            .as_ref()
+            .map(|used| serde_json::json!([format!("fts_query_fallback={used} reason=primary_query_no_results")]))
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
         "run_meta": {
             "duration_ms": duration_ms,
             "db_markets": total,
@@ -1616,31 +1743,18 @@ async fn cmd_finance_odds_search_live_fts(
         ));
     }
 
+    let _ = (&started, &fts_ms, &fts_results, &kalshi_series_vec, &decision_trace);
     let resp = serde_json::json!({
         "schema_version": "finance.odds.search_live_fts.v1",
         "query": query,
         "generated_at": generated_at,
         "freshness_summary": odds_search_freshness_summary(generated_at, &live_markets),
-        "applied_policy": {
-            "mode": opts.policy.mode,
-            "sources": opts.policy.sources,
-        },
-        "run_meta": {
-            "latency_ms": started.elapsed().as_millis() as u64,
-            "fts_discovery_ms": fts_ms,
-            "fts_candidates": fts_results.len(),
-            "kalshi_series_hydrated": kalshi_series_vec.len(),
-            "db_markets": eli_core::finance::odds_db::market_count(&fts_conn).unwrap_or(0),
-        },
-        "source": "fts5_live",
-        "note": "FTS5 discovery + targeted live hydration",
         "profile_requested": opts.profile.as_str(),
         "profile_applied": profile_applied.as_str(),
         "events_found": total_events_found,
         "events": all_events,
         "markets": live_markets,
         "total_markets": total_markets_found,
-        "decision_trace": decision_trace,
         "api_errors": api_errors,
         "delta_context": delta_context,
     });
@@ -1711,6 +1825,14 @@ async fn live_hydrate_kalshi_fts_series(
                         market.yes_sub_title.as_deref(),
                         market.subtitle.as_deref(),
                     );
+                    let base_score = if hinted_kalshi_series
+                        .iter()
+                        .any(|hint| hint == &series_ticker)
+                    {
+                        85
+                    } else {
+                        50
+                    };
                     let (match_score, matched_terms) = live_market_score(
                         &display_title,
                         &event_title,
@@ -1725,7 +1847,7 @@ async fn live_hydrate_kalshi_fts_series(
                         market.close_time.as_deref(),
                         market.status.as_deref(),
                         probability_yes,
-                        50,
+                        base_score,
                         profile_applied,
                         &opts.policy,
                     );
@@ -2587,6 +2709,115 @@ fn append_live_query_alias_terms(terms: &mut Vec<String>) {
             }
         }
     }
+    if has_term("grid", terms)
+        || has_term("grids", terms)
+        || has_term("electric", terms)
+        || has_term("electrical", terms)
+        || has_term("electricity", terms)
+        || has_term("utility", terms)
+        || has_term("utilities", terms)
+        || (has_term("power", terms)
+            && (has_term("data", terms) || has_term("center", terms) || has_term("centers", terms)))
+    {
+        for alias in ["energy", "electric", "electricity", "utility", "utilities"] {
+            if !has_term(alias, terms) {
+                terms.push(alias.to_string());
+            }
+        }
+    }
+}
+
+fn live_query_has_power_grid_intent(query: &str) -> bool {
+    let tokens = live_ascii_tokens(query);
+    let has_token = |needle: &str| tokens.iter().any(|token| token == needle);
+    let has_any = |needles: &[&str]| needles.iter().any(|needle| has_token(needle));
+    has_any(&[
+        "blackout",
+        "blackouts",
+        "brownout",
+        "brownouts",
+        "electric",
+        "electrical",
+        "electricity",
+        "grid",
+        "grids",
+        "utilities",
+        "utility",
+    ]) || (has_token("power")
+        && has_any(&[
+            "center",
+            "centers",
+            "data",
+            "electric",
+            "electricity",
+            "energy",
+            "grid",
+            "grids",
+            "shortage",
+            "shortages",
+            "utility",
+            "utilities",
+        ]))
+}
+
+fn live_text_has_power_grid_context(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if [
+        "data center",
+        "data centre",
+        "datacenter",
+        "electric bill",
+        "electric utility",
+        "energy demand",
+        "power demand",
+        "power plant",
+        "power usage",
+        "utility bill",
+        "utility cost",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+    {
+        return true;
+    }
+
+    live_ascii_tokens(&lower).iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "blackout"
+                | "blackouts"
+                | "brownout"
+                | "brownouts"
+                | "electric"
+                | "electrical"
+                | "electricity"
+                | "energy"
+                | "gigawatt"
+                | "gigawatts"
+                | "grid"
+                | "grids"
+                | "megawatt"
+                | "megawatts"
+                | "nuclear"
+                | "outage"
+                | "outages"
+                | "substation"
+                | "substations"
+                | "transmission"
+                | "utilities"
+                | "utility"
+        )
+    })
+}
+
+fn live_market_has_power_grid_context(
+    title: &str,
+    event_title: &str,
+    category: &str,
+    tag_text: &str,
+) -> bool {
+    let text = format!("{title} {event_title} {category} {tag_text}");
+    live_text_has_power_grid_context(&text)
 }
 
 fn live_search_fallback_queries(query: &str) -> Vec<String> {
@@ -2619,6 +2850,22 @@ fn live_search_fallback_queries(query: &str) -> Vec<String> {
         fallbacks.push("economic growth".to_string());
         fallbacks.push("recession".to_string());
     }
+    if has_any(&[
+        "job",
+        "jobs",
+        "nfp",
+        "nonfarm",
+        "payroll",
+        "payrolls",
+        "employment",
+        "labor",
+        "labour",
+    ]) || (has_token("report") && has_any(&["job", "jobs", "labor", "labour"])) {
+        fallbacks.push("nonfarm".to_string());
+        fallbacks.push("nonfarm payrolls".to_string());
+        fallbacks.push("payroll".to_string());
+        fallbacks.push("employment".to_string());
+    }
     if tokens.iter().any(|token| token == "cpi" || token == "inflation") {
         fallbacks.push("inflation".to_string());
         fallbacks.push("consumer prices".to_string());
@@ -2627,29 +2874,7 @@ fn live_search_fallback_queries(query: &str) -> Vec<String> {
         fallbacks.push("tariffs".to_string());
         fallbacks.push("trade war".to_string());
     }
-    let power_grid_query = has_any(&[
-        "blackout",
-        "blackouts",
-        "electric",
-        "electrical",
-        "electricity",
-        "grid",
-        "grids",
-        "utilities",
-        "utility",
-    ]) || (has_token("power")
-        && has_any(&[
-            "center",
-            "centers",
-            "data",
-            "electric",
-            "electricity",
-            "energy",
-            "grid",
-            "shortage",
-            "utility",
-        ]));
-    if power_grid_query {
+    if live_query_has_power_grid_intent(query) {
         fallbacks.push("electric utility".to_string());
         fallbacks.push("data center power".to_string());
         fallbacks.push("power grid".to_string());
@@ -2992,6 +3217,9 @@ fn live_kalshi_market_display_title(
         base = event_title;
     }
     let detail = yes_sub_title.or(subtitle).unwrap_or_default().trim();
+    if let Some(rewritten) = live_rewrite_zero_bps_hold_title(&base, detail) {
+        return rewritten;
+    }
     if base.is_empty() {
         return detail.to_string();
     }
@@ -3005,6 +3233,26 @@ fn live_kalshi_market_display_title(
         return base.to_string();
     }
     format!("{base} ({detail})")
+}
+
+fn live_rewrite_zero_bps_hold_title(base: &str, detail: &str) -> Option<String> {
+    let base_l = base.to_ascii_lowercase();
+    let detail_l = detail.to_ascii_lowercase();
+    if !base_l.contains("hike rates by 0bps")
+        || !(detail_l.contains("maintains rate") || detail_l.contains("maintain rate"))
+    {
+        return None;
+    }
+
+    let mut rewritten = base
+        .replace("Hike rates by 0bps", "maintain rates")
+        .replace("hike rates by 0bps", "maintain rates");
+    rewritten = rewritten.replace(" at their ", " at the ");
+    if rewritten == base {
+        None
+    } else {
+        Some(rewritten)
+    }
 }
 
 fn live_market_sort_key(row: &serde_json::Value) -> (i32, i64, i32, i64) {
@@ -3503,6 +3751,10 @@ fn live_series_score(
     if profile_applied == SearchProfile::Macro {
         score += macro_relevance_score(title, category, "", &[], &matched_terms, policy);
     }
+    if live_query_has_term(query_terms, "recession") && ticker.contains("NBER") {
+        score += 45;
+    }
+    score += live_default_us_recession_score(title, "", query_terms);
 
     score
 }
@@ -3549,6 +3801,7 @@ fn live_market_score(
     score += live_close_time_bonus(close_time);
     score += live_month_specificity_score(title, event_title, query_terms, close_time);
     score += live_direction_specificity_score(title, event_title, query_terms);
+    score += live_default_us_recession_score(title, event_title, query_terms);
 
     if live_is_open_status(status) {
         score += 25;
@@ -3580,6 +3833,7 @@ async fn live_fetch_polymarket_results(
     ),
     String,
 > {
+    let power_grid_query = live_query_has_power_grid_intent(query);
     let query_params = vec![
         ("q", query.to_string()),
         ("limit_per_type", LIVE_POLY_LIMIT_PER_TYPE.to_string()),
@@ -3652,6 +3906,15 @@ async fn live_fetch_polymarket_results(
 
     let expansion_seed_events: Vec<LivePolymarketEvent> = combined_events
         .iter()
+        .filter(|(event, _)| {
+            if !power_grid_query {
+                return true;
+            }
+            let title = event.title.as_deref().unwrap_or_default();
+            let category = event.category.as_deref().unwrap_or_default();
+            let tag_text = live_polymarket_event_tags_text(event);
+            live_market_has_power_grid_context(title, title, category, &tag_text)
+        })
         .map(|(event, _)| event.clone())
         .collect();
     let expansion_terms = live_extract_expansion_terms(query_terms, &expansion_seed_events);
@@ -3671,6 +3934,8 @@ async fn live_fetch_polymarket_results(
         let event_ticker_value = event_ticker.clone();
         let category = event.category.clone().unwrap_or_default();
         let tag_text = live_polymarket_event_tags_text(&event);
+        let event_has_power_grid_context =
+            live_market_has_power_grid_context(&title, &event_title, &category, &tag_text);
         let event_volume = event
             .volume_24hr
             .as_ref()
@@ -3722,17 +3987,18 @@ async fn live_fetch_polymarket_results(
             );
         }
 
-        if !seen_events.insert(format!("polymarket::{event_ticker}")) {
-            continue;
+        if (!power_grid_query || event_has_power_grid_context)
+            && seen_events.insert(format!("polymarket::{event_ticker}"))
+        {
+            events.push(serde_json::json!({
+                "source": "polymarket",
+                "event_ticker": event_ticker,
+                "title": title,
+                "category": if category.is_empty() { serde_json::Value::Null } else { serde_json::json!(category) },
+                "slug": event.slug,
+                "match_score": event_score,
+            }));
         }
-        events.push(serde_json::json!({
-            "source": "polymarket",
-            "event_ticker": event_ticker,
-            "title": title,
-            "category": if category.is_empty() { serde_json::Value::Null } else { serde_json::json!(category) },
-            "slug": event.slug,
-            "match_score": event_score,
-        }));
 
         for (market_rank, market) in event.markets.into_iter().enumerate() {
             let market_title = market.question.clone().unwrap_or_else(|| title.clone());
@@ -3755,6 +4021,16 @@ async fn live_fetch_polymarket_results(
                 continue;
             }
             if !category_matches_filter(&category, opts.category_filter.as_deref()) {
+                continue;
+            }
+            if power_grid_query
+                && !live_market_has_power_grid_context(
+                    &market_title,
+                    &event_title,
+                    &category,
+                    &tag_text,
+                )
+            {
                 continue;
             }
 
@@ -3815,7 +4091,7 @@ async fn live_fetch_polymarket_results(
         }
     }
 
-    if events.is_empty() && markets.is_empty() {
+    if events.is_empty() && markets.is_empty() && !power_grid_query {
         api_errors.push(serde_json::json!({
             "phase": "event_discovery",
             "source": "polymarket",
@@ -4523,6 +4799,98 @@ mod odds_live_tests {
     }
 
     #[test]
+    fn live_market_score_defaults_bare_recession_to_us_scope() {
+        let policy = test_policy();
+        let query_terms = live_query_terms("recession");
+        let query_phrase = "recession".to_string();
+
+        let (us_score, _) = live_market_score(
+            "US recession by end of 2026?",
+            "US recession by end of 2026",
+            "Economics",
+            "",
+            &query_phrase,
+            &query_terms,
+            &[],
+            2_000.0,
+            2_000.0,
+            0.0,
+            Some("2099-12-31T00:00:00Z"),
+            Some("active"),
+            Some(0.22),
+            20,
+            SearchProfile::Macro,
+            &policy,
+        );
+        let (japan_score, _) = live_market_score(
+            "Japan recession in 2026?",
+            "Japan recession in 2026",
+            "Economics",
+            "",
+            &query_phrase,
+            &query_terms,
+            &[],
+            2_000.0,
+            2_000.0,
+            0.0,
+            Some("2099-12-31T00:00:00Z"),
+            Some("active"),
+            Some(0.31),
+            20,
+            SearchProfile::Macro,
+            &policy,
+        );
+
+        assert!(us_score > japan_score);
+    }
+
+    #[test]
+    fn live_market_score_respects_explicit_recession_country_scope() {
+        let policy = test_policy();
+        let query_terms = live_query_terms("japan recession");
+        let query_phrase = "japan recession".to_string();
+
+        let (japan_score, _) = live_market_score(
+            "Japan recession in 2026?",
+            "Japan recession in 2026",
+            "Economics",
+            "",
+            &query_phrase,
+            &query_terms,
+            &[],
+            2_000.0,
+            2_000.0,
+            0.0,
+            Some("2099-12-31T00:00:00Z"),
+            Some("active"),
+            Some(0.31),
+            20,
+            SearchProfile::Macro,
+            &policy,
+        );
+        let (us_score, _) = live_market_score(
+            "US recession by end of 2026?",
+            "US recession by end of 2026",
+            "Economics",
+            "",
+            &query_phrase,
+            &query_terms,
+            &[],
+            2_000.0,
+            2_000.0,
+            0.0,
+            Some("2099-12-31T00:00:00Z"),
+            Some("active"),
+            Some(0.22),
+            20,
+            SearchProfile::Macro,
+            &policy,
+        );
+
+        assert!(japan_score > us_score);
+    }
+
+    #[test]
     fn live_kalshi_market_display_title_uses_subtitle_when_needed() {
         let title = live_kalshi_market_display_title(
             "Bitcoin price on Mar 13, 2026 at 5pm EDT?",
@@ -4544,6 +4912,20 @@ mod odds_live_tests {
         assert_eq!(
             unchanged,
             "Will the rate of CPI inflation be above 2.8% for the year ending in March 2026?"
+        );
+    }
+
+    #[test]
+    fn live_kalshi_market_display_title_rewrites_zero_bps_hike_as_hold() {
+        let title = live_kalshi_market_display_title(
+            "Fed rate hike by",
+            "Will the Federal Reserve Hike rates by 0bps at their June 2026 meeting?",
+            Some("Fed maintains rate"),
+            None,
+        );
+        assert_eq!(
+            title,
+            "Will the Federal Reserve maintain rates at the June 2026 meeting?"
         );
     }
 
@@ -4630,6 +5012,37 @@ mod odds_live_tests {
         let fallbacks = live_search_fallback_queries("electricity shortage");
         assert!(fallbacks.contains(&"electric utility".to_string()));
         assert!(fallbacks.contains(&"data center power".to_string()));
+    }
+
+    #[test]
+    fn live_power_grid_intent_does_not_match_power_as_name() {
+        assert!(live_query_has_power_grid_intent("power grid"));
+        assert!(live_query_has_power_grid_intent("electricity shortage"));
+        assert!(live_query_has_power_grid_intent("data center power"));
+        assert!(!live_query_has_power_grid_intent("Seamus Power top 20"));
+        assert!(!live_query_has_power_grid_intent("Power wins golf tournament"));
+    }
+
+    #[test]
+    fn live_power_grid_context_filters_name_only_markets() {
+        assert!(live_market_has_power_grid_context(
+            "Will legislation that prohibits data center power usage from increasing consumers' electric utility bills become law before Jan 1, 2027?",
+            "Data center utility cost protection",
+            "Politics",
+            "energy electricity"
+        ));
+        assert!(live_market_has_power_grid_context(
+            "AI data center moratorium passed before 2027?",
+            "AI data center moratorium",
+            "Politics",
+            ""
+        ));
+        assert!(!live_market_has_power_grid_context(
+            "Will Seamus Power finish in the Top 20 at the 2026 ONEflight Myrtle Beach Classic?",
+            "Seamus Power at the Myrtle Beach Classic",
+            "Sports",
+            "golf"
+        ));
     }
 
     #[test]
