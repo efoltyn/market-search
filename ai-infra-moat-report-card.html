@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Report Card — AI Infrastructure Moat Picks, 3-Week Check-In</title>
+<style>
+  :root{
+    --ink:#15181d; --muted:#5b6470; --line:#e3e7ee; --bg:#ffffff; --panel:#f7f9fc;
+    --accent:#1f6feb; --green:#0f9d58; --amber:#d98b00; --red:#d93636;
+    --green-bg:#e8f6ee; --amber-bg:#fbf1dc; --red-bg:#fbe9e9; --blue-bg:#e8f1fe;
+    --mono:"SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    line-height:1.62;font-size:16.5px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 22px 120px;}
+  header.hero{padding:60px 0 28px;border-bottom:3px solid var(--ink);margin-bottom:8px;}
+  .kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600;}
+  h1{font-size:40px;line-height:1.08;margin:14px 0 10px;letter-spacing:-.02em;}
+  .sub{font-size:19px;color:var(--muted);max-width:780px;margin:0;}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:22px;display:flex;gap:18px;flex-wrap:wrap;}
+  h2{font-size:26px;margin:52px 0 6px;letter-spacing:-.015em;padding-top:18px;border-top:1px solid var(--line);}
+  h2 .num{font-family:var(--mono);font-size:15px;color:var(--accent);margin-right:10px;}
+  h3{font-size:19px;margin:26px 0 6px;}
+  p{margin:12px 0;}
+  a{color:var(--accent);text-decoration:none;} a:hover{text-decoration:underline;}
+  strong{font-weight:650;}
+  .small{font-size:14px;color:var(--muted);}
+  .mono{font-family:var(--mono);}
+  .lede{font-size:18px;background:var(--panel);border-left:4px solid var(--accent);
+    padding:18px 22px;border-radius:0 8px 8px 0;margin:18px 0;}
+  .warn{font-size:16px;background:var(--amber-bg);border:1px solid #f0dca6;border-radius:10px;padding:16px 20px;margin:18px 0;}
+
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;
+    padding:2px 8px;border-radius:20px;letter-spacing:.03em;vertical-align:middle;}
+  .b-green{background:var(--green-bg);color:var(--green);}
+  .b-amber{background:var(--amber-bg);color:var(--amber);}
+  .b-red{background:var(--red-bg);color:var(--red);}
+  .b-blue{background:var(--blue-bg);color:var(--accent);}
+  .b-ink{background:#101418;color:#fff;}
+
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14px;}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top;}
+  th{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;border-bottom:2px solid var(--line);}
+  td.num,th.num{text-align:right;font-family:var(--mono);white-space:nowrap;}
+  tr:hover td{background:var(--panel);}
+  .pos{color:var(--green);font-weight:600;} .neg{color:var(--red);font-weight:600;}
+  .row-pick td{background:#f3f8ff;} .row-pick:hover td{background:#e9f2ff;}
+
+  /* scoreboard tiles */
+  .board{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0;}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 16px;}
+  .tile .lab{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);}
+  .tile .val{font-size:26px;font-weight:700;margin:5px 0 2px;letter-spacing:-.01em;}
+  .tile .note{font-size:12.5px;color:var(--muted);line-height:1.4;}
+  .tile.good{border-color:#bfe6cd;} .tile.good .val{color:var(--green);}
+  .tile.bad{border-color:#f0c9c9;} .tile.bad .val{color:var(--red);}
+  .tile.mix .val{color:var(--ink);}
+
+  .callout{border-radius:10px;padding:16px 20px;margin:18px 0;}
+  .co-right{background:var(--green-bg);border:1px solid #bfe6cd;}
+  .co-wrong{background:var(--red-bg);border:1px solid #f0c9c9;}
+  .co-dark{background:#101418;color:#f2f5f9;border-radius:14px;padding:24px 26px;margin:24px 0;}
+  .co-dark h3{color:#fff;margin-top:0;} .co-dark strong{color:#9ec5ff;}
+  ul{margin:10px 0;padding-left:22px;} li{margin:7px 0;}
+  .timeline{list-style:none;padding-left:0;}
+  .timeline li{padding:10px 0 10px 92px;position:relative;border-top:1px solid var(--line);}
+  .timeline .d{position:absolute;left:0;top:10px;font-family:var(--mono);font-size:11.5px;color:var(--accent);font-weight:600;}
+  .foot{margin-top:56px;padding-top:22px;border-top:1px solid var(--line);font-size:13px;color:var(--muted);}
+  details{margin:10px 0;border:1px solid var(--line);border-radius:10px;padding:4px 16px;background:var(--panel);}
+  summary{cursor:pointer;font-weight:600;padding:10px 0;font-size:15px;}
+  .srcgrid a{display:block;padding:3px 0;font-size:12.5px;word-break:break-all;}
+  .disclaimer{font-size:12.5px;color:var(--muted);background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:14px 18px;margin:24px 0;}
+  @media(max-width:760px){.board{grid-template-columns:repeat(2,1fr);} h1{font-size:31px;} .timeline li{padding-left:0;padding-top:30px;} .timeline .d{top:8px;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">Report Card · Companion to "The Second-Order Compute Trade"</div>
+  <h1>Three Weeks Later: How Did the Calls Do, and Why</h1>
+  <p class="sub">The original report was struck 5 June 2026. Here's the honest mark-to-market through 26 June — what worked, what didn't, and the two places the world proved me wrong.</p>
+  <div class="meta">
+    <span>Checked 28 Jun 2026</span>
+    <span>Entry: 4 Jun close</span>
+    <span>Mark: 26 Jun close</span>
+    <span>5 research agents · market-search + web</span>
+  </div>
+</header>
+
+<div class="warn">
+<strong>Read this first — two caveats that frame everything below.</strong><br>
+<strong>(1) Three weeks is noise, not a verdict.</strong> The thesis was explicitly 2027–2030. Nothing here confirms or kills a multi-year moat call; it's a temperature check.<br>
+<strong>(2) The entry prices were the worst possible.</strong> The report's 4-June marks were a <em>local top</em> — struck the day before Broadcom's 3-June soft AI guide triggered a ~9% semiconductor crash (SMH −9% on 5 June), with a second leg down 23–26 June. So <em>every</em> name started underwater on macro. The signal is in the <em>relative</em> performance, not the absolute.
+</div>
+
+<p class="lede"><strong>One-line grade:</strong> the <em>relative</em> discipline worked — the "avoid" book fell harder than the picks, and the four worst blow-ups were all names I told you to avoid. But the <em>absolute</em> thesis lost to the exact cluster I dismissed (<span class="mono">ICHR&nbsp;+32%, UCTT&nbsp;+27%</span>), because a <strong>memory-capacity-add cycle pays the tool-makers first and the consumable razors later</strong>. And I got the HBM-margin call flat wrong — Micron just printed <strong>84.6% gross margin</strong>.</p>
+
+<!-- SCOREBOARD -->
+<div class="board">
+  <div class="tile good">
+    <div class="lab">"Avoid" book (12)</div>
+    <div class="val">−6.4%</div>
+    <div class="note">Fell harder than the picks — the relative call worked as a short/avoid screen.</div>
+  </div>
+  <div class="tile mix">
+    <div class="lab">The 5 picks</div>
+    <div class="val">−1.1%</div>
+    <div class="note">Beat the avoid book and the QQQ (−4.9%); roughly matched SMH (−2.5%).</div>
+  </div>
+  <div class="tile good">
+    <div class="lab">Kill-shots that "fired"</div>
+    <div class="val">4 / 4</div>
+    <div class="note">NVTS −44, FN −27, AEHR −21, MPWR −21 — all in the avoid bucket.</div>
+  </div>
+  <div class="tile bad">
+    <div class="lab">The clean miss</div>
+    <div class="val">ICHR/UCTT</div>
+    <div class="note">+32% / +27% — tagged "capex-beta, avoid." The two best names in the universe.</div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">01</span>The full scorecard</h2>
+<p class="small">Entry = 4 Jun 2026 close (report date). Mark = 26 Jun 2026 close. Sorted best to worst. <span class="badge b-blue">PICK</span> / <span class="badge b-ink">PARK</span> / <span class="badge b-amber">AVOID</span> = my original call.</p>
+
+<table>
+<thead><tr>
+<th>Ticker</th><th>My call</th><th class="num">Entry</th><th class="num">Mark</th><th class="num">3-wk</th><th>What actually happened</th>
+</tr></thead>
+<tbody>
+<tr><td class="mono">ICHR</td><td><span class="badge b-amber">AVOID</span></td><td class="num">71.06</td><td class="num">94.00</td><td class="num pos">+32.3%</td><td>B.Riley $90→$125; memory-WFE play (supplies Lam/AMAT). <strong>My miss.</strong></td></tr>
+<tr><td class="mono">UCTT</td><td><span class="badge b-amber">AVOID</span></td><td class="num">93.69</td><td class="num">118.82</td><td class="num pos">+26.8%</td><td>Oppenheimer $115; same memory-capex read-through. <strong>My miss.</strong></td></tr>
+<tr><td class="mono">ONTO</td><td class="small">context/equip</td><td class="num">274.76</td><td class="num">323.92</td><td class="num pos">+17.9%</td><td>DB/MS/Oppenheimer Buy initiations; HBM/AP metrology.</td></tr>
+<tr><td class="mono">KLIC</td><td class="small">context</td><td class="num">107.52</td><td class="num">125.22</td><td class="num pos">+16.5%</td><td>Fiscal-Q2 beat + TCB/HBM packaging capacity.</td></tr>
+<tr><td class="mono">ENTG</td><td><span class="badge b-ink">PARK</span></td><td class="num">139.88</td><td class="num">161.43</td><td class="num pos">+15.4%</td><td>Multiple target raises + EUV-resist deal. Beat its "park" billing.</td></tr>
+<tr class="row-pick"><td class="mono">COHU</td><td><span class="badge b-blue">PICK #5</span></td><td class="num">55.88</td><td class="num">64.08</td><td class="num pos">+14.7%</td><td><strong>Best pick.</strong> TD Cowen PT $60→$80 (16 Jun) on Eclipse handlers + Neon HBM inspection — exactly the thesis.</td></tr>
+<tr><td class="mono">CRDO</td><td><span class="badge b-amber">AVOID</span></td><td class="num">217.50</td><td class="num">238.00</td><td class="num pos">+9.4%</td><td>1 Jun earnings blowout (+157%); 4th/5th hyperscaler — concentration <em>falling</em>. <strong>Caution overridden.</strong></td></tr>
+<tr><td class="mono">ALAB</td><td><span class="badge b-amber">AVOID</span></td><td class="num">358.05</td><td class="num">391.74</td><td class="num pos">+9.4%</td><td>Nasdaq-100 inclusion (22 Jun) + NVLink Fusion wins. <strong>Caution overridden.</strong></td></tr>
+<tr><td class="mono">TER</td><td class="small">toll</td><td class="num">406.86</td><td class="num">436.86</td><td class="num pos">+7.4%</td><td>HBM test-intensity; record close before Q2. The "toll" held up.</td></tr>
+<tr><td class="mono">VICR</td><td class="small">context</td><td class="num">306.12</td><td class="num">326.93</td><td class="num pos">+6.8%</td><td>Low-beta; held gains through the rout.</td></tr>
+<tr class="row-pick"><td class="mono">FORM</td><td><span class="badge b-blue">PICK #1</span></td><td class="num">126.61</td><td class="num">130.74</td><td class="num pos">+3.3%</td><td>Russell-1000 add (24 Jun) spiked it to $148 then unwound on rebalance day. <strong>Kill shot did NOT fire</strong> — Technoprobe <em>raised</em> guidance.</td></tr>
+<tr><td class="mono">FIX</td><td class="small">context</td><td class="num">1914.65</td><td class="num">1854.23</td><td class="num neg">−3.2%</td><td>Held up; contractor, lower AI-beta.</td></tr>
+<tr class="row-pick"><td class="mono">MTSI</td><td><span class="badge b-blue">PICK #3</span></td><td class="num">382.74</td><td class="num">369.18</td><td class="num neg">−3.5%</td><td>Beat the SOXX. Positive defense-RF + datacenter (+35–40%) news. Pure beta; thesis intact.</td></tr>
+<tr class="row-pick"><td class="mono">SITM</td><td><span class="badge b-blue">PICK #2</span></td><td class="num">706.98</td><td class="num">672.19</td><td class="num neg">−4.9%</td><td>Sector beta + valuation. Renesas deal still pending (closes ~YE26). Thesis intact.</td></tr>
+<tr><td class="mono">NVMI</td><td class="small">context</td><td class="num">520.40</td><td class="num">488.58</td><td class="num neg">−6.1%</td><td>Metrology; gave back with the group.</td></tr>
+<tr><td class="mono">VRT</td><td><span class="badge b-amber">AVOID</span></td><td class="num">323.92</td><td class="num">303.95</td><td class="num neg">−6.2%</td><td>Picks-and-shovels profit-taking in the margin-squeeze rotation.</td></tr>
+<tr><td class="mono">NBIS</td><td class="small">neocloud</td><td class="num">259.67</td><td class="num">240.30</td><td class="num neg">−7.5%</td><td>Off a parabola; $4.3B convert raised — financing constructive, not distress.</td></tr>
+<tr><td class="mono">COHR</td><td><span class="badge b-amber">AVOID</span></td><td class="num">421.90</td><td class="num">380.56</td><td class="num neg">−9.8%</td><td>Valuation + CPO-delay sentiment. JPM says optics ramp <em>ahead</em>; glut thesis unconfirmed.</td></tr>
+<tr><td class="mono">CRWV</td><td class="small">neocloud</td><td class="num">108.03</td><td class="num">96.58</td><td class="num neg">−10.6%</td><td>−18% in 8 sessions on depreciation/refi fears — yet S&amp;P revised credit outlook <em>positive</em>.</td></tr>
+<tr><td class="mono">BE</td><td><span class="badge b-amber">AVOID</span></td><td class="num">291.37</td><td class="num">252.02</td><td class="num neg">−13.5%</td><td>Jefferies upgraded rival FuelCell (+22%) on a 380MW DC deal — rotation trade, not a Bloom miss.</td></tr>
+<tr><td class="mono">LITE</td><td><span class="badge b-amber">AVOID</span></td><td class="num">945.08</td><td class="num">816.98</td><td class="num neg">−13.6%</td><td>Valuation/CPO-delay wobble; JPM called the fear "overblown." Moat intact.</td></tr>
+<tr class="row-pick"><td class="mono">CAMT</td><td><span class="badge b-blue">PICK #4</span></td><td class="num">181.16</td><td class="num">153.72</td><td class="num neg">−15.1%</td><td><strong>Worst pick.</strong> Round-tripped a spike to $204 on NO bad news — Evercore <em>raised</em> to $200, $105M order, Israel de-escalated. High-beta valuation casualty.</td></tr>
+<tr><td class="mono">MOD</td><td class="small">cooling</td><td class="num">301.21</td><td class="num">255.99</td><td class="num neg">−15.0%</td><td>Cooling profit-taking in the rotation.</td></tr>
+<tr><td class="mono">MPWR</td><td><span class="badge b-amber">AVOID</span></td><td class="num">1652.60</td><td class="num">1313.32</td><td class="num neg">−20.5%</td><td>Multiple compression (richest in group). Socket-diversification real but pre-dates June.</td></tr>
+<tr><td class="mono">AEHR</td><td><span class="badge b-amber">AVOID</span></td><td class="num">116.58</td><td class="num">91.81</td><td class="num neg">−21.2%</td><td>Momentum unwind off a spike; bookings were <em>positive</em>. ~flat vs window <em>start</em>.</td></tr>
+<tr><td class="mono">FN</td><td><span class="badge b-amber">AVOID</span></td><td class="num">714.78</td><td class="num">524.79</td><td class="num neg">−26.6%</td><td>JPM/Fox downgrades + valuation. Sole-source 1.6T intact; moving <em>into</em> CPO. Mechanism wrong, direction right.</td></tr>
+<tr><td class="mono">NVTS</td><td><span class="badge b-amber">AVOID</span></td><td class="num">30.67</td><td class="num">17.30</td><td class="num neg">−43.6%</td><td>$500M ATM dilution (8 Jun) + 97× sales/Zacks Sell. Nvidia 800V socket <em>reinforced</em>, not lost.</td></tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<h2><span class="num">02</span>What actually moved the tape (anatomy of the selloff)</h2>
+<p>The window was not stock-picking — it was a macro + sentiment repricing of all AI-infra off a local top. The chain, dated:</p>
+<ul class="timeline">
+<li><span class="d">Jun 3–5</span><strong>Broadcom soft AI guide</strong> ($16B vs ~$17.2B, no FY raise) → ~$1.3T chip-sector wipeout; SMH −9% on 5 Jun. The report's entry prices were the 4-Jun close — one day before this.</li>
+<li><span class="d">Jun 17</span><strong>Hawkish Fed</strong> — Warsh's first meeting as Chair; the 2026 rate cut removed from the dots, "elevated" inflation. Rate-sensitive high-multiple names hit hardest.</li>
+<li><span class="d">Jun 22–25</span><strong>Memory melt-up, then the scare.</strong> Micron blew out (record $41.5B rev, 84.6% GM) and Korea capex datapoints lit the memory-WFE complex — then MU <em>sold off</em> on reports <strong>Nvidia may halve HBM per rack on Rubin NVL72</strong> + SK Hynix slowing HBM4. First crack in the HBM-<em>volume</em> story.</li>
+<li><span class="d">Jun 25</span><strong>Hot PCE</strong> — headline 4.1% y/y (hottest since '23), core 3.4%. Cemented "higher-for-longer."</li>
+<li><span class="d">Jun 26</span><strong>Rotation + mechanics.</strong> "HBM/DRAM price hikes squeeze hyperscaler margins" narrative → sell the picks-and-shovels; OpenAI signals IPO delay to 2027 after SpaceX's wild debut; and it was the <strong>Russell reconstitution effective date</strong> — the 3–7× volume that unwound FORM's index-add spike and every high-beta name at once.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2><span class="num">03</span>The big miss, explained: capacity-add pays the toolmaker first</h2>
+<div class="callout co-wrong">
+<p style="margin-top:4px;"><strong>What I got wrong:</strong> I tagged Ichor (+32%) and Ultra Clean (+27%) as "picks-and-shovels in name, capex-beta in cash flow — avoid." They were the two best names in the entire universe.</p>
+<p><strong>Why it happened:</strong> June priced a <em>memory-capacity-add</em> cycle — Micron raising FY26 capex to ~$27B, Samsung pulling forward the P4 fab, SK Hynix adding wafers, SEMI guiding 300mm WFE +18% in 2026. A greenfield memory cycle means <strong>new tool and subsystem orders</strong> — exactly ICHR/UCTT (gas &amp; fluid delivery to Lam/AMAT), KLIC (HBM bonding), ONTO (HBM metrology), ENTG (materials per wafer-start). Their thin-margin "assembler" character <em>amplifies</em> the move via operating leverage, which is why sell-side targets jumped 30–40% in three weeks.</p>
+<p style="margin-bottom:4px;"><strong>The lesson:</strong> a consumable razor (FORM probe cards, COHU contactors) is a <em>production-volume</em> play — it gets paid when the new fabs <em>run</em>, which <em>lags</em> the capacity-add wave by quarters. My razor thesis wasn't wrong; it was at the <strong>wrong phase of the cycle</strong> for this particular quarter. Right altitude for 2027–2030, wrong altitude for June 2026.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">04</span>Where the world proved me wrong on the worldview</h2>
+<div class="callout co-wrong">
+<h3 style="margin-top:4px;">HBM margins: I "corrected" 80% down to 68–75%. That correction was wrong. <span class="badge b-red">MY BIGGEST MISS</span></h3>
+<p>Micron's fiscal-Q3 (24 Jun) printed <strong>84.6% gross margin and guided Q4 to ~86%</strong>, sold out through 2027 and into 2028, with HBM4 booked through 2027. The original worldview's "~80% scarcity premium" was, if anything, <em>low</em>. Memory pricing power is <strong>stronger and more durable</strong> than I credited — and the margin-compression clock I put at 2H26→2027 has been <strong>pushed out</strong>. The compression <em>trigger</em> did arrive on schedule (all three vendors qualified on HBM4, confirmed 5 Jun) — but demand absorbed the supply, and Micron is locking in take-or-pay contracts whose <em>floor</em> margins it says sit "beyond past-cycle peaks." Delayed, not invalidated — but I was on the wrong side of it.</p>
+</div>
+<div class="callout co-right">
+<h3 style="margin-top:4px;">Credit audit layer: tracking, and quietly accelerating. <span class="badge b-green">BEST CALL</span></h3>
+<p>The exact bifurcation I flagged widened: <strong>CCC OAS 9.41% → 9.68%</strong> (fresh high) while <strong>IG (0.76%) and HY (2.78%) stayed pinned at tights.</strong> The driver was idiosyncratic CCC stress — the <strong>First Brands "Ponzi" bankruptcy</strong>, Fed-on-hold-into-2027, rising healthcare/retail distress — <em>not</em> yet a neocloud event. But the neoclouds sold off anyway (CoreWeave −18% in eight sessions) on depreciation/concentration/refi fears, <em>even as S&amp;P revised CoreWeave's credit outlook to positive</em>. That equity-vs-credit divergence is the new thing to watch. Private-credit gating keeps broadening (BDC redemptions +217% q/q). Every fragility flag intact; none broken.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">05</span>The kill-shot audit: right to avoid, wrong on the mechanism</h2>
+<p>An honest distinction. My "avoid" names did fall — but on <strong>multiple compression in a sector de-rating, not because the specific operational kill shots fired.</strong> In several cases the company news cut <em>against</em> my kill shot. The moats are intact; the valuations corrected.</p>
+<table>
+<thead><tr><th>Name</th><th class="num">3-wk</th><th>My kill shot</th><th>Did it fire?</th></tr></thead>
+<tbody>
+<tr><td class="mono">NVTS</td><td class="num neg">−44%</td><td>Loses/dilutes Nvidia 800V socket</td><td><span class="badge b-amber">PARTIAL</span> $500M ATM dilution + valuation did it; socket was <em>reinforced</em> at Computex.</td></tr>
+<tr><td class="mono">FN</td><td class="num neg">−27%</td><td>Nvidia in-sources / CPO kills assembly</td><td><span class="badge b-amber">PARTIAL</span> Downgrades + valuation; sole-source 1.6T intact, moving <em>into</em> CPO.</td></tr>
+<tr><td class="mono">AEHR</td><td class="num neg">−21%</td><td>Unproven AI burn-in bet</td><td><span class="badge b-red">NO</span> Bookings were positive; ~flat vs window start. Momentum unwind.</td></tr>
+<tr><td class="mono">MPWR</td><td class="num neg">−21%</td><td>Nvidia dual-sources power socket</td><td><span class="badge b-amber">PARTIAL</span> Multiple compression. Diversification real but pre-dates June.</td></tr>
+<tr><td class="mono">LITE/COHR</td><td class="num neg">−14/−10%</td><td>2027 InP capacity glut</td><td><span class="badge b-amber">PARTIAL</span> Valuation/CPO-delay sentiment; glut unconfirmed, JPM says ramp ahead.</td></tr>
+<tr><td class="mono">CRDO</td><td class="num pos">+9%</td><td>Broadcom AECs + 67% one customer</td><td><span class="badge b-red">NO</span> Earnings blowout; concentration <em>falling</em> (4th/5th hyperscaler).</td></tr>
+<tr><td class="mono">ALAB</td><td class="num pos">+9%</td><td>Priced for perfection</td><td><span class="badge b-red">NO</span> Nasdaq-100 inclusion + NVLink Fusion wins kept paying for perfection.</td></tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<h2><span class="num">06</span>What I'd change</h2>
+<div class="co-dark">
+<h3>The verdict, unhedged</h3>
+<ul>
+<li><strong>The avoid screen earns a B+.</strong> The book I told you to avoid fell −6.4% vs −1.1% for the picks, and the four worst names in the universe were all flagged avoids. As a "don't own these into a de-rating" call, it worked — even though the moats didn't crack; valuations did.</li>
+<li><strong>The pick book earns a C.</strong> One real win (COHU, on the exact catalyst I named), one wild-but-flat index-mechanics name (FORM, thesis intact), two beta losses with intact theses (SITM, MTSI), and one genuinely bad pick (CAMT — too high-beta and too richly valued to own through a rout, even with no bad news).</li>
+<li><strong>The thesis earns an Incomplete — correctly.</strong> Three weeks can't judge a 2027–2030 moat call. But it already taught two things: (1) I under-weighted <em>where in the capex cycle</em> we are — capacity-add rewarded the toolmakers I dismissed before the consumable razors I favored; (2) I <em>over</em>-corrected the HBM-margin call and should have trusted the original scarcity-premium read.</li>
+</ul>
+<p style="margin-bottom:0;"><strong>If I rewrote it today:</strong> keep the avoid discipline; add ICHR/UCTT-style memory-WFE leverage as the <em>early-cycle</em> complement to the consumable razors (own the toolmaker into the capacity build, rotate to the razor as fabs ramp); raise the memory-pricing-power conviction; and keep the credit-audit lens exactly as is — it's the one part that's calling the tape in real time. <strong>The single chart that matters next: CCC OAS vs the first genuine neocloud refi headline. That's where the thesis lives or dies.</strong></p>
+</div>
+
+<div class="disclaimer">
+Research and analysis, not investment advice. Prices and spreads from a market-data tool and automated web research, 4–26 June 2026; figures may contain errors or be superseded. Three-week returns are dominated by market beta and a quarter-end index rebalance and should not be read as confirmation or refutation of a multi-year thesis. The author holds no position in any security named.
+</div>
+
+<details>
+<summary>Market backdrop (the beta the picks swam against), 4 → 26 Jun 2026</summary>
+<table>
+<thead><tr><th>Index / bellwether</th><th class="num">4 Jun</th><th class="num">26 Jun</th><th class="num">Move</th><th>Read</th></tr></thead>
+<tbody>
+<tr><td class="mono">MU (Micron)</td><td class="num">996</td><td class="num">1132</td><td class="num pos">+13.7%</td><td>Memory the standout — blowout print</td></tr>
+<tr><td class="mono">SOXX (semis)</td><td class="num">602.7</td><td class="num">589.9</td><td class="num neg">−2.1%</td><td>Flattish — masks huge dispersion</td></tr>
+<tr><td class="mono">SMH (semis)</td><td class="num">627.5</td><td class="num">611.6</td><td class="num neg">−2.5%</td><td>Flattish</td></tr>
+<tr><td class="mono">SPY</td><td class="num">757.1</td><td class="num">729.0</td><td class="num neg">−3.7%</td><td>Risk-off</td></tr>
+<tr><td class="mono">QQQ</td><td class="num">740.6</td><td class="num">706.5</td><td class="num neg">−4.6%</td><td>Risk-off</td></tr>
+<tr><td class="mono">NVDA (accelerator)</td><td class="num">218.7</td><td class="num">192.5</td><td class="num neg">−11.9%</td><td>Accelerator de-rated on Broadcom</td></tr>
+<tr><td class="mono">VIX</td><td class="num">15.4</td><td class="num">18.4</td><td class="num neg">+19%</td><td>Stress bid (23 intraday on 9 Jun)</td></tr>
+</tbody>
+</table>
+<p class="small">The tell: memory (+14%) and accelerator (−12%) split by ~26 points in three weeks. That rotation — into memory/HBM capex, out of AI-logic/optical — is the whole story of why the dismissed semicap names beat the picks.</p>
+</details>
+
+<details>
+<summary>Sources (selected)</summary>
+<div class="srcgrid">
+<a href="https://www.cnbc.com/2026/06/26/global-tech-stocks-ai-infrastructure-costs-selloff-softbank-apple.html">Global AI-infra selloff anatomy — CNBC (26 Jun)</a>
+<a href="https://www.cnbc.com/2026/06/17/fed-interest-rate-decision-june-2026.html">Hawkish June FOMC (Warsh) — CNBC</a>
+<a href="https://www.cnbc.com/2026/06/25/pce-inflation-report-may-2026-.html">Hot May PCE 4.1%/3.4% — CNBC</a>
+<a href="https://www.globenewswire.com/news-release/2026/06/24/3317151/14450/en/micron-technology-inc-reports-record-results-for-the-third-quarter-of-fiscal-2026.html">Micron Q3 FY26 record results (84.6% GM) — GlobeNewswire</a>
+<a href="https://www.tomshardware.com/tech-industry/samsung-and-sk-hynix-shorten-memory-contracts-as-pricing-power-shifts-back-to-suppliers">Nvidia Rubin memory-config / HBM4 supply — Tom's Hardware</a>
+<a href="https://www.timothysykes.com/news/ichorholdings-ichr-news-2026_06_20/">Ichor B.Riley target $90→$125 — 20 Jun</a>
+<a href="https://www.tickerreport.com/banking-finance/13483534/onto-innovation-nyseonto-hits-new-12-month-high-on-analyst-upgrade.html">Onto Oppenheimer upgrade $450 — Ticker Report</a>
+<a href="https://www.investing.com/news/analyst-ratings/cohu-stock-price-target-raised-to-80-by-td-cowen-on-ai-demand-93CH-4745228">Cohu TD Cowen PT $60→$80 (16 Jun) — Investing.com</a>
+<a href="https://www.globenewswire.com/news-release/2026/06/24/3317148/0/en/FormFactor-Inc-Added-to-Membership-of-US-Large-Cap-Russell-US-1000-Index.html">FormFactor added to Russell 1000 (24 Jun)</a>
+<a href="https://www.fool.com/investing/2026/06/01/is-credo-technology-group-a-buy-after-its-latest-e/">Credo Q4 earnings blowout — Motley Fool</a>
+<a href="https://www.tikr.com/blog/alab-astera-labs-stock-hits-all-time-high-as-nasdaq-adds-it-to-prestigious-tech-index">Astera Nasdaq-100 inclusion (22 Jun) — TIKR</a>
+<a href="https://ts2.tech/en/navitas-semiconductor-falls-as-chip-selloff-and-dilution-fears-hit-ai-favorite/">Navitas $500M ATM dilution + selloff — TS2</a>
+<a href="https://www.tipranks.com/news/why-is-bloom-energy-stock-be-plunging-today-june-26-2026">Bloom −18.5% / FuelCell upgrade rotation — TipRanks</a>
+<a href="https://congress.net/j-p-morgan-says-coherent-cohr-and-lumentum-lite-are-buys-after-steep-june-pullback/">JPM: Lumentum/Coherent buys after pullback</a>
+<a href="https://www.prnewswire.com/news-releases/camtek-receives-over-105-million-multi-system-orders-from-a-tier-1-osat-and-a-leading-hbm-manufacturer-302788351.html">Camtek $105M order (2 Jun) — PRNewswire</a>
+<a href="https://fred.stlouisfed.org/series/BAMLH0A3HYC">ICE BofA CCC OAS — FRED</a>
+<a href="https://www.bloomberg.com/news/articles/2026-06-18/first-brands-lender-can-t-distribute-cash-from-bankruptcy-sales">First Brands bankruptcy / lender cash barred — Bloomberg</a>
+<a href="https://www.spglobal.com/ratings/en/regulatory/article/-/view/type/HTML/id/3543328">S&amp;P revises CoreWeave outlook to positive</a>
+<a href="https://www.lseg.com/en/media-centre/press-releases/ftse-russell/2026/ftse-russell-begins-june-2026-semi-annual-russell-us-indexes-reconstitution">June 2026 Russell reconstitution — LSEG</a>
+<a href="https://www.semi.org/en/semi-press-release/semi-projects-double-digit-growth-in-global-300mm-fab-equipment-spending-for-2026-and-2027">SEMI 300mm WFE +18% 2026 forecast</a>
+</div>
+</details>
+
+<div class="foot">
+  Report Card · companion to "The Second-Order Compute Trade" (5 Jun 2026) · generated 28 Jun 2026.<br>
+  Marks from market-search finance tools (prices 26 Jun close, spreads through 25 Jun); the "why" from five parallel research agents across web + market data. Self-contained file — works offline.
+</div>
+
+</div>
+</body>
+</html>
