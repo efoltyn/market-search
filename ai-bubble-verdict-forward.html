@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Bubble, Redone on Forward Logic</title>
+<style>
+  :root{
+    --ink:#13161b; --muted:#5b6470; --line:#e4e8ef; --bg:#ffffff; --panel:#f7f9fc;
+    --accent:#1f6feb; --green:#0f9d58; --amber:#d98b00; --red:#d93636; --purple:#7b4fe0;
+    --green-bg:#e8f6ee; --amber-bg:#fbf1dc; --red-bg:#fbe9e9; --blue-bg:#e8f1fe; --purple-bg:#f0ebfb;
+    --mono:"SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;font-size:16.5px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1020px;margin:0 auto;padding:0 22px 130px;}
+  header.hero{padding:60px 0 26px;border-bottom:3px solid var(--ink);margin-bottom:8px;}
+  .kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600;}
+  h1{font-size:44px;line-height:1.05;margin:14px 0 10px;letter-spacing:-.025em;}
+  .sub{font-size:19.5px;color:var(--muted);max-width:810px;margin:0;}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:22px;display:flex;gap:16px;flex-wrap:wrap;}
+  h2{font-size:27px;margin:54px 0 8px;letter-spacing:-.015em;padding-top:18px;border-top:1px solid var(--line);}
+  h2 .n{font-family:var(--mono);font-size:15px;color:var(--accent);margin-right:10px;}
+  h3{font-size:19px;margin:26px 0 6px;}
+  p{margin:12px 0;} a{color:var(--accent);text-decoration:none;} a:hover{text-decoration:underline;}
+  strong{font-weight:650;} .small{font-size:14px;color:var(--muted);} .mono{font-family:var(--mono);}
+  .lede{font-size:18.5px;background:var(--panel);border-left:4px solid var(--accent);padding:18px 22px;border-radius:0 8px 8px 0;margin:18px 0;}
+
+  .verdict{background:#101418;color:#f2f5f9;border-radius:16px;padding:28px 30px;margin:24px 0;}
+  .verdict h3{color:#fff;margin:0 0 14px;font-size:14px;font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;}
+  .gw{display:flex;align-items:center;gap:26px;flex-wrap:wrap;}
+  .score{font-size:74px;font-weight:800;line-height:.9;letter-spacing:-.03em;color:#ff7a7a;}
+  .score small{font-size:26px;color:#8a93a0;font-weight:600;}
+  .gbar{flex:1;min-width:260px;}
+  .track{height:16px;border-radius:9px;background:linear-gradient(90deg,#0f9d58 0%,#0f9d58 20%,#d98b00 50%,#d93636 100%);position:relative;}
+  .pin{position:absolute;top:-6px;width:4px;height:28px;background:#fff;border-radius:2px;box-shadow:0 0 0 2px #101418;}
+  .pin.ghost{background:#6b7480;}
+  .ticks{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:#8a93a0;margin-top:7px;}
+  .verdict p{color:#d3d9e0;font-size:15.5px;} .verdict strong{color:#9ec5ff;}
+
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;letter-spacing:.03em;vertical-align:middle;}
+  .b-green{background:var(--green-bg);color:var(--green);}
+  .b-amber{background:var(--amber-bg);color:var(--amber);}
+  .b-red{background:var(--red-bg);color:var(--red);}
+  .b-purple{background:var(--purple-bg);color:var(--purple);}
+
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px;}
+  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top;}
+  th{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;border-bottom:2px solid var(--line);}
+  td.num,th.num{text-align:right;font-family:var(--mono);white-space:nowrap;}
+  tr:hover td{background:var(--panel);}
+  .neg{color:var(--red);font-weight:600;} .pos{color:var(--green);font-weight:600;}
+
+  .callout{border-radius:10px;padding:16px 20px;margin:18px 0;}
+  .co-circ{background:var(--red-bg);border:1px solid #f0c9c9;}
+  .co-jev{background:var(--green-bg);border:1px solid #bfe6cd;}
+  .co-method{background:var(--purple-bg);border:1px solid #d9caf6;}
+  .co-key{background:#101418;color:#f2f5f9;border-radius:14px;padding:24px 26px;margin:24px 0;}
+  .co-key h3{color:#fff;margin-top:0;} .co-key strong{color:#9ec5ff;}
+  ul{margin:10px 0;padding-left:22px;} li{margin:7px 0;}
+  .foot{margin-top:56px;padding-top:22px;border-top:1px solid var(--line);font-size:13px;color:var(--muted);}
+  details{margin:10px 0;border:1px solid var(--line);border-radius:10px;padding:4px 16px;background:var(--panel);}
+  summary{cursor:pointer;font-weight:600;padding:10px 0;font-size:15px;}
+  .srcgrid a{font-size:12.5px;}
+  .disclaimer{font-size:12.5px;color:var(--muted);background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:14px 18px;margin:24px 0;}
+  @media(max-width:760px){h1{font-size:32px;} .score{font-size:54px;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">The Verdict, Redone · forward logic, not snapshots</div>
+  <h1>The Bubble Is in the Denominator</h1>
+  <p class="sub">The first pass scored today's <em>conditions</em> and called it ~61 — "contained." That was circular: credit is tight <em>because</em> the market is up, and the multiple is sane <em>because the earnings forecast is heroic</em>. Re-run on the future the price <em>requires</em>, and the answer changes.</p>
+  <div class="meta">
+    <span>29 Jun 2026</span><span>S&amp;P 7,440 · CAPE ~40</span><span>8 forward interrogations</span><span>method: reverse the price, judge the future</span>
+  </div>
+</header>
+
+<p class="lede"><strong>The reframe:</strong> a price is a forward object; today's credit spread, VIX, and forward P/E are <em>coincident outputs of the same bull regime</em> — using them to validate the price is the snapshot describing itself. So we threw them out and asked one question instead: <strong>what future must be true for these prices to be fair, and is that future outlandish?</strong> Five independent reverse-engineerings agree — the embedded forecast is heroic, and you are paid ~nothing to bet it comes true.</p>
+
+<!-- HEADLINE GAUGE -->
+<div class="verdict">
+  <h3>Forward overvaluation (ensemble of 8)</h3>
+  <div class="gw">
+    <div class="score">78<small>/100</small></div>
+    <div class="gbar">
+      <div class="track"><div class="pin ghost" style="left:61%;"></div><div class="pin" style="left:78%;"></div></div>
+      <div class="ticks"><span>0 · fairly priced</span><span>50</span><span>100 · pure mania</span></div>
+    </div>
+  </div>
+  <p style="margin-bottom:0;">All <strong>eight</strong> interrogations landed in a tight <strong>72–82</strong> band (white pin = forward mean 78; grey ghost = the snapshot pass's 61). The jump <em>is</em> the point: the snapshot looked calmer because it was measuring the wrong thing. Normalized fair value for the S&amp;P clusters near <strong>~4,700–5,300 (≈ −28% to −36%)</strong>, with <strong>−45%</strong> on full regime-normalization and <strong>−40% to −60%</strong> for the AI complex. The buyer at 7,440 is signing up for <strong>~1% real per year for a decade.</strong></p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">01</span>Why the snapshot was circular</h2>
+<div class="callout co-method">
+<ul style="margin:4px 0;">
+<li><strong>"Credit is tight, so no stress."</strong> Credit is tight <em>because</em> equities are bid — it's the same benign-regime trade, it <em>funds</em> the AI capex (vendor/circular financing), and it gaps <em>with</em> equities, not against them. <span class="small">(10 of 11 bear markets since 1950 were preceded by ≥200bp of HY widening — credit doesn't cushion, it co-moves.)</span></li>
+<li><strong>"Forward P/E is only ~21×, so not a bubble."</strong> The multiple is price ÷ expected earnings, and <em>both</em> are set by the same forward optimism, so the ratio is self-stabilizing and <strong>structurally blind</strong>. It measures the market's <em>self-consistency</em>, never the <em>calibration</em> of its forecast. The bubble can only live in the <strong>E</strong> — and the E looks invisible precisely because the multiple stays "controlled" as the projections inflate.</li>
+<li><strong>The tell from the option market itself:</strong> VIX9D <strong>15.5</strong> < VIX 18.4 < 1-Year <strong>23.2</strong>, SKEW <strong>139</strong>. Sophisticated hedgers are asleep about next month and <em>paying up for the 12-month crash tail</em>. The spot price embeds near-certainty; the skew is where the risk is stored.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">02</span>The forward scoreboard — what the price requires</h2>
+<table>
+<thead><tr><th>Interrogation</th><th class="num">Score</th><th>The future the price requires (and why it's heroic)</th></tr></thead>
+<tbody>
+<tr><td><strong>The "E"</strong></td><td class="num">78</td><td>AI end-revenue must scale <strong>~$200B → $600B–$2T by 2030 (3–10×)</strong> <em>while</em> inference prices fall ~10×/yr. Haircut the E to plausible (~$252) and today's "22×" is really <strong>~29×</strong>.</td></tr>
+<tr><td><strong>Reverse-DCF</strong></td><td class="num">72–82</td><td>NVDA must hit <strong>$529B revenue by 2030 = ⅓ of the entire AI-datacenter TAM (≈ half of all chips on Earth) at a 63% margin</strong> — vs Wall St's own $250–350B. Fair value <strong>~$90 (−54%)</strong> if the margin merely fades to 50%. CoreWeave <strong>82</strong> (equity is a sliver of option over $35B debt).</td></tr>
+<tr><td><strong>Re-price normalized</strong></td><td class="num">72–78</td><td>On a normalized ERP and terminal multiple, S&amp;P fair value is <strong>4,250–5,200 (central ~4,700)</strong> → <strong>~36% downside</strong>. Corroborated by Goldman ~3% nominal/decade, GMO −5% real, CAPE-40 → ~0–1% real.</td></tr>
+<tr><td><strong>Conditions endogenous</strong></td><td class="num">82</td><td>Master variable = the <strong>vanished equity risk premium (~0, recently negative)</strong>. Normalize it toward 3–4% → <strong>−22% to −45%</strong>; AI complex <strong>−40% to −60%.</strong> The price asserts stocks need no premium over Treasuries.</td></tr>
+<tr><td><strong>Scenario / skew</strong></td><td class="num">82</td><td>The price implies <strong>P(bull) ≈ 62–68%</strong> vs a defensible ~30% — it <em>double-counts the good branch</em>. A 32%-probability left tail (−36% to −52%) is priced as if it were ~10%, even as the same market prices a <strong>44% chance of 2027 recession.</strong></td></tr>
+<tr><td><strong>Capex ROI</strong></td><td class="num">78</td><td>The buildout does <strong>not</strong> earn its cost of capital on base-case 2028–30 revenue — implying <strong>$300–500B+ of eventual write-downs</strong>. Hyperscaler free cash flow is <strong>hitting zero this summer</strong>; Oracle (−$24.5B FCF) and CoreWeave (−$8.6B) are already underwater.</td></tr>
+<tr><td><strong>Telecom base rate</strong></td><td class="num">78</td><td>Structural rhyme with the 2000 forward-projection failure is high; apply the base rate (forward EPS cut 30–50% + de-rate to 14–16×) → <strong>−45% to −65%</strong> in capex-levered names, <strong>−85%</strong> tail for the leveraged neoclouds. (Solvency rhyme is lower — today's buyers are cash-rich.)</td></tr>
+<tr><td><strong>Circular demand</strong></td><td class="num">82</td><td><strong>~60–75% of the headline backlog is circular / intra-cohort.</strong> Strip it and genuine third-party demand is <strong>~$150–200B vs ~$725B capex</strong> — only ~a quarter covered. The keystone is <strong>OpenAI</strong> (see §06).</td></tr>
+</tbody>
+</table>
+<p class="small">Every interrogation was forbidden from citing tight spreads, low VIX, or a "reasonable" multiple as comfort. The scores are about the <em>believability of the embedded forecast</em>, not the calmness of today's tape.</p>
+
+<!-- ============================================================ -->
+<h2><span class="n">03</span>One bet, five tickers — and it's the whole index</h2>
+<p>Strip the five names down and they rest on a <strong>single shared term</strong>: that the <strong>$725B→$1T+/yr</strong> capex converts into adequate ROIC <em>before</em> GPU depreciation reprices the asset base. NVDA's 63% margin, the S&amp;P's record 14% margin, Oracle's $638B RPO, CoreWeave's solvency — <strong>not five independent positions, one position five times.</strong> The real concentration risk isn't 33% index weight; it's <strong>100% correlation of the underlying assumption.</strong></p>
+<ul>
+<li>Capex <strong>$725B in 2026 (+77% YoY)</strong>, <strong>$1T+ in 2027</strong> (Goldman: $7.6T cumulative through 2031) — all guidance <em>raised</em>, none cut.</li>
+<li>Against this, the <em>pure-AI</em> revenue baseline is <strong>~$20B</strong> (Bain) — generously ~$50–150B all-in. <strong>Bain: $2T of new annual revenue needed by 2030; an $800B annual shortfall.</strong> The gap is <em>widening</em>.</li>
+<li>And the reported earnings are partly an accounting choice: Burry estimates <strong>~$176B of understated depreciation (2026–28)</strong> from stretching GPU life to 5–6 years vs a 2–3-year economic reality — H100 rental rates are already down <strong>~70%.</strong></li>
+</ul>
+
+<!-- ============================================================ -->
+<h2><span class="n">04</span>The historical control: "traffic doubles every 100 days"</h2>
+<p>At the telecom/dark-fiber top, the valuations looked <em>defensible on forward numbers</em> too — because the forward number was a fiction. WorldCom's <strong>"internet traffic doubles every 100 days"</strong> was an <strong>~8× overstatement</strong> (real growth was ~once a year). On those projections, <strong>Cisco's ~200× P/E "looked like it would compress as the growth arrived."</strong> It never arrived: Cisco fell <strong>~87%</strong> and has not reclaimed its 2000 high in <strong>24 years</strong>; Nortel went C$398B → &lt;C$5B; 85–95% of the fiber sat dark.</p>
+<p>Today's denominator-inflators are <strong>"tokens 50× YoY," "10,000× in two years," "a billion times"</strong> (Huang). Same mechanism — a heroic traffic-growth forecast making a high multiple look like it will "grow into" itself — and Chanos is already calling it: <em>"same setup… Nvidia's earnings are CapEx-boom output… they ordered 10,000 routers when they needed 2,000."</em> The vendor-financing rhyme is exact (Lucent/Nortel/Cisco lent customers the money to buy the gear; Nvidia → OpenAI → Oracle/CoreWeave → Nvidia, <strong>&gt;$800B–$1.4T</strong> of interlocking commitments).</p>
+
+<!-- ============================================================ -->
+<h2><span class="n">05</span>The hinge — the one thing that makes the bear wrong</h2>
+<div class="callout co-jev">
+<p style="margin-top:4px;"><strong>Jevons.</strong> The heroic E is only heroic if revenue can't get there. But token <em>volume</em> may be outrunning the price collapse: Google reports <strong>3.2 quadrillion tokens/month — ~330× in two years</strong> vs capex up ~4× and price down ~10×/yr. If volume durably outpaces deflation, the "$600B–$2T by 2030" isn't a fantasy — it's a <em>trajectory</em>, and the buildout pencils (helped by ~$1T of price-insensitive <strong>sovereign</strong> demand and real deployed ROI — GitHub Copilot 376% 3-yr ROI). This is the single fork on which the whole verdict turns.</p>
+<p style="margin-bottom:4px;"><strong>Why it doesn't neutralize the bear:</strong> the unit economics are going the wrong way <em>at the frontier</em> — OpenAI's gross margin fell 40%→33%, it loses ~$14B in 2026, and inference is loss-leading. Volume growth that doesn't convert to <em>profit</em> funds capex with losses. And critically: <strong>Jevons is a forward question — unanswerable from any snapshot.</strong> That's the whole lesson. The bull and bear are arguing about the denominator's future, which is exactly where the bubble lives and exactly what today's calm conditions cannot adjudicate.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">06</span>What breaks it, and the asymmetry</h2>
+<div class="callout co-circ">
+<p style="margin-top:4px;"><strong>The price is most blind to the transmission, not the trigger.</strong> The market already prices a 44% chance of 2027 recession — what it <em>doesn't</em> discount is the mechanism that turns an AI-capex wobble into a 30–50% drawdown: the <strong>neocloud-credit / circular-financing unwind.</strong> CoreWeave carries ~$35B debt (D/E ~738%), a <strong>$4.2B 2026 maturity ≈ all its cash</strong>, against GPU collateral whose rental value already fell ~70%. And the one in-index canary is already moving: <strong>CCC OAS 973bp, +9.9% over six months — the only spread widening</strong> while IG/HY sleep at multi-decade tights and VIX9D sits at 15.5.</p>
+<p style="margin-bottom:4px;"><strong>The asymmetry, stated plainly:</strong> you are paid a ~0% risk premium to hold a price that assigns ~65% to the bull, against a 32% tail that pays −36% to −52%. Limited upside if everything goes right; a third of the distribution is a deep drawdown the spot price barely discounts. That is the definition of negative convexity — and it is invisible in every "calm" snapshot.</p>
+</div>
+<p><strong>The single keystone is OpenAI.</strong> Strip the recycled dollars and it is the universal counterparty: <strong>&gt;50% of Oracle's $638B RPO</strong>, the look-through anchor of CoreWeave's backlog, the destination of Nvidia's largest investment, the entity behind the <strong>$1.4T commitment stack against a ~$25B ARR (≈70:1) while burning ~$27B in 2026.</strong> It cannot self-fund and is perpetually raising. If its funding access tightens or its ramp stalls, Oracle's RPO is revealed as concentration not demand, CoreWeave's take-or-pay and $35B debt strain, and Nvidia's vendor-financed revenue and $73.6B of equity stakes reprice. It is <em>already</em> fraying: the Stargate pledge was cut <strong>$1.4T → $600B</strong> and Nvidia's OpenAI LOI <strong>$100B → ~$30B.</strong> One node, the whole loop.</p>
+
+<!-- ============================================================ -->
+<h2><span class="n">07</span>Bottom line</h2>
+<div class="co-key">
+<h3>The verdict, redone</h3>
+<p style="margin-top:6px;"><strong>Forward overvaluation ~78/100 — materially higher than the snapshot pass's 61, because the snapshot was measuring conditions that are themselves outputs of the bubble.</strong> The market doesn't look cheap-and-safe because it <em>is</em> safe; it looks calm because the credit that funds it is tight (for now) and the multiple that prices it is divided by an earnings forecast carrying a 3–10× AI-revenue ramp against a 10×/yr price collapse. Interrogate that forecast directly — reverse-DCF, normalize the vanished risk premium, haircut the E — and four independent methods put normalized fair value near <strong>~4,700–5,300 (−28% to −36%), −45% on full normalization, −40% to −60% for the AI complex.</strong></p>
+<p><strong>The bubble is in the denominator and in the vanished risk premium — neither of which any snapshot can show you.</strong> It is one bet (capex earns its return before depreciation) wearing the whole index, paid for at a ~0% premium, priced as ~65% certain when ~30% is defensible, and rhyming structurally with a telecom top whose "reasonable" multiples sat on an 8×-overstated traffic forecast.</p>
+<p style="margin-bottom:0;"><strong>The honest hinge is Jevons</strong> — if token volume durably outruns the price collapse, the heroic E is mere trajectory and this is a buildout, not a bubble. But that is a forward question about the denominator, which is the entire point: <strong>the answer was never in today's snapshot, and anyone who told you "credit's tight, multiple's fine, so it's OK" was reading the regime's description of itself.</strong></p>
+</div>
+
+<div class="disclaimer">
+Research and analysis, not investment advice. Five independent forward-lens agents, each forbidden from citing coincident conditions (spreads, VIX, multiple) as evidence and instead reverse-engineering the embedded forecast, using a market-data tool (prices, fundamentals, options/vol term structure, credit, prediction-market odds) + web research, as of 29 Jun 2026. Reverse-DCF and normalized fair values are scenario estimates under stated assumptions and are sensitive to those assumptions; they are not price targets. The Jevons/volume path is a genuine and unresolved counter-case. No position held in any security named.
+</div>
+
+<details>
+<summary>The eight interrogations &amp; how each escaped the circular trap</summary>
+<table>
+<thead><tr><th>Lens</th><th class="num">Score</th><th>Method (no snapshot allowed)</th></tr></thead>
+<tbody>
+<tr><td>The "E"</td><td class="num">78</td><td>Decomposed the earnings projection the multiple hides; quantified the AI-revenue ramp it requires vs the widening capex-revenue gap.</td></tr>
+<tr><td>Reverse-DCF</td><td class="num">72–82</td><td>Backed out the revenue/margin/duration the prices require; collided NVDA's implied $529B with the actual AI-DC TAM.</td></tr>
+<tr><td>Re-price normalized</td><td class="num">72–78</td><td>Fair value with the benign regime <em>not</em> assumed — normalized ERP + terminal multiple; cross-checked vs long-range return studies.</td></tr>
+<tr><td>Conditions endogenous</td><td class="num">82</td><td>Treated credit/ERP/rates as transient bull outputs; measured the equity's de-rating if each normalizes.</td></tr>
+<tr><td>Scenario / skew</td><td class="num">82</td><td>Built the forward distribution; backed out the implied P(bull); read the VIX term structure + SKEW the market is paying for.</td></tr>
+<tr><td>Capex ROI</td><td class="num">78</td><td>Tested whether the buildout earns its cost of capital on plausible 2028–30 revenue; sized the write-down and the FCF-to-zero trajectory.</td></tr>
+<tr><td>Telecom base rate</td><td class="num">78</td><td>Measured the rhyme with the 2000 forward-projection failure (the "100 days" forecast) and applied its drawdown base rate.</td></tr>
+<tr><td>Circular demand</td><td class="num">82</td><td>Stripped vendor-financed / intra-cohort dollars to isolate genuine exogenous demand; located the keystone counterparty.</td></tr>
+</tbody>
+</table>
+<p class="small">Forward mean ≈ 78, all eight in a 72–82 band (vs snapshot 38–72, mean 61). Supporting research agents covered: capex totals, the revenue gap, GPU depreciation &amp; token deflation, the telecom-2000 base rate, and the Jevons bull steelman. Tools: finance_fundamentals, finance_timeseries, finance_options, finance_volsurface, finance_odds, finance_rate_path + WebSearch/WebFetch.</p>
+</details>
+
+<details>
+<summary>Key numbers &amp; sources (selected)</summary>
+<div class="srcgrid">
+<a href="https://www.bain.com/about/media-center/press-releases/20252/$2-trillion-in-new-revenue-needed-to-fund-ais-scaling-trend---bain--companys-6th-annual-global-technology-report/">Bain: $2T needed by 2030 / $800B shortfall</a> ·
+<a href="https://sequoiacap.com/article/ais-600b-question/">Sequoia (Cahn): AI's $600B Question</a> ·
+<a href="https://www.tomshardware.com/tech-industry/big-tech/big-techs-ai-spending-plans-reach-725-billion">Hyperscaler capex $725B 2026</a> ·
+<a href="https://www.goldmansachs.com/insights/articles/tracking-trillions-the-assumptions-shaping-scale-of-the-ai-build-out">Goldman: $7.6T cumulative AI capex</a> ·
+<a href="https://insight.factset.com/sp-500-reporting-highest-net-profit-margin-in-more-than-15-years-1">FactSet: record 13.9–14% S&amp;P net margin</a> ·
+<a href="https://epoch.ai/data-insights/llm-inference-price-trends">Epoch: inference price −10× to −280×/yr</a> ·
+<a href="https://blog.google/innovation-and-ai/sundar-pichai-io-2026/">Google: 3.2 quadrillion tokens/month</a> ·
+<a href="https://www.cnbc.com/2025/11/11/big-short-investor-michael-burry-accuses-ai-hyperscalers-of-artificially-boosting-earnings">Burry: $176B understated depreciation</a> ·
+<a href="https://fortune.com/2025/09/28/ai-dot-com-bubble-parallels-history-explained-companies-revenue-infrastructure/">Telecom "100 days" = 8× overstatement; dark fiber</a> ·
+<a href="https://www.kingswell.io/p/the-rise-and-fall-of-cisco">Cisco −87%, 24 years to recover</a> ·
+<a href="https://tomtunguz.com/nvidia_nortel_vendor_financing_comparison/">Nvidia ≈ Nortel vendor financing</a> ·
+<a href="https://fortune.com/2025/08/18/mit-report-95-percent-generative-ai-pilots-at-companies-failing-cfo/">MIT NANDA: 95% of pilots, zero P&amp;L</a> ·
+<a href="https://aswathdamodaran.substack.com/p/data-update-2-for-2026-a-testing">Damodaran: ERP "fully priced" (steelman)</a> ·
+<a href="https://www.gurufocus.com/economic_indicators/56/sp-500-shiller-cape-ratio">Shiller CAPE ~40 (99th pctile)</a> ·
+<a href="https://qz.com/gpu-collateralized-debt-ai-neocloud-coreweave-financing-risks-050526">GPU-collateralized debt / rentals −70%</a> ·
+<a href="https://fred.stlouisfed.org/series/BAMLH0A3HYC">CCC OAS 973bp (the canary)</a> ·
+<a href="https://www.gspublishing.com/content/research/en/reports/2025/11/12/0c292cc7-ce42-4fba-a026-744231e9f4f4.html">Goldman: ~3% nominal/decade</a>
+</div>
+</div>
+</details>
+
+<div class="foot">
+AI Bubble — Redone on Forward Logic · generated 29 Jun 2026. Five independent forward-lens agents, each barred from snapshot reasoning, reverse-engineering the future the price requires; supporting research on capex, the revenue gap, depreciation, token deflation, and the telecom-2000 base rate. Self-contained file — works offline. Companion to the snapshot verdict (which this supersedes on method).
+</div>
+
+</div>
+</body>
+</html>
