@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Second-Order Compute Trade — AI Infrastructure Moat Analysis</title>
+<style>
+  :root{
+    --ink:#15181d; --muted:#5b6470; --line:#e3e7ee; --bg:#ffffff; --panel:#f7f9fc;
+    --accent:#1f6feb; --green:#0f9d58; --amber:#d98b00; --red:#d93636;
+    --green-bg:#e8f6ee; --amber-bg:#fbf1dc; --red-bg:#fbe9e9; --blue-bg:#e8f1fe;
+    --mono:"SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    line-height:1.62;font-size:16.5px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:980px;margin:0 auto;padding:0 22px 120px;}
+  header.hero{padding:64px 0 30px;border-bottom:3px solid var(--ink);margin-bottom:8px;}
+  .kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600;}
+  h1{font-size:42px;line-height:1.08;margin:14px 0 10px;letter-spacing:-.02em;}
+  .sub{font-size:19px;color:var(--muted);max-width:760px;margin:0;}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:22px;display:flex;gap:18px;flex-wrap:wrap;}
+  .meta span{white-space:nowrap;}
+  h2{font-size:27px;margin:54px 0 6px;letter-spacing:-.015em;padding-top:18px;border-top:1px solid var(--line);}
+  h2 .num{font-family:var(--mono);font-size:15px;color:var(--accent);margin-right:10px;}
+  h3{font-size:20px;margin:30px 0 6px;}
+  p{margin:12px 0;}
+  a{color:var(--accent);text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  .lede{font-size:18.5px;background:var(--panel);border-left:4px solid var(--accent);
+    padding:18px 22px;border-radius:0 8px 8px 0;margin:18px 0;}
+  strong{font-weight:650;}
+  .small{font-size:14px;color:var(--muted);}
+  .mono{font-family:var(--mono);}
+
+  /* badges */
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;
+    padding:2px 8px;border-radius:20px;letter-spacing:.04em;vertical-align:middle;}
+  .b-green{background:var(--green-bg);color:var(--green);}
+  .b-amber{background:var(--amber-bg);color:var(--amber);}
+  .b-red{background:var(--red-bg);color:var(--red);}
+  .b-blue{background:var(--blue-bg);color:var(--accent);}
+
+  /* tables */
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;}
+  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);}
+  th{font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;border-bottom:2px solid var(--line);}
+  td.num,th.num{text-align:right;font-family:var(--mono);}
+  tr:hover td{background:var(--panel);}
+  .row-pick td{background:#f0f7ff;}
+  .row-pick:hover td{background:#e6f1ff;}
+
+  /* credit panel */
+  .credit{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:20px 0;}
+  .cstat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;}
+  .cstat .lab{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);}
+  .cstat .val{font-size:30px;font-weight:700;margin:4px 0 2px;letter-spacing:-.01em;}
+  .cstat .note{font-size:13px;}
+  .up{color:var(--red);} .flat{color:var(--muted);} .tight{color:var(--green);}
+
+  /* candidate cards */
+  .card{border:1px solid var(--line);border-radius:14px;padding:4px 26px 22px;margin:26px 0;
+    box-shadow:0 1px 2px rgba(20,30,50,.04);}
+  .card.top{border:2px solid var(--accent);box-shadow:0 4px 22px rgba(31,111,235,.10);}
+  .card h3{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;font-size:23px;}
+  .rank{font-family:var(--mono);background:var(--ink);color:#fff;border-radius:8px;
+    font-size:15px;font-weight:700;padding:3px 11px;}
+  .top .rank{background:var(--accent);}
+  .tick{font-family:var(--mono);color:var(--muted);font-weight:500;font-size:17px;}
+  .capchip{font-family:var(--mono);font-size:13px;background:var(--panel);border:1px solid var(--line);
+    border-radius:20px;padding:2px 12px;color:var(--ink);}
+  .card dl{margin:14px 0 0;display:grid;grid-template-columns:130px 1fr;gap:0 18px;}
+  .card dt{font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;
+    color:var(--muted);padding:10px 0 10px;border-top:1px solid var(--line);font-weight:600;}
+  .card dd{margin:0;padding:10px 0 10px;border-top:1px solid var(--line);}
+  .card dl div{display:contents;}
+  .killshot dd{background:var(--red-bg);}
+  .killshot dt{color:var(--red);}
+
+  /* callouts */
+  .callout{border-radius:10px;padding:16px 20px;margin:18px 0;}
+  .co-held{background:var(--green-bg);border:1px solid #bfe6cd;}
+  .co-broke{background:var(--amber-bg);border:1px solid #f0dca6;}
+  .co-punch{background:#101418;color:#f2f5f9;border-radius:14px;padding:26px 28px;margin:26px 0;}
+  .co-punch h3{color:#fff;margin-top:0;}
+  .co-punch strong{color:#9ec5ff;}
+  .co-punch a{color:#9ec5ff;}
+  ul{margin:10px 0;padding-left:22px;} li{margin:7px 0;}
+  .twocol{column-count:2;column-gap:32px;} .twocol li{break-inside:avoid;}
+  .foot{margin-top:60px;padding-top:22px;border-top:1px solid var(--line);font-size:13px;color:var(--muted);}
+  details{margin:10px 0;border:1px solid var(--line);border-radius:10px;padding:4px 16px;background:var(--panel);}
+  summary{cursor:pointer;font-weight:600;padding:10px 0;font-size:15px;}
+  details[open] summary{border-bottom:1px solid var(--line);margin-bottom:8px;}
+  .srcgrid{font-size:13px;line-height:1.5;}
+  .srcgrid a{display:block;padding:3px 0;word-break:break-all;}
+  @media(max-width:720px){
+    .credit{grid-template-columns:1fr;} h1{font-size:32px;} .twocol{column-count:1;}
+    .card dl{grid-template-columns:1fr;} .card dt{border-top:1px solid var(--line);padding-bottom:0;}
+    .card dd{border-top:0;padding-top:2px;}
+  }
+  .disclaimer{font-size:12.5px;color:var(--muted);background:var(--panel);border:1px dashed var(--line);
+    border-radius:10px;padding:14px 18px;margin:26px 0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">Deep Research · AI Infrastructure Value Chain</div>
+  <h1>The Second-Order Compute Trade</h1>
+  <p class="sub">Where, inside the AI buildout, a base is still small enough for a 3–10&times; <em>and</em> the moat is one the giants buy rather than build. A ranked short list, with the kill shot for each.</p>
+  <div class="meta">
+    <span>As of 5 June 2026</span>
+    <span>Prices: 4 Jun close</span>
+    <span>5 search angles · 27 names screened</span>
+    <span>Credit data: ICE BofA OAS / FRED</span>
+  </div>
+</header>
+
+<p class="lede"><strong>The one-line thesis:</strong> the market has already <em>named</em> the optical chokepoint (Lumentum, Coherent) and bid it past the point where the moat can pay you. The un-finished naming is one layer back — in the <strong>test-and-timing consumable razors</strong>, where the same HBM/accelerator unit-growth leverage exists but the demand is funded by sold-out-into-2027 <strong>memory and foundry capex</strong>, not by the credit-fragile neocloud tier whose riskiest paper is already quietly cracking.</p>
+
+<p class="small">This document is the whole picture, in order: how the governing worldview held up under evidence → the live credit signal that disciplines the whole screen → the cap-size table → the ranked names with moat / cap-math / kill-shot / catalyst → the famous names that <em>fail</em> → structural gaps → the punchline. Read top to bottom; the verdicts compound.</p>
+
+<!-- ============================================================ -->
+<h2><span class="num">01</span>The worldview, pressure-tested</h2>
+<p>You asked me to treat your lens as a hypothesis, not gospel. Four planks bent under the evidence — and each one makes the screen <em>stricter</em>, not looser.</p>
+
+<div class="callout co-broke">
+<h3 style="margin-top:6px;">What bent <span class="badge b-amber">REVISE</span></h3>
+<ul>
+<li><strong>"Hyperscalers are cash-rich, so their demand is safe" — weakening to wrong.</strong> BofA puts big-four AI capex at <strong>~94% of operating cash flow</strong> after buybacks/dividends; Amazon's 2026 FCF is guided <em>negative</em>, Alphabet's down ~90%, and the group raised <strong>$108B of bonds in 2025</strong> (JPMorgan models ~$1.5T of tech debt to come). The "cash-funded" leg is thinner than assumed — so the credit filter must be applied <em>harder</em>, even to names touching a hyperscaler.</li>
+<li><strong>"Private credit is gating" — confirmed, wrong poster child.</strong> It is <strong>Blue Owl</strong> (OBDC II <em>halted</em> redemptions outright, Feb 2026) and <strong>Cliffwater</strong> (gated at its 7% cap against 14% requests) — <em>not</em> Blackstone's BCRED, which actually <em>raised</em> its cap and honored 100%.</li>
+<li><strong>"~80% HBM margins" — exaggerated.</strong> Reported figures are <strong>68–75%</strong> (SK Hynix 71.8% operating Q1'26; Micron 74.9% gross). Product-level HBM may touch 80%, but blended reality is lower — and Samsung passed HBM4 qual for Nvidia mid-2026, so the <strong>compression clock (2H26 → 2027) is real.</strong></li>
+<li><strong>"No Chinese substitute in power" — half true.</strong> Chinese high-power transformer imports went from <strong>&lt;1,500 units (2022) to &gt;8,000 (2025)</strong>. The 5-year-lead-time moat holds only for the largest GSU/HVDC certified units — and where it holds, it's owned by <strong>$160–260B large-caps</strong> (GE Vernova, Eaton) that fail the cap-math test anyway.</li>
+</ul>
+</div>
+
+<div class="callout co-held">
+<h3 style="margin-top:6px;">What held, hard <span class="badge b-green">CONFIRMED</span></h3>
+<ul>
+<li><strong>HBM sold out into 2027</strong> — SK Hynix carries a ~3-year forward book; Micron fully sold for 2026.</li>
+<li><strong>Memory in genuine structural shortage</strong> — DRAM contract prices <strong>+58–63% QoQ</strong>, NAND <strong>+70–75% QoQ</strong> as wafers cannibalize to HBM (HBM eats ~3&times; wafer area per bit).</li>
+<li><strong>HBM4 base die migrates to the foundry</strong> — built on <strong>TSMC N12 / N3P</strong> from 2026, a real value-shift toward the foundry layer.</li>
+<li><strong>Public-vs-private credit divergence</strong> — see the live panel below.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">02</span>The real-time audit layer (credit)</h2>
+<p>Credit is the instrument that tells you when the AI-capex cycle is about to air-pocket. Pulled live (ICE BofA option-adjusted spreads, week of 28 May 2026):</p>
+
+<div class="credit">
+  <div class="cstat">
+    <div class="lab">Investment Grade OAS</div>
+    <div class="val tight">74 bps</div>
+    <div class="note tight">Pinned at the 2-yr low. Zero stress priced.</div>
+  </div>
+  <div class="cstat">
+    <div class="lab">High Yield OAS (broad)</div>
+    <div class="val tight">275 bps</div>
+    <div class="note tight">~34 bps off the 2007 record low. Near cycle tights.</div>
+  </div>
+  <div class="cstat" style="border-color:#f0c9c9;background:var(--red-bg);">
+    <div class="lab">CCC &amp; lower OAS</div>
+    <div class="val up">947 bps &#9650;</div>
+    <div class="note up">Widened ~160 bps since Aug 2025 <em>while the index sat still.</em></div>
+  </div>
+</div>
+
+<p><strong>This is the signal.</strong> The index surface is calm, but the <em>riskiest</em> tier is decompressing — and that is exactly where credit-funded neocloud paper (GPU-collateralized loans, data-center ABS) shows stress first. CoreWeave carries <strong>~$25B debt</strong> with <strong>Microsoft = 67% of 2025 revenue</strong>; data-center securitization hit <strong>~$30B in 2025</strong> (≈3&times; 2024). The CCC widening is the first crack you can watch in real time. <strong>Every name in the short list below is screened to be funded by memory/foundry capex — on the calm side of this divide — not by the tier that is cracking.</strong></p>
+
+<!-- ============================================================ -->
+<h2><span class="num">03</span>The cap-size screen</h2>
+<p>The arithmetic that drives the whole exercise: a 3&times; on a $5T name must add $5T of value — impossible this decade. Returns only exist where the base is small. Every candidate, sorted by market cap. <span class="badge b-blue">PICK</span> = made the ranked list. Prices 4 Jun 2026; revenue/margin = trailing.</p>
+
+<table>
+<thead><tr>
+<th>Ticker</th><th>Name / layer</th><th class="num">Mkt cap</th><th class="num">Rev (TTM)</th><th class="num">YoY</th><th class="num">Gross M.</th><th>Verdict</th>
+</tr></thead>
+<tbody>
+<tr class="row-pick"><td class="mono">COHU</td><td>Cohu — test handlers &amp; contactors</td><td class="num">$2.6B</td><td class="num">$481M</td><td class="num">+29%</td><td class="num">44%</td><td><span class="badge b-blue">PICK · #5</span></td></tr>
+<tr><td class="mono">ICHR</td><td>Ichor — gas/fluid subsystems</td><td class="num">$2.5B</td><td class="num">$959M</td><td class="num">+5%</td><td class="num">12%</td><td><span class="badge b-red">capex beta</span></td></tr>
+<tr><td class="mono">AEHR</td><td>Aehr — wafer-level burn-in</td><td class="num">$3.7B</td><td class="num">$45M</td><td class="num">&minus;44%</td><td class="num">31%</td><td><span class="badge b-red">priced for a bet</span></td></tr>
+<tr><td class="mono">UCTT</td><td>Ultra Clean — gas delivery</td><td class="num">$4.2B</td><td class="num">$2.07B</td><td class="num">+3%</td><td class="num">16%</td><td><span class="badge b-red">capex beta</span></td></tr>
+<tr><td class="mono">KLIC</td><td>Kulicke &amp; Soffa — bonders / TCB</td><td class="num">$5.6B</td><td class="num">$768M</td><td class="num">+50%</td><td class="num">54%</td><td><span class="badge b-amber">legacy drag</span></td></tr>
+<tr><td class="mono">NVTS</td><td>Navitas — GaN/SiC power</td><td class="num">$7.3B</td><td class="num">$40M</td><td class="num">&minus;39%</td><td class="num">30%</td><td><span class="badge b-red">consensus wrong</span></td></tr>
+<tr class="row-pick"><td class="mono">CAMT</td><td>Camtek — adv. packaging inspection</td><td class="num">$8.3B</td><td class="num">$499M</td><td class="num">+2.5%</td><td class="num">51%</td><td><span class="badge b-blue">PICK · #4</span></td></tr>
+<tr class="row-pick"><td class="mono">FORM</td><td>FormFactor — probe cards</td><td class="num">$9.9B</td><td class="num">$840M</td><td class="num">+32%</td><td class="num">42%</td><td><span class="badge b-blue">PICK · #1</span></td></tr>
+<tr><td class="mono">ONTO</td><td>Onto Innovation — metrology</td><td class="num">$13.7B</td><td class="num">$1.03B</td><td class="num">+10%</td><td class="num">54%</td><td><span class="badge b-amber">equipment</span></td></tr>
+<tr><td class="mono">VICR</td><td>Vicor — 48V power / IP</td><td class="num">$14.0B</td><td class="num">$427M</td><td class="num">+20%</td><td class="num">55%</td><td><span class="badge b-amber">execution-gated</span></td></tr>
+<tr><td class="mono">MOD</td><td>Modine — CDUs / thermal</td><td class="num">$15.9B</td><td class="num">$3.18B</td><td class="num">+48%</td><td class="num">23%</td><td><span class="badge b-amber">commoditizing</span></td></tr>
+<tr><td class="mono">NVMI</td><td>Nova — process metrology</td><td class="num">$16.6B</td><td class="num">$903M</td><td class="num">+10%</td><td class="num">57%</td><td><span class="badge b-amber">equipment</span></td></tr>
+<tr class="row-pick"><td class="mono">SITM</td><td>SiTime — MEMS precision timing</td><td class="num">$18.7B</td><td class="num">$381M</td><td class="num">+88%</td><td class="num">56%</td><td><span class="badge b-blue">PICK · #2</span></td></tr>
+<tr><td class="mono">LSCC</td><td>Lattice — low-power FPGA</td><td class="num">$20.8B</td><td class="num">$574M</td><td class="num">+42%</td><td class="num">68%</td><td><span class="badge b-amber">content, not razor</span></td></tr>
+<tr><td class="mono">ENTG</td><td>Entegris — CMP / filtration</td><td class="num">$21.3B</td><td class="num">$3.24B</td><td class="num">+5%</td><td class="num">45%</td><td><span class="badge b-green">park, not multiply</span></td></tr>
+<tr><td class="mono">FN</td><td>Fabrinet — optical assembly</td><td class="num">$25.6B</td><td class="num">$4.24B</td><td class="num">+39%</td><td class="num">12%</td><td><span class="badge b-red">commodity</span></td></tr>
+<tr><td class="mono">NVT</td><td>nVent — enclosures / cooling</td><td class="num">$28.1B</td><td class="num">$4.33B</td><td class="num">+54%</td><td class="num">37%</td><td><span class="badge b-amber">commoditizing</span></td></tr>
+<tr class="row-pick"><td class="mono">MTSI</td><td>MACOM — InP photonics + defense</td><td class="num">$29.2B</td><td class="num">$1.07B</td><td class="num">+23%</td><td class="num">56%</td><td><span class="badge b-blue">PICK · #3</span></td></tr>
+<tr><td class="mono">CRDO</td><td>Credo — active electrical cables</td><td class="num">$40.1B</td><td class="num">$1.34B</td><td class="num">+157%</td><td class="num">68%</td><td><span class="badge b-red">contested + concentrated</span></td></tr>
+<tr><td class="mono">ALAB</td><td>Astera Labs — retimers / switches</td><td class="num">$61.4B</td><td class="num">$1.00B</td><td class="num">+93%</td><td class="num">76%</td><td><span class="badge b-red">priced for perfection</span></td></tr>
+<tr><td class="mono">TER</td><td>Teradyne — ATE</td><td class="num">$63.7B</td><td class="num">$3.79B</td><td class="num">+87%</td><td class="num">59%</td><td><span class="badge b-amber">large-cap toll</span></td></tr>
+<tr><td class="mono">FIX</td><td>Comfort Systems — MEP install</td><td class="num">$67.4B</td><td class="num">$10.1B</td><td class="num">n/a</td><td class="num">25%</td><td><span class="badge b-amber">contractor</span></td></tr>
+<tr><td class="mono">LITE</td><td>Lumentum — InP/EML lasers</td><td class="num">$73.5B</td><td class="num">$2.49B</td><td class="num">+90%</td><td class="num">41%</td><td><span class="badge b-red">already named</span></td></tr>
+<tr><td class="mono">MPWR</td><td>Monolithic Power — GPU power</td><td class="num">$81.2B</td><td class="num">$2.96B</td><td class="num">+26%</td><td class="num">55%</td><td><span class="badge b-red">too big / 118&times;</span></td></tr>
+<tr><td class="mono">COHR</td><td>Coherent — InP lasers / optics</td><td class="num">$82.5B</td><td class="num">$6.60B</td><td class="num">+21%</td><td class="num">37%</td><td><span class="badge b-red">already named</span></td></tr>
+<tr><td class="mono">BE</td><td>Bloom Energy — SOFC fuel cells</td><td class="num">$82.9B</td><td class="num">$2.45B</td><td class="num">+37%</td><td class="num">30%</td><td><span class="badge b-red">momentum / D-E 311%</span></td></tr>
+<tr><td class="mono">VRT</td><td>Vertiv — power &amp; liquid cooling</td><td class="num">$124B</td><td class="num">$10.8B</td><td class="num">+30%</td><td class="num">37%</td><td><span class="badge b-red">too big</span></td></tr>
+</tbody>
+</table>
+<p class="small">Trailing-revenue figures are TTM run-rate (divide by ~4 for a quarter). "BE" here is Bloom Energy (a power name) — not Besi, the Euronext-listed hybrid-bonding company referenced later. Comfort Systems' headline YoY is a trailing artifact (backlog is +~99%).</p>
+
+<!-- ============================================================ -->
+<h2><span class="num">04</span>The ranked short list</h2>
+<p>Ranked on the product of five things: small-enough base &times; non-absorbable moat &times; real revenue now &times; demand funded by cash/foundry-capex (not neocloud credit) &times; durability to 2027–2030.</p>
+
+<!-- CARD 1 -->
+<div class="card top">
+  <h3><span class="rank">1</span> FormFactor <span class="tick">FORM</span> <span class="capchip">~$9.9B</span> <span class="badge b-green">highest conviction</span></h3>
+  <p><em>The cleanest consumable razor at the smallest viable base.</em></p>
+  <dl>
+    <div><dt>What they sell</dt><dd>Probe cards — custom MEMS-microspring cards that electrically contact every die on a wafer during test, before packaging (~81% of revenue), plus systems/metrology.</dd></div>
+    <div><dt>Moat</dt><dd>A <strong>true razor-and-blade</strong>: each probe card is engineered to one chip design, <em>physically wears out</em>, and is re-bought every product generation. HBM makes it worse — every DRAM die is tested individually <em>and</em> re-validated as a Known-Good-Stack-Die, multiplying touchdowns per stack. HBM/DRAM probe-card revenue grew <strong>4&times; in FY24</strong>. Demand pulls with <em>wafers tested &amp; unique die designs</em>, not tool capex — so it keeps earning through a capex pause.</dd></div>
+    <div><dt>Absorb test</dt><dd><span class="badge b-green">PASSES</span> Fragmented, application-specific, qualification-locked (~26% share). Broadcom/Nvidia/TSMC have no reason to make probe cards; the memory oligopoly <em>buys</em> them. An ATE giant could acquire, but Technoprobe rivalry caps the prize.</dd></div>
+    <div><dt>Credit test</dt><dd><span class="badge b-green">PASSES</span> Funded by memory-maker &amp; foundry capex (SK Hynix, Micron, TSMC) — the sold-out-into-2027, cash-rich part of the chain. The cleanest funding profile on the list.</dd></div>
+    <div><dt>Cap math</dt><dd>$9.9B on ~$840M rev, ~42% GM, fwd P/E ~52. A 3&times; to ~$30B needs probe-card TAM (~$2.5–3B today) to expand with HBM4 16-Hi/chiplet test intensity while FORM holds share and margins normalize. Tighter than the optical names had — but the base is genuinely small and the leverage is structural.</dd></div>
+    <div class="killshot"><dt>Kill shot</dt><dd><strong>Technoprobe.</strong> It already won ~30% of TSMC's 2nm probe-card qualifications with integrated MEMS-tip production. If it takes leading-edge logic <em>and</em> presses DRAM pricing, FORM's modest ~42% margins compress and the razor becomes a low-margin custom shop. <em>Watch the 2nm logic share split quarterly.</em></dd></div>
+    <div><dt>Catalyst</dt><dd>HBM4 ramp (2026) lifts touchdowns/stack; chiplet test intensity compounds through 2027. Tell = quarterly DRAM probe-card revenue prints.</dd></div>
+  </dl>
+</div>
+
+<!-- CARD 2 -->
+<div class="card">
+  <h3><span class="rank">2</span> SiTime <span class="tick">SITM</span> <span class="capchip">~$18.7B</span></h3>
+  <p><em>A genuine ~90% monopoly the market still files under "components."</em></p>
+  <dl>
+    <div><dt>What they sell</dt><dd>MEMS silicon timing — oscillators, clocks, resonators that replace legacy quartz. Every AI server, switch, and NIC needs multiple timing devices, and content per box is rising with 800G/1.6T.</dd></div>
+    <div><dt>Moat</dt><dd><strong>~90% of the MEMS timing market</strong> on MEMS-fab process IP quartz incumbents can't match (size/power/vibration/programmability). Datacenter line has posted <strong>7 straight quarters of &gt;100% YoY growth</strong>, now &gt;50% of revenue; FY25 +61%. The ~$3.2B Renesas timing acquisition removes the #2 and adds ~$300M revenue at ~70% GM.</dd></div>
+    <div><dt>Absorb test</dt><dd><span class="badge b-green">PASSES</span> At $18.7B a stretch bolt-on; the MEMS process IP is the hard part. Broadcom/Marvell buy the chips, not the fab know-how.</dd></div>
+    <div><dt>Credit test</dt><dd><span class="badge b-green">PASSES</span> Content-per-unit on AI servers/switches — funded by the same capex as the accelerators; not a China-commoditized discrete.</dd></div>
+    <div><dt>Cap math</dt><dd>MEMS is still only ~4–5% of the ~$10B total timing market — long displacement runway. $18.7B → ~$56B (3&times;) implies ~$3B revenue run-rate at 55%+ GM; rich at ~18&times; fwd sales but supportable if datacenter keeps compounding and Renesas closes.</dd></div>
+    <div class="killshot"><dt>Kill shot</dt><dd><strong>Valuation meets a unit-growth stall.</strong> ~47&times; EV/revenue with GAAP losses, and timing is content-per-unit <em>not a wearing consumable</em> — there's <em>no aftermarket to cushion</em> a 2027 server-unit deceleration.</dd></div>
+    <div><dt>Catalyst</dt><dd>Renesas close (2026) steps revenue + removes a rival; 1.6T switch build-outs raise timing content through 2026–27.</dd></div>
+  </dl>
+</div>
+
+<!-- CARD 3 -->
+<div class="card">
+  <h3><span class="rank">3</span> MACOM <span class="tick">MTSI</span> <span class="capchip">~$29.2B</span></h3>
+  <p><em>The best mid-cap claim on the InP chokepoint — with a credit-proof base.</em></p>
+  <dl>
+    <div><dt>What they sell</dt><dd>Compound-semi (indium phosphide) photonics — CW lasers, 200G/lane photodetectors — plus the laser drivers &amp; TIAs in <em>every</em> optical module, on top of a large RF <strong>industrial-&amp;-defense</strong> business.</dd></div>
+    <div><dt>Moat</dt><dd>The real optical chokepoint isn't the module (China assembles 7 of top 10) — it's the <strong>InP laser chip and analog driver/TIA</strong>. MACOM is a credible <em>second</em> InP source behind Lumentum/Coherent, with its own compound-semi fab. Datacenter guided +35–40%.</dd></div>
+    <div><dt>Absorb test</dt><dd><span class="badge b-amber">PARTIAL</span> More supplier than rival to Broadcom/Marvell; an acquisition target, but the InP fab + defense franchise make it an expensive, awkward bite.</dd></div>
+    <div><dt>Credit test</dt><dd><span class="badge b-green">PASSES — best on list</span> The industrial-&amp;-defense half is government-funded and counter-cyclical: a floor the pure optical names lack if the neocloud tier cracks.</dd></div>
+    <div><dt>Cap math</dt><dd>$29.2B on ~$1.07B rev, ~56% GM. A clean 3&times; to ~$90B is a <em>stretch</em> (needs datacenter InP to roughly triple while defense grows slowly). <strong>A 2&times; is the honest base case</strong>, 3&times; the upside if it becomes the qualified second InP source at scale.</dd></div>
+    <div class="killshot"><dt>Kill shot</dt><dd><strong>It fails to scale InP datacenter fast enough</strong> and stays a niche RF/defense name while Lumentum/Coherent keep the laser crown — or industry-wide InP capacity adds (Lumentum +40%/yr) turn today's shortage into a 2027 glut.</dd></div>
+    <div><dt>Catalyst</dt><dd>Datacenter mix crossing ~30–40% of total through FY26; any formal second-source qual at a hyperscaler optical program.</dd></div>
+  </dl>
+</div>
+
+<!-- CARD 4 -->
+<div class="card">
+  <h3><span class="rank">4</span> Camtek <span class="tick">CAMT</span> <span class="capchip">~$8.3B</span> <span class="badge b-amber">higher risk</span></h3>
+  <p><em>Smallest base in advanced-packaging inspection; more multiply room, weaker moat.</em></p>
+  <dl>
+    <div><dt>What they sell</dt><dd>Inspection/metrology for advanced packaging — post-bond and wafer-level packaging inspection, the yield-control layer for CoWoS / 2.5D / HBM stacking. ~50% AI-related.</dd></div>
+    <div><dt>Moat</dt><dd>A real niche lead in <em>advanced-packaging</em> inspection riding the CoWoS ramp (TSMC scaling toward ~120–130K wafers/mo by end-2026). But it's <strong>equipment, not a consumable</strong> — capex-linked, more cyclical — and latest-quarter growth decelerated to ~+2.5%.</dd></div>
+    <div><dt>Absorb test</dt><dd><span class="badge b-amber">RISK</span> <strong>KLA</strong> is far larger and could press down-market into the niche — the central absorb risk.</dd></div>
+    <div><dt>Credit test</dt><dd><span class="badge b-green">PASSES</span> Foundry/OSAT capex-funded.</dd></div>
+    <div><dt>Cap math</dt><dd>At $8.3B it has the most headroom of the metrology trio (vs Onto $13.7B, Nova $16.6B). A 3&times; to ~$25B is conceivable on a CoWoS / panel-level packaging inspection super-cycle.</dd></div>
+    <div class="killshot"><dt>Kill shot</dt><dd><strong>KLA enters AP inspection aggressively, or CoWoS overbuilds</strong> and 2026 digestion cuts tool orders — equipment names have no consumable floor when the capex pulse pauses. TSMC's panel-level (CoPoS) pilot mid-2026 also re-architects tool requirements.</dd></div>
+    <div><dt>Catalyst</dt><dd>CoWoS capacity adds through 2026; panel-level packaging tool-requalification cycle 2026–27.</dd></div>
+  </dl>
+</div>
+
+<!-- CARD 5 -->
+<div class="card">
+  <h3><span class="rank">5</span> Cohu <span class="tick">COHU</span> <span class="capchip">~$2.6B</span> <span class="badge b-amber">speculative turnaround</span></h3>
+  <p><em>Smallest base / most percentage room — but a turnaround bet, not a quality compounder.</em></p>
+  <dl>
+    <div><dt>What they sell</dt><dd>Semiconductor test handlers and — the interesting part — <strong>device-specific test contactors/sockets booked as recurring revenue (~55% recurring)</strong>, plus new HBM inspection (Neon) and AI handlers (Eclipse).</dd></div>
+    <div><dt>Moat</dt><dd>The contactor/spares aftermarket is a real, modest consumable razor tied to final-test volume and parallelism. Smallest base = most percentage room if AI test traction lands.</dd></div>
+    <div><dt>Absorb test</dt><dd><span class="badge b-amber">PARTIAL</span> Fragmented socket market (~10% share, vs Yamaichi/Enplas); a plausible roll-up target, which caps standalone upside.</dd></div>
+    <div><dt>Credit test</dt><dd><span class="badge b-green">PASSES</span> Test-volume / capex-funded.</dd></div>
+    <div><dt>Cap math</dt><dd>$2.6B → $8–10B is a clean 3–4&times; <em>if</em> it returns to profitability through the up-cycle and AI handler/inspection traction offsets legacy auto/industrial drag.</dd></div>
+    <div class="killshot"><dt>Kill shot</dt><dd><strong>It stays unprofitable through the cycle</strong> — AI traction fails to offset legacy weakness, and the multiple has no earnings to stand on.</dd></div>
+    <div><dt>Catalyst</dt><dd>Return to GAAP profitability + AI data-center handler/inspection design wins over the next 2–4 quarters.</dd></div>
+  </dl>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">05</span>Quality, but park it — not multiply it</h2>
+<div class="callout co-held" style="background:var(--blue-bg);border-color:#bcd6fb;">
+<p style="margin-top:4px;"><strong>Entegris (ENTG) — ~$21.3B.</strong> The <em>highest-quality</em> consumable razor in the whole stack: CMP slurries/pads (pads last 150–400 hours, re-bought continuously), filtration, gases — content-per-wafer rising every node, with process-qualification lock-in a giant can't easily absorb. <strong>But growth is only ~+5%</strong> because it's tied to <em>all</em> wafer starts, not AI specifically, so the AI leverage is diluted; net debt ~$3.3B. This is where you <strong>park capital at quality</strong> — it won't 3&times; on this horizon. <span class="badge b-red">Kill shot:</span> slurry margin compression vs Asian chemical majors.</p>
+<p><strong>Advantest (Tokyo) — large-cap.</strong> The HBM-test near-monopoly (60–70% memory ATE), and the <strong>test-time explosion</strong> (a Blackwell-class part sits &gt;20 min on a tester vs. seconds for commodity silicon) is the single strongest <em>unit-leveraged, capex-funded</em> demand thesis I found. But it <em>is</em> the giant, it's Tokyo-listed, and the base is too big for a 3–10&times;. <span class="badge b-red">Kill shot:</span> Teradyne's Magnum 7H attacking HBM memory test. The toll, not the multiplier.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">06</span>NOT the answer — where consensus is crowded or wrong</h2>
+<p>The part of the brief I most want to honor: the famous names <em>fail</em>, and saying so is the point.</p>
+
+<table>
+<thead><tr><th>Name</th><th>Why the moat is real</th><th>Why it still fails</th></tr></thead>
+<tbody>
+<tr><td class="mono">LITE&nbsp;/&nbsp;COHR<br><span class="small">$73B&nbsp;/&nbsp;$82B</span></td><td>InP/EML at 200G/lane is a genuine sole/dominant source. <strong>Nvidia's $4B prepay (Mar 2026) validated it.</strong></td><td><strong>That prepay was the naming event.</strong> Both trade <em>above</em> sell-side targets; LITE D/E &gt;100; demand partly the credit-fragile transceiver layer. A 3&times; asks $150–250B of new value into a 2027 glut risk. <em>Right moat, wrong price &amp; size.</em></td></tr>
+<tr><td class="mono">ALAB<br><span class="small">$61B · ~240&times;</span></td><td>Real merchant retimer/switch IP + software lock-in; NVLink Fusion participation.</td><td><strong>90% of revenue from 5 customers</strong>, priced for perfection. Structural kill shot: Broadcom <em>Scale-Up Ethernet</em> + Nvidia captive NVLink can marginalize merchant PCIe/UALink retimers.</td></tr>
+<tr><td class="mono">CRDO<br><span class="small">$40B</span></td><td>First-mover ZeroFlap AECs; owns the SerDes/DSP IP, not just the cable.</td><td><strong>Broadcom already shipped an 800G AEC retimer</strong>, and <strong>67% of FY25 revenue was one customer.</strong> Fragility dressed as a moat.</td></tr>
+<tr><td class="mono">NVTS<br><span class="small">$7.3B</span></td><td>Named partner on Nvidia's 800V HVDC architecture.</td><td><strong>Clearest "consensus is wrong" flag.</strong> Revenue <em>declining 38%</em>; the Nvidia win is a <em>2027</em> story; GaN commoditizing vs Infineon/onsemi; <strong>trades ~2&times; its own analyst target</strong> on a meme spike.</td></tr>
+<tr><td class="mono">AEHR<br><span class="small">$3.7B</span></td><td>WaferPak contactor is a real consumable razor.</td><td><strong>Revenue fell 44% YoY at ~80&times; EV/revenue</strong> on an <em>unproven</em> AI-burn-in ramp. Valuation prices a bet that hasn't happened.</td></tr>
+<tr><td class="mono">BE&nbsp;·&nbsp;MPWR<br>VRT</td><td>Bloom: speed-to-power; MPWR: GPU-socketed power; Vertiv: cooling+services.</td><td>Either already large-cap (MPWR $81B/118&times;; Vertiv $124B), or balance-sheet-fragile (Bloom D/E 311%). Cooling is <strong>commoditizing</strong> — the Asetek foundational patent expired May 2025. Beneficiaries, not multipliers.</td></tr>
+<tr><td class="mono">ICHR&nbsp;/&nbsp;UCTT<br><span class="small">$2.5B&nbsp;/&nbsp;$4.2B</span></td><td>"Picks-and-shovels" sub-fab subsystems.</td><td><strong>Capex-beta in cash flow</strong> — 12–16% gross margins, no real consumable razor, riding OEM tool capex. Cyclical pass-through.</td></tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<h2><span class="num">07</span>Structural gaps — great razor, no clean pure-play</h2>
+<p>Some of the <em>best</em> consumable economics in the stack have no investable small-cap. Worth knowing so you don't hunt a ghost:</p>
+<ul class="twocol">
+<li><strong>Electronic specialty gases</strong> (per-wafer consumed) — locked up by the <strong>Linde / Air Liquide / Air Products</strong> oligopoly.</li>
+<li><strong>Photoresist</strong> (per-exposure consumed) — a <strong>Japanese-major</strong> lock (JSR &gt;22%, Tokyo Ohka, Shin-Etsu).</li>
+<li><strong>SiC/quartz chamber consumables</strong> (focus rings replaced every 2–3 weeks) — <strong>CoorsTek (private)</strong>, Hana (Korea), Ferrotec.</li>
+<li><strong>The InP wafer itself</strong> — a ~$200M market of private/foreign players. Play it only via integrated chip names (MACOM = best mid-cap fit).</li>
+</ul>
+<p>And the truest "before it's named" plays that sit <em>outside</em> a US screen: <strong>Technoprobe</strong> (Milan — the one <em>taking</em> FORM's share; a natural long/short pair), <strong>Besi &amp; ASMPT</strong> (hybrid bonding into HBM4 — note AMAT already owns ~9% of Besi, an absorb-by-stake tell), and <strong>Disco</strong> (dicing blades = a CoWoS-volume consumable).</p>
+
+<!-- ============================================================ -->
+<h2><span class="num">08</span>The punchline</h2>
+<div class="co-punch">
+<h3>Where consensus is most wrong</h3>
+<p>Consensus has crowded into the <strong>optical chokepoint</strong> (Lumentum/Coherent) at $73–82B because Nvidia's $4B prepay made it un-missable — and in doing so it has bid the moat <em>past</em> the point where the moat can pay you. The un-finished naming is one layer back, in the <strong>test-and-timing consumable razors</strong> — probe cards (FormFactor), MEMS timing (SiTime), test contactors (Cohu) — where the same HBM/accelerator unit-growth leverage exists, but the demand is funded by <strong>sold-out-into-2027 memory and foundry capex</strong> rather than by the credit-fragile neocloud tier whose CCC paper is already quietly widening.</p>
+<p style="margin-bottom:0;">If forced to one name: <strong>FormFactor.</strong> Smallest viable base, the only <em>true</em> wear-and-replace consumable tied directly to HBM unit and chiplet test intensity, funded by the most durable buyers in the chain. Its kill shot is equally specific and worth monitoring quarterly: <strong>Technoprobe's share gains at the leading-edge logic node.</strong> Win that, and the 3&times; is physical.</p>
+</div>
+
+<div class="disclaimer">
+<strong>The timing cluster you can't ignore.</strong> Every 3&times; above assumes the AI-capex cycle doesn't air-pocket before 2027 — and the CCC-spread widening flagged in §02 is the first instrument that would tell you it's starting. The memory-margin compression clock (Samsung HBM4 qual, mid-2026) argues the easy money in this whole complex is a <em>2026</em> story, with <strong>2027 the year the scarcity premiums — in HBM, in optics, in test — all face their test simultaneously.</strong> Size positions to respect that clustering. <br><br>
+This is research and analysis, not investment advice or a recommendation to buy or sell any security. Figures are drawn from automated web research and a market-data tool as of 4–5 June 2026 and may contain errors or be superseded; verify against primary filings before acting. The author holds no position and has no relationship with any company named.
+</div>
+
+<details>
+<summary>Methodology &amp; how to read the verdicts</summary>
+<p class="small">Built by decomposing the question into five stack-spanning search angles (interconnect/optical; packaging/test/metrology; power/thermal; credit &amp; HBM economics; materials/EDA/niche), running parallel web-research agents on each, then cross-checking load-bearing claims for convergence across independent agents (the corroboration standard). Market caps and fundamentals were pulled from a live finance tool (prices 4 Jun 2026); credit spreads from ICE BofA OAS series via FRED. Each name was put through two binary filters — (A) can a giant absorb the niche? and (B) is demand credit-funded/fragile or capex/cash-funded? — plus a base-size test for whether a 3–10&times; is physically possible. A name fails if it flunks either filter or is already too large.</p>
+</details>
+
+<details>
+<summary>Sources (selected, by layer)</summary>
+<div class="srcgrid">
+<p><strong>Credit / HBM economics</strong></p>
+<a href="https://www.cnbc.com/2026/04/02/blue-owl-private-credit-funds-redemptions-requests.html">Blue Owl redemption caps — CNBC</a>
+<a href="https://www.privatedebtinvestor.com/blue-owl-halts-quarterly-redemptions-in-a-non-traded-bdc/">Blue Owl OBDC II halt — Private Debt Investor</a>
+<a href="https://fred.stlouisfed.org/series/BAMLH0A0HYM2">ICE BofA US High Yield OAS — FRED</a>
+<a href="https://fred.stlouisfed.org/series/BAMLC0A0CM">ICE BofA US Corporate (IG) OAS — FRED</a>
+<a href="https://www.cnbc.com/2026/02/06/google-microsoft-meta-amazon-ai-cash.html">Hyperscaler capex vs cash flow — CNBC</a>
+<a href="https://www.cnbc.com/2026/05/07/coreweave-crwv-q1-earnings-report-2026.html">CoreWeave Q1 2026 — CNBC</a>
+<a href="https://www.tradingkey.com/analysis/stocks/us-stocks/261930650-micron-mu-hbm-ai-datacenter-sold-out-margin-expansion-fibonacci-breakout-memory-scarcity-guidance-raise-tradingkey">Micron HBM margins / sold out — TradingKey</a>
+<a href="https://www.tomshardware.com/pc-components/dram/dram-and-nand-contract-prices-to-climb-again-in-q2">DRAM/NAND contract prices Q2 — Tom's Hardware</a>
+<a href="https://www.trendforce.com/news/2025/12/01/news-tsmc-unveils-custom-c-hbm4e-details-n3p-logic-dies-reportedly-target-2x-efficiency-gain/">HBM4 base die on TSMC N3P — TrendForce</a>
+<p><strong>Test / metrology / packaging</strong></p>
+<a href="https://www.sec.gov/Archives/edgar/data/0001039399/000103939925000110/ex9901-earningsreleasexq325.htm">FormFactor Q3'25 results — SEC</a>
+<a href="https://www.intelmarketresearch.com/global-probe-card-forecast-market-18924">Probe-card market / Technoprobe 2nm share — Intel Market Research</a>
+<a href="https://www.formfactor.com/blog/2024/known-good-die-test-enables-advanced-packaging-high-bandwidth-memory/">Known-Good-Die / HBM test — FormFactor</a>
+<a href="https://chipscalereview.com/teradyne-unveils-magnum-7h-the-next-generation-memory-tester-for-high-bandwidth-memory-devices/">Teradyne Magnum 7H — Chip Scale Review</a>
+<a href="https://www.sec.gov/Archives/edgar/data/0000021535/000143774925032269/cohu20250927_10q.htm">Cohu Q3 2025 10-Q — SEC</a>
+<a href="https://www.digitimes.com/news/a20251210PD218/tsmc-cowos-capacity-nvidia-equipment.html">TSMC CoWoS capacity — Digitimes</a>
+<p><strong>Timing / interconnect / optical</strong></p>
+<a href="https://www.sitime.com/company/newsroom/press-release/sitime-reports-fourth-quarter-and-fiscal-year-2025-financial-results">SiTime FY2025 results</a>
+<a href="https://www.eetimes.com/sitime-bolsters-timing-portfolio-with-renesas-acquired-clocks/">SiTime / Renesas timing acquisition — EE Times</a>
+<a href="https://www.cnbc.com/2026/03/02/nvidia-investment-coherent-lumentum.html">Nvidia $2B each into Lumentum &amp; Coherent — CNBC</a>
+<a href="https://www.macom.com/technologies/inp">MACOM InP technology</a>
+<a href="https://www.insidermonkey.com/blog/macom-tech-mtsi-delivers-271-6-m-fq1-2026-revenue-driven-by-record-industrial-defense-data-center-growth-1699437/">MACOM FQ1 FY26 results</a>
+<a href="https://photoncap.net/p/chinese-optical-modules-own-7-of">Chinese optical modules own 7 of top 10 — Photoncap</a>
+<p><strong>Power / thermal</strong></p>
+<a href="https://pv-magazine-usa.com/2026/05/11/u-s-transformer-market-faces-severe-supply-constraints-as-lead-times-extend-to-four-years/">Transformer lead times to 4 years — pv-magazine</a>
+<a href="https://www.power-eng.com/gas/turbines/data-centers-drive-record-surge-in-ge-vernova-power-equipment-orders-as-turbine-slots-tighten-through-2030/">GE Vernova turbine backlog — Power Engineering</a>
+<a href="https://www.globenewswire.com/news-release/2025/05/21/3086170/0/en/NVIDIA-Selects-Navitas-to-Collaborate-on-Next-Generation-800-V-HVDC-Architecture.html">Nvidia selects Navitas 800V — GlobeNewswire</a>
+<a href="https://www.datacenterdynamics.com/en/news/asetek-to-exit-hpc-segment-and-prioritize-data-center-cooling/">Asetek patent / cooling commoditization — DCD</a>
+</div>
+</details>
+
+<div class="foot">
+  Second-Order Compute Trade · AI Infrastructure Moat Analysis · generated 5 June 2026.<br>
+  Five parallel research agents across the stack; claims cross-checked for cross-agent convergence; market data and credit spreads pulled live. Self-contained file — no external dependencies, works offline.
+</div>
+
+</div>
+</body>
+</html>

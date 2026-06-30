@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Is the Rally Fragile? — A Stress Test of Two Claims</title>
+<style>
+  :root{
+    --ink:#15181d; --muted:#5b6470; --line:#e3e7ee; --bg:#ffffff; --panel:#f7f9fc;
+    --accent:#1f6feb; --green:#0f9d58; --amber:#d98b00; --red:#d93636;
+    --green-bg:#e8f6ee; --amber-bg:#fbf1dc; --red-bg:#fbe9e9; --blue-bg:#e8f1fe;
+    --mono:"SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;font-size:16.5px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 22px 120px;}
+  header.hero{padding:58px 0 26px;border-bottom:3px solid var(--ink);margin-bottom:8px;}
+  .kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600;}
+  h1{font-size:39px;line-height:1.08;margin:14px 0 10px;letter-spacing:-.02em;}
+  .sub{font-size:19px;color:var(--muted);max-width:780px;margin:0;}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:20px;display:flex;gap:18px;flex-wrap:wrap;}
+  h2{font-size:26px;margin:50px 0 6px;letter-spacing:-.015em;padding-top:18px;border-top:1px solid var(--line);}
+  h2 .num{font-family:var(--mono);font-size:15px;color:var(--accent);margin-right:10px;}
+  h3{font-size:19px;margin:24px 0 6px;}
+  p{margin:12px 0;} a{color:var(--accent);text-decoration:none;} a:hover{text-decoration:underline;}
+  strong{font-weight:650;} .small{font-size:14px;color:var(--muted);} .mono{font-family:var(--mono);}
+  .lede{font-size:18px;background:var(--panel);border-left:4px solid var(--accent);padding:18px 22px;border-radius:0 8px 8px 0;margin:18px 0;}
+
+  /* verdict gauge */
+  .verdict{background:#101418;color:#f2f5f9;border-radius:16px;padding:26px 28px;margin:22px 0;}
+  .verdict h3{color:#fff;margin:0 0 6px;font-size:15px;font-family:var(--mono);letter-spacing:.05em;text-transform:uppercase;}
+  .gaugewrap{display:flex;align-items:center;gap:22px;flex-wrap:wrap;margin:12px 0 6px;}
+  .score{font-size:62px;font-weight:800;line-height:1;letter-spacing:-.03em;color:#ffd24d;}
+  .score small{font-size:24px;color:#8a93a0;font-weight:600;}
+  .gaugebar{flex:1;min-width:240px;}
+  .track{height:14px;border-radius:8px;background:linear-gradient(90deg,#0f9d58 0%,#d98b00 50%,#d93636 100%);position:relative;}
+  .pin{position:absolute;top:-5px;width:4px;height:24px;background:#fff;border-radius:2px;box-shadow:0 0 0 2px #101418;}
+  .ticks{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:#8a93a0;margin-top:6px;}
+  .verdict p{color:#d3d9e0;font-size:15.5px;} .verdict strong{color:#9ec5ff;}
+
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;letter-spacing:.03em;vertical-align:middle;}
+  .b-green{background:var(--green-bg);color:var(--green);}
+  .b-amber{background:var(--amber-bg);color:var(--amber);}
+  .b-red{background:var(--red-bg);color:var(--red);}
+  .b-blue{background:var(--blue-bg);color:var(--accent);}
+
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px;}
+  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top;}
+  th{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;border-bottom:2px solid var(--line);}
+  td.num,th.num{text-align:right;font-family:var(--mono);white-space:nowrap;}
+  tr:hover td{background:var(--panel);}
+  .sig{font-family:var(--mono);font-size:11px;font-weight:700;white-space:nowrap;}
+  .s-fragile{color:var(--red);} .s-neutral{color:var(--amber);} .s-support{color:var(--green);}
+
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:18px 0;}
+  .cardbox{border:1px solid var(--line);border-radius:12px;padding:16px 18px;}
+  .cardbox h3{margin-top:2px;font-size:17px;}
+  .cardbox.red{border-color:#f0c9c9;background:var(--red-bg);}
+  .cardbox.green{border-color:#bfe6cd;background:var(--green-bg);}
+
+  .callout{border-radius:10px;padding:16px 20px;margin:18px 0;}
+  .co-true{background:var(--amber-bg);border:1px solid #f0dca6;}
+  .co-real{background:var(--red-bg);border:1px solid #f0c9c9;}
+  ul{margin:10px 0;padding-left:22px;} li{margin:7px 0;}
+  .trip{counter-reset:t;list-style:none;padding-left:0;}
+  .trip li{position:relative;padding:10px 0 10px 42px;border-top:1px solid var(--line);}
+  .trip li::before{counter-increment:t;content:counter(t);position:absolute;left:0;top:11px;width:26px;height:26px;border-radius:50%;background:var(--ink);color:#fff;font-family:var(--mono);font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;}
+  .foot{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-size:13px;color:var(--muted);}
+  details{margin:10px 0;border:1px solid var(--line);border-radius:10px;padding:4px 16px;background:var(--panel);}
+  summary{cursor:pointer;font-weight:600;padding:10px 0;font-size:15px;}
+  .srcgrid a{display:block;padding:3px 0;font-size:12.5px;word-break:break-all;}
+  .disclaimer{font-size:12.5px;color:var(--muted);background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:14px 18px;margin:24px 0;}
+  @media(max-width:760px){.twocol{grid-template-columns:1fr;} h1{font-size:30px;} .score{font-size:48px;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">Stress Test · Pressure-Testing a Reader Thesis</div>
+  <h1>Is the Rally "Extremely Fragile," and Are There "Too Many Buys"?</h1>
+  <p class="sub">Two claims, adjudicated against the data — including where the fragility case is right, where it's a well-worn trap, and the calibrated odds.</p>
+  <div class="meta">
+    <span>28 Jun 2026</span><span>S&amp;P 7,354 (26 Jun)</span><span>5 research agents · market-search + web</span><span>own pulls: credit, STLFSI, VIX</span>
+  </div>
+</header>
+
+<p class="lede"><strong>Short answer:</strong> you're directionally right that this is a low-margin-for-error market — but on the two specific instruments you named, one is a <em>non-signal</em> and the other is <em>half-outdated</em>. The real fragility isn't the buy-count or narrow breadth (breadth is actually <em>broadening</em>); it's that the whole rally now rests on <strong>debt-funded AI capex equal to ~74% of GDP growth</strong>, while the one credit tranche that should confirm the all-clear (CCC) is quietly the only one widening.</p>
+
+<!-- VERDICT GAUGE -->
+<div class="verdict">
+  <h3>Calibrated verdict</h3>
+  <div class="gaugewrap">
+    <div class="score">4–5<small>/10</small></div>
+    <div class="gaugebar">
+      <div class="track"><div class="pin" style="left:45%;"></div></div>
+      <div class="ticks"><span>1 · placid</span><span>5 · low margin for error</span><span>10 · crisis</span></div>
+    </div>
+  </div>
+  <p style="margin-bottom:0;"><strong>"Fragile" — yes; "extremely fragile / imminent crash" — overstated.</strong> Elevated risk of a sharp <em>correction</em>, low risk of a near-term <em>systemic</em> break. The market is richly valued, heavily leveraged, fully owned, and complacently hedged — which sets the <em>depth</em> of an eventual drawdown, not its <em>timing</em>. What's missing for a crash is a <em>trigger</em> and credit <em>broadening</em> — and those tripwires are listed at the bottom. The honest framing: <strong>moderately fragile, asymmetrically exposed to an AI-capex disappointment.</strong></p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">01</span>Claim 1 — "Too many buys" <span class="badge b-amber" style="vertical-align:6px;">TRUE FACT · WEAK SIGNAL</span></h2>
+<div class="callout co-true">
+<p style="margin-top:4px;"><strong>The fact checks out:</strong> sell-side is at <strong>~59% Buy / 36% Hold / 5% Sell</strong> (FactSet, mid-June 2026) — the highest Buy% since at least 2010, edging past the prior record of 57.5% set in <em>February 2022</em> (right before that bear market).</p>
+<p><strong>But as a timing signal it's close to useless, and here's the kill-shot:</strong> the Buy% sat at 56.9% in June 2022 and rode <em>straight through the entire 2022 bear market unchanged</em> — analysts never de-rated. Sell ratings are <em>structurally</em> pinned near 5% in every regime (career risk is asymmetric: you're fired for missing a rally, not a crash). The academic record agrees — Jegadeesh et&nbsp;al. (2004, <em>J. Finance</em>) find the <em>level</em> of consensus ratings has no predictive power for forward returns; only <em>revisions</em> carry information. Today's 59% is just ~3–4 points above the 5-year average.</p>
+<p style="margin-bottom:4px;"><strong>The euphoria you're sensing is real — it's just in a different number.</strong> The genuine tell is the <strong>price targets, not the ratings</strong>: the aggregate bottom-up 12-month target implies <strong>+21% upside</strong> — roughly <em>2× the normal ~10–12%</em> — and strategists (Goldman 8,000, Citi 8,100) spent May–June <em>chasing</em> their year-end targets higher <em>after</em> the rally. Crowded optimism shows up in how far analysts are reaching, not in the Buy tally.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">02</span>Claim 2 — "Extremely fragile": the scorecard</h2>
+<p>Each dimension graded for what it actually signals as of late June 2026. <span class="sig s-fragile">FRAGILE</span> / <span class="sig s-neutral">MIXED</span> / <span class="sig s-support">SUPPORTIVE</span>.</p>
+
+<table>
+<thead><tr><th>Dimension</th><th>Reading (Jun 2026)</th><th>vs history</th><th>Signal</th></tr></thead>
+<tbody>
+<tr><td><strong>Valuation (CAPE)</strong></td><td class="num">~40</td><td>2nd-highest in 155 yrs (only 2000's ~44 higher; &gt;2021's 38.5)</td><td><span class="sig s-fragile">FRAGILE</span></td></tr>
+<tr><td><strong>Valuation (fwd P/E)</strong></td><td class="num">~20–21×</td><td>Above 5yr (19.9) &amp; 10yr (18.9) — rich, not extreme</td><td><span class="sig s-neutral">MIXED</span></td></tr>
+<tr><td><strong>Equity risk premium</strong></td><td class="num">≈ 0%</td><td>Trailing slightly <em>negative</em> vs 4.37% 10Y — no cushion vs bonds</td><td><span class="sig s-fragile">FRAGILE</span></td></tr>
+<tr><td><strong>Margin debt</strong></td><td class="num">$1.42T</td><td><strong>Record; +54% YoY</strong> — leverage outpacing prices, 2000/2021-like</td><td><span class="sig s-fragile">FRAGILE</span></td></tr>
+<tr><td><strong>Household equity allocation</strong></td><td class="num">~46%</td><td>Record share of financial assets (since 1945); 0DTE ~½ of SPX volume</td><td><span class="sig s-fragile">FRAGILE</span></td></tr>
+<tr><td><strong>Sentiment / positioning</strong></td><td>BofA Bull&amp;Bear 8.9</td><td>"SELL" (&gt;8); Citi Euphoria; May cash-rule sell signal</td><td><span class="sig s-fragile">FRAGILE</span></td></tr>
+<tr><td><strong>Concentration</strong></td><td>Top 10 ~37%</td><td>Near record (off ~41% YE25 peak); 2000 was only ~27%</td><td><span class="sig s-fragile">FRAGILE</span></td></tr>
+<tr><td><strong>Breadth — equal vs cap wt</strong></td><td>RSP +6.4% &gt; SPY +5.0% YTD</td><td>Equal-weight <em>beating</em> — textbook <em>broadening</em>, not narrowing</td><td><span class="sig s-support">SUPPORTIVE</span></td></tr>
+<tr><td><strong>Breadth — internals</strong></td><td>~60% &gt; 200-DMA</td><td>Below the ~73% normal at new highs; 45% of stocks red YTD</td><td><span class="sig s-neutral">MIXED</span></td></tr>
+<tr><td><strong>Earnings backstop</strong></td><td>CY26 EPS +21%</td><td>Mag7 ~25.8% net margins (2× index); real FCF — <em>not</em> 1999</td><td><span class="sig s-support">SUPPORTIVE</span></td></tr>
+<tr><td><strong>Credit — IG / HY</strong></td><td>IG 76bp · HY 278bp</td><td>IG tightest since <strong>1997</strong>; no funding stress in the plumbing</td><td><span class="sig s-support">SUPPORTIVE</span></td></tr>
+<tr><td><strong>Credit — CCC tranche</strong></td><td class="num">968bp</td><td><strong>Only tranche wider over 6mo</strong> (+83bp); 71–78th %ile while all else at tights</td><td><span class="sig s-fragile">FRAGILE</span></td></tr>
+<tr><td><strong>Financial-stress index</strong></td><td>STLFSI −0.96</td><td>1-yr <em>low</em> (calmest) — aggregate plumbing shows no stress</td><td><span class="sig s-support">SUPPORTIVE</span></td></tr>
+<tr><td><strong>Volatility</strong></td><td>VIX ~18</td><td>Was 13–16 into the late-June wobble — priced for calm, mild pop</td><td><span class="sig s-neutral">MIXED</span></td></tr>
+<tr><td><strong>Dry powder</strong></td><td>~$7.9–8.3T MMF</td><td>Record cash on the sidelines; QT ended Dec 2025 (liquidity tailwind)</td><td><span class="sig s-support">SUPPORTIVE</span></td></tr>
+</tbody>
+</table>
+<p class="small">Tally: 7 fragile · 4 supportive · 4 mixed. The fragile cluster is <em>valuation + leverage + positioning</em> (the "how deep" variables); the supportive cluster is <em>credit plumbing + earnings + breadth-broadening + cash</em> (the "is it breaking now" variables). That split <em>is</em> the answer: deep potential drawdown, no current trigger.</p>
+
+<!-- ============================================================ -->
+<h2><span class="num">03</span>Where the popular fragility story is wrong</h2>
+<div class="twocol">
+<div class="cardbox green">
+<h3>Breadth is broadening, not narrowing</h3>
+<p class="small" style="margin-bottom:6px;">The "narrow Mag-7 melt-up about to snap" call is half-outdated. In 2026 the <strong>Mag 7 are negative YTD (~−5%)</strong>, equal-weight (RSP +6.4%) is <em>beating</em> cap-weight (SPY +5.0%), and concentration is easing off its YE-2025 record. That's the <em>healthy</em> rotation pattern, not the pre-crash one.</p>
+</div>
+<div class="cardbox green">
+<h3>This is not 1999</h3>
+<p class="small" style="margin-bottom:6px;">The leaders are cash machines: Mag7 net margins ~25.8% (2× the index), EPS growing ~23% vs ~12% for the rest, real free cash flow. Top-10 earnings share (~30%) roughly tracks their cap weight — vs 2000, when leaders had a &gt;100% P/E premium on &lt;20% earnings share. The multiple is rich but <em>backed by profits</em>.</p>
+</div>
+</div>
+<p>So two of the bear's favorite instruments — <strong>buy-rating skew and narrow breadth</strong> — are a non-signal and a fading one. If the fragility case rested only on those, it would be the same cry-wolf call that's been wrong every year since 2023.</p>
+
+<!-- ============================================================ -->
+<h2><span class="num">04</span>The fragility that survives the steelman</h2>
+<p>Strip out the noise and three concerns are genuinely load-bearing — and they all point at the same place: <strong>AI capex.</strong></p>
+<div class="callout co-real">
+<ul style="margin:4px 0;">
+<li><strong>The rally rests on debt-funded AI capex.</strong> AI investment drove <strong>~74% of Q1-2026 real GDP growth</strong>; hyperscaler capex is <strong>~$725B in 2026 (+77% YoY)</strong>, now ~34% of revenue (2× the 1990s internet peak). The "fortress balance sheet" contract has broken: <strong>Amazon's TTM free cash flow collapsed ~95% to ~$1.2B</strong>, <strong>Oracle's is −$23.7B</strong>, and the five hyperscalers carry <strong>$662B of off-balance-sheet data-center leases (~113% of their adjusted debt)</strong>. The marginal AI dollar is now <em>borrowed</em>.</li>
+<li><strong>Circular financing inflates apparent demand.</strong> The Nvidia→OpenAI→Oracle/CoreWeave/Nebius loop is <strong>&gt;$800B</strong> of interlocking commitments; the tell is <strong>~$400B of annual spend against ~$100B of realized AI revenue</strong>. The same dollars cycling among a few firms make demand look organic.</li>
+<li><strong>The one credit tranche that isn't confirming the all-clear.</strong> While IG (76bp) sits at a 27-year tight, <strong>CCC OAS widened to 968bp — the only tranche wider over six months.</strong> It's still idiosyncratic (the First Brands "Ponzi" fraud, Tricolor, healthcare/retail distress) — but the leveraged-loan distress ratio hit a 3-year high (7.23%), and private-credit funds are <em>already gating</em> (Blue Owl capped redemptions at 5% against 40% requests; FSB issued a formal warning). And GPU depreciation may be <em>overstating</em> the very profits underwriting the multiple (Burry: ~$176B, 2026–28).</li>
+</ul>
+</div>
+<p class="small"><strong>Why the calm indices miss it:</strong> the St. Louis Fed stress index is at a 1-year low and IG spreads at a 27-year tight — but the dangerous leverage (private credit, off-balance-sheet leases, circular vendor financing) sits <em>outside</em> the series everyone watches. Tight spreads + record concentration isn't reassurance; it's the precondition that makes the eventual repricing violent.</p>
+
+<!-- ============================================================ -->
+<h2><span class="num">05</span>What would actually break it — the tripwires</h2>
+<p>"Fragile" only matters with a catalyst. These are the three, in order of likelihood, and they're watchable in real time:</p>
+<ol class="trip">
+<li><strong>An AI-capex / ROI disappointment.</strong> A hyperscaler guides capex <em>down</em>, or an AI-revenue miss breaks the circular-financing loop. Most likely trigger. Watch quarterly capex guidance and the spend-vs-revenue gap. <span class="small">(We just saw a dress rehearsal: the late-June "Nvidia may halve HBM per Rubin rack" scare + Broadcom's soft guide knocked the AI complex 10%+.)</span></li>
+<li><strong>CCC stress broadening into BB/B.</strong> Today CCC is widening alone. If it drags the <em>BB/B transmission tranches</em> off their tights, credit is confirming — that's the leading indicator to respect, and it has <em>not</em> happened yet.</li>
+<li><strong>A rate shock toward 5%.</strong> Energy-driven second-wave inflation forcing the Fed to <em>hike</em> (the June dots already show 9 members projecting a hike) removes the liquidity bid and re-rates long-duration tech. A 10Y at 5% is the level Schwab flags for correction risk.</li>
+</ol>
+<p>Absent one of those three, "extremely fragile" overstates it. Present any one, and every red row in the §02 scorecard amplifies the drawdown.</p>
+
+<!-- ============================================================ -->
+<h2><span class="num">06</span>Bottom line</h2>
+<div class="verdict">
+<h3>The honest synthesis</h3>
+<p style="margin-top:6px;"><strong>Your instinct is sound; your instruments are slightly off.</strong> "Too many buys" is a real fact but a structural non-signal — the euphoria is better measured by the <strong>+21% price-target reach</strong>. And the rally <em>is</em> fragile in the sense that matters — <strong>richly valued (CAPE ~40), record-leveraged (margin debt +54%), fully owned (household equity ~46%), and complacently hedged</strong> — so any shock produces an outsized drawdown.</p>
+<p><strong>But "extremely fragile / about to crash" overstates it.</strong> Breadth is broadening, earnings are real (not 1999), the credit plumbing and stress indices are calm, and there's ~$8T of sideline cash. This is a market with <em>little margin for error</em>, not one already breaking.</p>
+<p style="margin-bottom:0;"><strong>The single thing to watch is not the S&amp;P — it's AI capex and the CCC tranche.</strong> The rally and the economy now lean on the same debt-funded compute bet, and the first instrument that will tell you it's cracking is low-quality credit, not the index. That's where the thesis lives or dies — <strong>4–5 out of 10 today, and rising the day a hyperscaler blinks on capex.</strong></p>
+</div>
+
+<div class="disclaimer">
+Research and analysis, not investment advice. Levels from a market-data tool (prices/credit/STLFSI/VIX through 25–26 Jun 2026) and automated web research; figures may contain errors or be superseded. Sentiment and valuation gauges are notoriously poor short-term timing tools — this is a conditions assessment, not a forecast. No position held in any security named.
+</div>
+
+<details>
+<summary>Key numbers &amp; sources (selected)</summary>
+<div class="srcgrid">
+<a href="https://insight.factset.com/where-are-analysts-most-optimistic-on-ratings-for-sp-500-companies-heading-into-q2-2">FactSet — record Buy% (58.2%, Mar 2026)</a>
+<a href="https://advantage.factset.com/hubfs/Website/Resources%20Section/Research%20Desk/Earnings%20Insight/EarningsInsight_062626.pdf">FactSet Earnings Insight (bottom-up target 8,918 / +21.2%)</a>
+<a href="https://papers.ssrn.com/sol3/papers.cfm?abstract_id=291241">Jegadeesh et al. (2004) — rating levels have no predictive power</a>
+<a href="https://www.gurufocus.com/economic_indicators/56/sp-500-shiller-cape-ratio">Shiller CAPE ~40 — GuruFocus</a>
+<a href="https://www.currentmarketvaluation.com/models/earnings-yield-gap.php">Equity risk premium ≈ 0 — Current Market Valuation</a>
+<a href="https://www.advisorperspectives.com/dshort/updates/2026/06/24/margin-debt-finra">FINRA margin debt $1.42T, +54% YoY — Advisor Perspectives</a>
+<a href="https://fred.stlouisfed.org/series/BOGZ1FL153064486Q">Household equity ~46% of financial assets — FRED Z.1</a>
+<a href="https://www.tradingview.com/news/macenews:241f5c939094b:0-bofa-global-research-fund-manager-survey-global-investors-pare-risk-holdings-in-june-but-stay-positive-on-world-growth-prospects/">BofA FMS — cash 4.1%, net 38% OW equities (June)</a>
+<a href="https://www.rbcwealthmanagement.com/en-us/insights/the-great-narrowing-sp-500-concentration">Top-10 concentration vs 2000 — RBC</a>
+<a href="https://finance.yahoo.com/markets/article/market-concentration-is-creating-fragility-only-60-of-sp-500-stocks-are-above-their-200-day-average-135336513.html">~60% above 200-DMA at highs — LPL via Yahoo</a>
+<a href="https://www.goldmansachs.com/insights/articles/s-and-p-500-forecast-to-climb-as-earnings-growth-powers-stocks-higher">Goldman — earnings-driven, $340/$385 EPS</a>
+<a href="https://fred.stlouisfed.org/series/BAMLH0A3HYC">ICE BofA CCC OAS (968bp) — FRED</a>
+<a href="https://fred.stlouisfed.org/series/BAMLC0A0CM">ICE BofA IG OAS (76bp, 27-yr tight) — FRED</a>
+<a href="https://fred.stlouisfed.org/series/STLFSI4">St. Louis Fed Financial Stress Index (−0.96) — FRED</a>
+<a href="https://www.tftc.io/ai-capex-gdp-growth-q1-2026-bea-third-estimate/">AI capex = 74% of Q1-2026 GDP growth — BEA</a>
+<a href="https://247wallst.com/investing/2026/05/05/amazons-free-cash-flow-just-collapsed-from-26-billion-to-1-2-billion-the-market-barely-blinked/">Amazon FCF collapse to $1.2B</a>
+<a href="https://fortune.com/2026/03/10/oracle-best-quarter-negative-free-cash-flow-ai-spending/">Oracle FCF −$23.7B</a>
+<a href="https://finance.yahoo.com/news/moody-flags-662-billion-risk-081000616.html">Moody's — $662B off-book hyperscaler leases</a>
+<a href="https://www.bloomberg.com/graphics/2026-ai-circular-deals/">Bloomberg — AI circular deals tracker</a>
+<a href="https://www.fsb.org/uploads/P060526.pdf">FSB — Vulnerabilities in Private Credit (May 2026)</a>
+<a href="https://www.cnbc.com/2026/04/02/blue-owl-private-credit-funds-redemptions-requests.html">Blue Owl caps redemptions — CNBC</a>
+<a href="https://www.cnbc.com/2025/11/11/big-short-investor-michael-burry-accuses-ai-hyperscalers-of-artificially-boosting-earnings.html">Burry — GPU depreciation ~$176B — CNBC</a>
+</div>
+</details>
+
+<div class="foot">
+S&amp;P 500 Fragility Stress Test · generated 28 Jun 2026. Five parallel research agents (web + market-data) plus own pulls of the ICE BofA OAS stack, St. Louis Fed stress index, and VIX. Claims cross-checked for cross-agent convergence. Self-contained file — works offline.
+</div>
+
+</div>
+</body>
+</html>

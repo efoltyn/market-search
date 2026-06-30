@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI: Bubble or Not? — The Verdict</title>
+<style>
+  :root{
+    --ink:#13161b; --muted:#5b6470; --line:#e4e8ef; --bg:#ffffff; --panel:#f7f9fc;
+    --accent:#1f6feb; --green:#0f9d58; --amber:#d98b00; --red:#d93636; --purple:#7b4fe0;
+    --green-bg:#e8f6ee; --amber-bg:#fbf1dc; --red-bg:#fbe9e9; --blue-bg:#e8f1fe; --purple-bg:#f0ebfb;
+    --mono:"SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;font-size:16.5px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1020px;margin:0 auto;padding:0 22px 130px;}
+  header.hero{padding:62px 0 28px;border-bottom:3px solid var(--ink);margin-bottom:8px;}
+  .kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600;}
+  h1{font-size:46px;line-height:1.04;margin:14px 0 10px;letter-spacing:-.025em;}
+  .sub{font-size:19.5px;color:var(--muted);max-width:800px;margin:0;}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:22px;display:flex;gap:16px;flex-wrap:wrap;}
+  h2{font-size:27px;margin:54px 0 8px;letter-spacing:-.015em;padding-top:18px;border-top:1px solid var(--line);}
+  h2 .n{font-family:var(--mono);font-size:15px;color:var(--accent);margin-right:10px;}
+  h3{font-size:19px;margin:26px 0 6px;}
+  p{margin:12px 0;} a{color:var(--accent);text-decoration:none;} a:hover{text-decoration:underline;}
+  strong{font-weight:650;} .small{font-size:14px;color:var(--muted);} .mono{font-family:var(--mono);}
+  .lede{font-size:18.5px;background:var(--panel);border-left:4px solid var(--accent);padding:18px 22px;border-radius:0 8px 8px 0;margin:18px 0;}
+
+  /* headline gauge */
+  .verdict{background:#101418;color:#f2f5f9;border-radius:16px;padding:28px 30px;margin:24px 0;}
+  .verdict h3{color:#fff;margin:0 0 14px;font-size:14px;font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;}
+  .gw{display:flex;align-items:center;gap:26px;flex-wrap:wrap;}
+  .score{font-size:74px;font-weight:800;line-height:.9;letter-spacing:-.03em;color:#ffc23d;}
+  .score small{font-size:26px;color:#8a93a0;font-weight:600;}
+  .gbar{flex:1;min-width:260px;}
+  .track{height:16px;border-radius:9px;background:linear-gradient(90deg,#0f9d58 0%,#0f9d58 25%,#d98b00 55%,#d93636 100%);position:relative;}
+  .pin{position:absolute;top:-6px;width:4px;height:28px;background:#fff;border-radius:2px;box-shadow:0 0 0 2px #101418;}
+  .ticks{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:#8a93a0;margin-top:7px;}
+  .verdict p{color:#d3d9e0;font-size:15.5px;} .verdict strong{color:#9ec5ff;}
+
+  /* ensemble dots */
+  .ensemble{display:flex;align-items:flex-end;gap:6px;height:130px;margin:10px 0 4px;padding:0 4px;}
+  .ebar{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;}
+  .ebar .bar{width:100%;border-radius:5px 5px 0 0;min-height:8px;}
+  .ebar .s{font-family:var(--mono);font-size:12px;font-weight:700;}
+  .ebar .l{font-size:9.5px;color:var(--muted);text-align:center;line-height:1.15;height:34px;overflow:hidden;}
+
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;letter-spacing:.03em;vertical-align:middle;}
+  .b-green{background:var(--green-bg);color:var(--green);}
+  .b-amber{background:var(--amber-bg);color:var(--amber);}
+  .b-red{background:var(--red-bg);color:var(--red);}
+  .b-blue{background:var(--blue-bg);color:var(--accent);}
+  .b-purple{background:var(--purple-bg);color:var(--purple);}
+
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px;}
+  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top;}
+  th{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;border-bottom:2px solid var(--line);}
+  td.num,th.num{text-align:right;font-family:var(--mono);white-space:nowrap;}
+  tr:hover td{background:var(--panel);}
+  .pos{color:var(--green);font-weight:600;} .neg{color:var(--red);font-weight:600;}
+
+  /* tiers */
+  .tier{border:1px solid var(--line);border-radius:14px;padding:6px 22px 18px;margin:16px 0;border-left-width:6px;}
+  .tier.t1{border-left-color:var(--green);}
+  .tier.t2{border-left-color:var(--amber);}
+  .tier.t3{border-left-color:var(--red);}
+  .tier h3{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .tierscore{font-family:var(--mono);font-weight:700;border-radius:8px;padding:2px 10px;font-size:13px;}
+  .t1 .tierscore{background:var(--green-bg);color:var(--green);}
+  .t2 .tierscore{background:var(--amber-bg);color:var(--amber);}
+  .t3 .tierscore{background:var(--red-bg);color:var(--red);}
+
+  .callout{border-radius:10px;padding:16px 20px;margin:18px 0;}
+  .co-cards{background:var(--purple-bg);border:1px solid #d9caf6;}
+  .co-key{background:#101418;color:#f2f5f9;border-radius:14px;padding:24px 26px;margin:24px 0;}
+  .co-key h3{color:#fff;margin-top:0;} .co-key strong{color:#9ec5ff;}
+  ul{margin:10px 0;padding-left:22px;} li{margin:7px 0;}
+  .trip{counter-reset:t;list-style:none;padding-left:0;}
+  .trip li{position:relative;padding:10px 0 10px 42px;border-top:1px solid var(--line);}
+  .trip li::before{counter-increment:t;content:counter(t);position:absolute;left:0;top:11px;width:26px;height:26px;border-radius:50%;background:var(--ink);color:#fff;font-family:var(--mono);font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;}
+  .foot{margin-top:56px;padding-top:22px;border-top:1px solid var(--line);font-size:13px;color:var(--muted);}
+  details{margin:10px 0;border:1px solid var(--line);border-radius:10px;padding:4px 16px;background:var(--panel);}
+  summary{cursor:pointer;font-weight:600;padding:10px 0;font-size:15px;}
+  .disclaimer{font-size:12.5px;color:var(--muted);background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:14px 18px;margin:24px 0;}
+  @media(max-width:760px){h1{font-size:33px;} .score{font-size:54px;} .ebar .l{font-size:8px;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">The Verdict · 8 independent analysts · market-data + web</div>
+  <h1>AI: Bubble, or Not?</h1>
+  <p class="sub">Eight full-stack analysts each pulled their own data and news and scored it cold. They split on the number and agreed on the thing that matters: <em>what kind</em> of bubble this is, and <em>where</em> it breaks.</p>
+  <div class="meta">
+    <span>29 Jun 2026</span><span>S&amp;P 7,354</span><span>8 analyst scores: 38–72</span><span>NVDA fwd 21.7× · CCC OAS 968bp</span>
+  </div>
+</header>
+
+<p class="lede"><strong>The one-sentence answer:</strong> this is <em>not</em> a whole-market 1999 mania — the public leaders are cash machines at reasonable forward multiples and credit is calm — but it <em>is</em> a real, identifiable bubble in the <strong>financing/buyer layer</strong> (neoclouds, off-balance-sheet SPV debt, GPU-collateralized loans, the circular vendor-financing loop), and that layer is <strong>already deflating in real time.</strong> It's a <strong>dark-fiber bubble, not a dot-com one</strong>: the compute gets built and used; many of the financiers don't survive to enjoy it.</p>
+
+<!-- HEADLINE GAUGE -->
+<div class="verdict">
+  <h3>Composite bubble score (ensemble of 8)</h3>
+  <div class="gw">
+    <div class="score">61<small>/100</small></div>
+    <div class="gbar">
+      <div class="track"><div class="pin" style="left:61%;"></div></div>
+      <div class="ticks"><span>0 · no bubble</span><span>50 · froth</span><span>100 · 2000 mania</span></div>
+    </div>
+  </div>
+  <p style="margin-bottom:0;"><strong>Mean 61, median 60, range 38–72.</strong> Read it as a <em>blend of three very different markets</em>: a fairly-to-richly-valued mega-cap core (~45), a frothy valuation tail (~70), and a genuinely bubbly, already-cracking financing layer (~80). The single number hides the real finding — so don't trade the 61; trade the <strong>bifurcation</strong> below.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">01</span>The ensemble — convergence on structure, dispersion on weighting</h2>
+<p>Eight analysts, each with independent data and a different lens, each forced to a 0–100. The spread (38–72) is <em>not</em> disagreement about what's happening — every one landed on the same bifurcation. They differ only on how heavily to weight the financing-layer bubble inside one blended number.</p>
+
+<div class="ensemble">
+  <div class="ebar"><div class="s" style="color:var(--green)">38</div><div class="bar" style="height:38%;background:var(--green)"></div><div class="l">Bull steelman</div></div>
+  <div class="ebar"><div class="s" style="color:var(--amber)">58</div><div class="bar" style="height:58%;background:var(--amber)"></div><div class="l">Micro­structure</div></div>
+  <div class="ebar"><div class="s" style="color:var(--amber)">58</div><div class="bar" style="height:58%;background:var(--amber)"></div><div class="l">Earnings reality</div></div>
+  <div class="ebar"><div class="s" style="color:var(--amber)">58</div><div class="bar" style="height:58%;background:var(--amber)"></div><div class="l">Reaction function</div></div>
+  <div class="ebar"><div class="s" style="color:var(--amber)">62</div><div class="bar" style="height:62%;background:var(--amber)"></div><div class="l">Picks &amp; shovels</div></div>
+  <div class="ebar"><div class="s" style="color:var(--red)">72</div><div class="bar" style="height:72%;background:var(--red)"></div><div class="l">Credit / financing</div></div>
+  <div class="ebar"><div class="s" style="color:var(--red)">72</div><div class="bar" style="height:72%;background:var(--red)"></div><div class="l">Historical analog</div></div>
+  <div class="ebar"><div class="s" style="color:var(--red)">72</div><div class="bar" style="height:72%;background:var(--red)"></div><div class="l">Macro / liquidity</div></div>
+</div>
+<p class="small"><strong>What all eight agreed on:</strong> (1) the mega-cap core is <em>not</em> a bubble — real cash, ~22× forward, credit tight; (2) the financing/buyer layer <em>is</em> a bubble; (3) it is <em>already venting</em> (Oracle −40 to −57%, CoreWeave −41%, while Nvidia — most profitable — is down least); (4) the closest analog is <strong>telecom/dark-fiber 2000–01</strong>, not dot-com; (5) it breaks at the <strong>credit seam</strong>, not at Nvidia. The lone 38 (the bull) doesn't dispute the structure — it just weights the contained, cash-rich core more heavily.</p>
+
+<!-- ============================================================ -->
+<h2><span class="n">02</span>The bifurcation — three markets wearing one ticker tape</h2>
+
+<div class="tier t1">
+<h3>Tier 1 — The profitable, sold-out core <span class="tierscore">~45 · NOT a bubble</span></h3>
+<p>Real cash, real backlog, sold-out capacity. This is the part that disqualifies a 1999 reading.</p>
+<table>
+<thead><tr><th>Name</th><th class="num">Fwd P/E</th><th class="num">Net margin</th><th>Balance sheet</th><th>Demand proof</th></tr></thead>
+<tbody>
+<tr><td class="mono">NVDA</td><td class="num">21.7×</td><td class="num">63%</td><td>$40B net cash, +$46B FCF</td><td>+85% rev; "constrained through Vera Rubin life"</td></tr>
+<tr><td class="mono">MU</td><td class="num">15.6×</td><td class="num">56%</td><td>net cash, 84.6% gross margin</td><td>HBM sold out into 2028; $22B commitments</td></tr>
+<tr><td class="mono">VRT</td><td class="num">47×</td><td class="num">14%</td><td>modest debt</td><td>$15B backlog, orders +252% YoY</td></tr>
+</tbody>
+</table>
+<p class="small">Supply-chain reality, not narrative: HBM booked into 2028 (+20% price hikes), CoWoS fully booked at 52–78-wk lead times, 1.6T optics running 30–40% short through 2029. <strong>A 22×-forward monopoly growing 85% is not a bubble multiple — Cisco at the 2000 peak was &gt;130×.</strong></p>
+</div>
+
+<div class="tier t2">
+<h3>Tier 2 — The valuation tail <span class="tierscore">~70 · selectively bubbly</span></h3>
+<p>Real businesses priced for multi-year flawless execution. <strong>Astera Labs: P/E ~306×, fwd ~152×, 52× book — and its mean analyst target ($264) sits ~40% <em>below</em> the price ($456 after June 29's +16% rip).</strong> Even the sell-side says it's overshot. Coherent: P/E 187×, negative FCF. Palantir, ARM, the connectivity/optical momentum names. <em>This</em> is where equity-valuation froth genuinely lives — and it took 30%+ hits this month before bouncing.</p>
+</div>
+
+<div class="tier t3">
+<h3>Tier 3 — The credit-funded buyers <span class="tierscore">~80 · THE bubble, already cracking</span></h3>
+<p>The fragility isn't the technology of the sellers — it's the <strong>capital structure of the buyers.</strong></p>
+<table>
+<thead><tr><th>Name</th><th class="num">FCF</th><th class="num">Debt/equity</th><th>Tell</th></tr></thead>
+<tbody>
+<tr><td class="mono">CRWV</td><td class="num neg">−$8.6B</td><td class="num">738×</td><td>current ratio 0.32; $4.2B GPU debt wall due 2026 ≈ all its cash; 23% short</td></tr>
+<tr><td class="mono">NBIS</td><td class="num neg">−$6.1B</td><td class="num">132×</td><td>EV/revenue 66×; negative fwd P/E; 23% short</td></tr>
+<tr><td class="mono">ORCL</td><td class="num neg">−$24.5B</td><td class="num">389×</td><td>$248B off-balance-sheet leases; −40 to −57% from peak; single-customer (OpenAI) risk</td></tr>
+</tbody>
+</table>
+<p class="small">Collateral is melting — GPU rental rates already down <strong>50–70%</strong> against loans amortized over 5–6 years for hardware with a 2–3-year economic life. Wrapped in <strong>&gt;$800B of circular Nvidia→OpenAI→Oracle/CoreWeave→Nvidia commitments</strong> and <strong>~$120B (→$800B projected)</strong> of off-balance-sheet SPV debt (Meta's $30B Hyperion priced at +225bp, ~2× its own corporate spread). This is the dark fiber.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">03</span>The shape of the moves — distribution under a pinned index</h2>
+<p>The single most diagnostic thing on the tape, and exactly what you flagged: <strong>the index is eerily calm while the single names convulse.</strong> Quantified from 15-minute data (intraday range = high−low / prev close; net = close-to-close):</p>
+<table>
+<thead><tr><th>Session</th><th class="num">SPY range / net</th><th class="num">MU range / net</th><th class="num">AVGO range / net</th></tr></thead>
+<tbody>
+<tr><td>Jun 24</td><td class="num">1.2% / −0.1%</td><td class="num">8.8% / −0.3%</td><td class="num">3.1% / +0.5%</td></tr>
+<tr><td>Jun 25 (MU blowout)</td><td class="num">1.3% / +0.1%</td><td class="num">11.3% / +15.7%*</td><td class="num">4.2% / −0.8%</td></tr>
+<tr><td>Jun 26</td><td class="num">2.7% / −0.7%</td><td class="num">6.4% / −6.7%</td><td class="num">2.6% / −3.7%</td></tr>
+</tbody>
+</table>
+<p class="small">*MU spiked to $1,255 on the record blowout, then gave it <em>all</em> back to close ~$1,132. Over three months: <strong>MU had 22 days of &gt;±6% moves, AEHR 31, ALAB 23 — SPY had zero.</strong> June 29: MU traded 1112→1023→1145 (an 11% round-trip) while SPY went 734→716→741 and closed at the highs.</p>
+<p><strong>What it signals:</strong> high single-stock vol + low <em>index</em> vol = low correlation / high dispersion. The names cancel out, so the index prints calm while everything churns underneath — and that calm is <em>mechanical</em>: 0DTE/dealer gamma pins SPX intraday (VVIX spiked to ~100–108, SKEW 139–152 — heavy tail-hedging) while large holders use the index liquidity to <strong>exit concentrated single-stock AI risk quietly.</strong> A record blowout (Micron) fought to a <em>draw</em> on the day is distribution, not absorption. <strong>The calm index isn't strength — it's the cosmetic surface over a complex being distributed.</strong></p>
+
+<!-- ============================================================ -->
+<h2><span class="n">04</span>The credit tell — the one tranche that's dissenting</h2>
+<p>Every analyst converged here independently. The investment-grade surface is pristine; the speculative tail is cracking:</p>
+<table>
+<thead><tr><th>Tranche</th><th class="num">OAS now</th><th>Signal</th></tr></thead>
+<tbody>
+<tr><td>IG (BAMLC0A0CM)</td><td class="num">77 bp</td><td><span class="badge b-green">tightest since ~1997</span></td></tr>
+<tr><td>HY broad</td><td class="num">283 bp</td><td><span class="badge b-green">near cycle tights</span></td></tr>
+<tr><td>BB / B</td><td class="num">173 / 304 bp</td><td><span class="badge b-green">bottom quartile</span></td></tr>
+<tr><td><strong>CCC &amp; lower</strong></td><td class="num">~968 bp</td><td><span class="badge b-red">only tranche widening — +95bp/6mo, ~75th–80th %ile</span></td></tr>
+<tr><td>STLFSI stress index</td><td class="num">−0.96</td><td><span class="badge b-green">1-yr low (calmest)</span></td></tr>
+</tbody>
+</table>
+<p><strong>The IG/HY calm is complacency, not safety</strong> — because the actual marginal financing of the build (CoreWeave's ~$35B SPV debt, Oracle's $248B off-book leases, data-center ABS, gated private-credit BDCs) sits <em>outside</em> the indices everyone watches. The one in-index signal that <em>does</em> track the leveraged tail — <strong>CCC — is the only spread re-widening.</strong> Credit's tail is already voting no.</p>
+
+<!-- ============================================================ -->
+<h2><span class="n">05</span>Two things that turned the regime against it</h2>
+<div class="callout" style="background:var(--red-bg);border:1px solid #f0c9c9;">
+<p style="margin-top:4px;"><strong>The reaction function inverted.</strong> Record blowouts are being <em>sold</em> — Micron (84.6% margins, sold out to 2028) round-tripped; Broadcom (records) −20%; Nvidia's beat-and-raise faded. FactSet Q1-26: beats rewarded just <strong>+1.1%</strong> on a record beat rate, misses punished <strong>−4.9%</strong> (~1.7× normal). <em>All downside, no upside</em> to good news — yet sentiment is <strong>fear</strong> (CNN F&amp;G 25), not euphoria. Translation: a skeptical, de-risking crowd already wringing out the excess — a bubble being <em>let down</em>, not blown bigger.</p>
+<p style="margin-bottom:4px;"><strong>The Fed put is gone, and AI <em>is</em> the macro now.</strong> June's dots flipped to <em>hikes</em> (markets price ~78% odds of zero 2026 cuts) as PCE reaccelerated to 4.1%. The cheap-money regime that inflated the trade has reversed. And there's no second engine: <strong>AI capex drove ~74% of Q1 GDP growth</strong> while the rest frayed (consumer sentiment −21%, housing −15%). So an AI-capex air-pocket is an <em>economy-wide</em> repricing — and the market already prices the timing: <strong>2026 recession odds ~10%, but 2027 ~44%.</strong> A buildout the market expects to end.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">06</span>The forward spine — counting the deck</h2>
+<div class="callout co-cards">
+<p style="margin-top:4px;">The market level discounts the <em>expected forward flow of catalysts</em>. Reframe the whole thing as <strong>catalyst inventory</strong>: the up-fuel is <em>discretionary and depleting</em> (cards an agent chooses to play — Trump peace tweets, Fed jawboning, CEO hype, buybacks, guidance), while the down-fuel is <em>exogenous and recurring</em> (CPI/PCE/jobs, the FOMC decision, earnings <em>results</em>, a credit event). Support is a finite hand; threats arrive on a schedule.</p>
+<ul>
+<li><strong>Big bullish cards already played (spent, in the price):</strong> the AI-capex commitments, the memory super-cycle, the Micron/Nvidia/Broadcom blowouts, the first Iran de-escalation.</li>
+<li><strong>The Fed card is unplayable</strong> — frozen by 4.1% inflation; the dots show hikes.</li>
+<li><strong>The peace card is being <em>replayed</em></strong> (the June 29 "Iran wants to meet in Doha" headline) — second play, diminishing punch, against a market that already watched the first one round-trip. A replayed card is a thin-hand tell.</li>
+<li><strong>The one fat unplayed card</strong> — a genuine AI-revenue inflection that closes the ~$600B spend-vs-revenue gap — is also the exact binary that, if it disappoints, is the bear trigger.</li>
+</ul>
+<p style="margin-bottom:4px;">Today's rip (June 29: AMAT +11%, KLAC +12%, Corning +16%, ALAB +16%, Cerebras +19%, AST SpaceMobile +21%, MSTR +13%) was a <strong>card-driven bounce</strong> — analyst-upgrade cards (BofA on Lam, an Intel double-upgrade) + the Micron read-through + the peace replay — and notice the <em>frothiest</em> cohort (space, crypto, the AI-IPO) led hardest. A relief rip on played cards, with the speculative tail in front. <strong>Thin discretionary up-deck, full exogenous down-calendar — that's the depletion asymmetry, and it's why the down-leg, when it comes, is fast.</strong></p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">07</span>What actually breaks it — the tripwires</h2>
+<p>It is <em>not</em> breaking now — IG/HY tight, VIX 18, sentiment fear, core cash-rich. It breaks when the contained credit problem becomes a contagious one:</p>
+<ol class="trip">
+<li><strong>CCC contagion into BB/IG.</strong> Today CCC widens alone. If it drags the BB/B transmission tranches and HY breaks above its March wides (~3.5%), the subset bubble goes systemic. <em>The single most important chart to watch.</em></li>
+<li><strong>A neocloud / SPV credit event.</strong> CoreWeave or Nebius failing to roll the 2026 GPU debt wall, an Oracle/data-center-ABS markdown, or a forced GPU-collateral re-mark. Burry's "fraud not flywheel," made real.</li>
+<li><strong>An AI-capex guide-down, or a Fed hike.</strong> A hyperscaler cutting capex breaks the circular loop and (since AI ≈ 74% of GDP growth) reprices the whole economy; an actual hike removes the last support. The reaction function says even <em>good</em> guidance may not save it.</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2><span class="n">08</span>Bottom line</h2>
+<div class="co-key">
+<h3>The verdict, unhedged</h3>
+<p style="margin-top:6px;"><strong>Not an "AI bubble." A bubble in the <em>financing of AI</em>, on top of a real and largely-earned compute build.</strong> The leaders (Nvidia 21.7× fwd, Micron 15.6× and sold out to 2028) are cash machines, not concept stocks — categorically not 2000. The mania lives one layer down, in the GPU-collateralized, circular, off-balance-sheet debt funding the neoclouds and Oracle against hardware whose rental value has already fallen 50–70% — and that layer is <em>already</em> deflating (Oracle −40 to −57%, CoreWeave −41%, CCC the only spread widening).</p>
+<p><strong>The closest historical rhyme is dark fiber, not dot-com:</strong> the technology is real and the capacity gets used — but the compute, like the fiber, will be enjoyed by <em>later</em> owners, after the leveraged builders and their financiers are restructured. The demand is sold-out and pre-paid; the <em>financing</em> is the bubble.</p>
+<p style="margin-bottom:0;"><strong>So: ~61/100 — a real, contained, already-venting subset bubble, not a systemic mania — but with three things that make the tail fat:</strong> the reaction function has inverted (good news sold), the Fed put is gone, and AI capex now <em>is</em> the macro, so the break — if CCC contagions into IG, or a neocloud can't roll its debt — is an economy-wide event, and the calendar where it clusters is <strong>2027</strong>. Watch the credit seam, not the index. The level is calm; the level is not the signal.</p>
+</div>
+
+<div class="disclaimer">
+Research and analysis, not investment advice. Composite of eight independent AI-analyst agents, each using a market-data tool (prices, fundamentals, ICE BofA OAS, VIX/VVIX/SKEW term structure, intraday 15-min candles) and web research, plus the author's own intraday and credit pulls, as of the 26–29 June 2026 sessions. Bubble scores are subjective analyst judgments on a 0–100 scale and may contain errors or be superseded. No position held in any security named.
+</div>
+
+<details>
+<summary>The eight analysts &amp; their scores</summary>
+<table>
+<thead><tr><th>Lens</th><th class="num">Score</th><th>One-line verdict</th></tr></thead>
+<tbody>
+<tr><td>Bull steelman</td><td class="num">38</td><td>Leaders cheap on cash earnings; froth contained to financing subset</td></tr>
+<tr><td>Microstructure</td><td class="num">58</td><td>"Wild intraday, clean on the day" = distribution under a gamma-pinned index</td></tr>
+<tr><td>Earnings reality</td><td class="num">58</td><td>The bubble is in cash flow, not earnings — FCF crossing zero on capex</td></tr>
+<tr><td>Reaction function</td><td class="num">58</td><td>Good news sold, but sentiment is fear — bubble being deflated, not inflated</td></tr>
+<tr><td>Picks &amp; shovels</td><td class="num">62</td><td>Fragility is in the buyers' capital structure, not the sellers' technology</td></tr>
+<tr><td>Credit / financing</td><td class="num">72</td><td>IG calm = complacency; leverage moved off-index; CCC the only tell</td></tr>
+<tr><td>Historical analog</td><td class="num">72</td><td>Telecom/dark-fiber 2000–01 (9/10), not dot-com — real revolution + financing bubble</td></tr>
+<tr><td>Macro / liquidity</td><td class="num">72</td><td>Fed put gone; AI = 74% of GDP growth = the same trade as the macro; 2027 air-pocket</td></tr>
+</tbody>
+</table>
+<p class="small">Mean 61.25 · median 60 · range 38–72 · mode 58 &amp; 72 (3 each). Tools per agent: finance_timeseries, finance_fundamentals, finance_volsurface, finance_options, finance_movers, finance_odds + WebSearch/WebFetch.</p>
+</details>
+
+<details>
+<summary>Key numbers &amp; sources (selected)</summary>
+<p class="small">
+Fundamentals/prices/credit/vol/intraday: market-data MCP (finance_*), 26–29 Jun 2026. ·
+<a href="https://nvidianews.nvidia.com/news/nvidia-announces-financial-results-for-first-quarter-fiscal-2026">NVDA Q1 FY27</a> ·
+<a href="https://www.cnbc.com/2026/06/24/micron-mu-earnings-report-q3-2026.html">Micron Q3 FY26</a> ·
+<a href="https://qz.com/gpu-collateralized-debt-ai-neocloud-coreweave-financing-risks-050526">GPU-collateralized debt / rental −50-70% (Quartz)</a> ·
+<a href="https://www.bloomberg.com/graphics/2026-ai-circular-deals/">AI circular deals (Bloomberg)</a> ·
+<a href="https://www.cnbc.com/2026/06/10/oracle-orcl-q4-earnings-report-2026.html">Oracle FCF −$24.5B (CNBC)</a> ·
+<a href="https://finance.yahoo.com/news/oracles-248-billion-ai-bet-195143106.html">Oracle $248B off-book leases</a> ·
+<a href="https://finance.yahoo.com/news/meta-lands-record-29b-ai-163000259.html">Meta $30B Hyperion SPV at +225bp</a> ·
+<a href="https://www.bain.com/about/media-center/press-releases/20252/$2-trillion-in-new-revenue-needed-to-fund-ais-scaling-trend---bain--companys-6th-annual-global-technology-report/">Bain $2T-needed / $800B gap</a> ·
+<a href="https://epoch.ai/data-insights/hyperscaler-capex-vs-cash-flow">Hyperscaler capex vs cash flow (Epoch)</a> ·
+<a href="https://www.cnbc.com/2026/06/17/fed-interest-rate-decision-june-2026.html">June FOMC dots → hikes (CNBC)</a> ·
+<a href="https://www.tftc.io/ai-capex-gdp-growth-q1-2026-bea-third-estimate/">AI = 74% of Q1 GDP growth (BEA)</a> ·
+<a href="https://fred.stlouisfed.org/series/BAMLH0A3HYC">CCC OAS (FRED)</a> ·
+<a href="https://www.cnbc.com/2025/11/11/big-short-investor-michael-burry-accuses-ai-hyperscalers-of-artificially-boosting-earnings">Burry depreciation $176B (CNBC)</a> ·
+<a href="https://tomtunguz.com/nvidia_nortel_vendor_financing_comparison/">Nvidia≈Nortel vendor financing</a> ·
+<a href="https://insight.factset.com/sp-500-earnings-season-update-may-8-2026">FactSet beat/miss asymmetry</a> ·
+<a href="https://www.gurufocus.com/economic_indicators/56/sp-500-shiller-cape-ratio">Shiller CAPE ~40</a>
+</p>
+</details>
+
+<div class="foot">
+AI: Bubble or Not — The Verdict · generated 29 Jun 2026. Eight independent full-stack analyst agents (market-data + web), aggregated; shape-of-moves forensic from own intraday + VIX-term-structure pulls; credit from the ICE BofA OAS stack. Self-contained file — works offline.
+</div>
+
+</div>
+</body>
+</html>
