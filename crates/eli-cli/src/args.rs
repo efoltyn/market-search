@@ -95,6 +95,15 @@ struct McpArgs {
     /// Port for HTTP mode.
     #[arg(long, default_value = "8484")]
     port: u16,
+
+    /// Bind address for HTTP mode. Use 127.0.0.1 behind a tunnel or reverse proxy.
+    /// Set MARKET_SEARCH_MCP_TOKEN to require `Authorization: Bearer <token>` on /mcp.
+    #[arg(long, default_value = "0.0.0.0")]
+    host: String,
+
+    /// Print which tools this machine can serve (and which env var unlocks the rest), then exit.
+    #[arg(long, default_value_t = false)]
+    check: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -120,6 +129,80 @@ struct ShareArgs {
     /// For ngrok: authtoken if not already configured globally.
     #[arg(long)]
     authtoken: Option<String>,
+}
+
+
+#[derive(clap::Args, Debug)]
+struct FinanceShortArgs {
+    /// Ticker to fetch short data for.
+    #[arg(long)]
+    ticker: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct FinanceInsiderArgs {
+    /// Ticker to fetch insider transactions for.
+    #[arg(long)]
+    ticker: String,
+
+    /// Lookback window in days (default 90).
+    #[arg(long)]
+    days: Option<u32>,
+
+    /// Max transactions to return (default 50, cap 200).
+    #[arg(long)]
+    limit: Option<usize>,
+
+    /// Return only the buy/sell summary metrics, no transaction rows.
+    #[arg(long, default_value_t = false)]
+    summary_only: bool,
+
+    /// SEC EDGAR User-Agent override ("name email@domain").
+    #[arg(long)]
+    user_agent: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct FinanceLogArgs {
+    /// Show the last N matching entries.
+    #[arg(long, default_value_t = 20)]
+    tail: usize,
+
+    /// Only lines containing this substring (case-insensitive).
+    #[arg(long)]
+    grep: Option<String>,
+
+    /// Only entries at/after this ISO-8601 UTC timestamp.
+    #[arg(long)]
+    since: Option<String>,
+
+    /// Only entries at/before this ISO-8601 UTC timestamp.
+    #[arg(long)]
+    until: Option<String>,
+
+    /// Print aggregate stats (per-tool calls, avg duration, errors) instead of lines.
+    #[arg(long, default_value_t = false)]
+    stats: bool,
+
+    /// Verify the tamper-evident hash chain over the whole trail; reports the
+    /// first broken record if any content was altered, removed, or reordered.
+    #[arg(long, default_value_t = false)]
+    verify: bool,
+
+    /// Export an examiner bundle to this directory: matching records, every
+    /// referenced payload archive, and a manifest with the chain-verification
+    /// result. Combine with --since/--until/--grep to scope.
+    #[arg(long)]
+    export: Option<String>,
+
+    /// Print the exact archived response payload for a record (by seq),
+    /// integrity-checked against the hash recorded at capture time.
+    #[arg(long)]
+    show_payload: Option<u64>,
+
+    /// Print the log file path and exit.
+    #[arg(long = "where", default_value_t = false)]
+    r#where: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -148,6 +231,12 @@ enum FinanceCommand {
     Sync(FinanceSyncArgs),
     /// Local paper trading sandbox using live Kalshi/Polymarket prices.
     Paper(FinancePaperArgs),
+    /// Query the local activity log (JSONL audit trail of finance tool calls).
+    Log(FinanceLogArgs),
+    /// Parsed insider transactions (SEC Form 4): who bought/sold, shares, price, role.
+    Insider(FinanceInsiderArgs),
+    /// FINRA short data: bi-monthly short interest + days-to-cover, and daily per-venue short volume.
+    Short(FinanceShortArgs),
     /// Interactive Brokers via local TWS / IB Gateway.
     Ibkr(FinanceIbkrArgs),
     /// Recent US Treasury auction results (bid-to-cover, tails, bidder breakdown).
@@ -1488,11 +1577,14 @@ struct FinanceOddsArgs {
     #[arg(long, default_value_t = false)]
     explain: bool,
 
-    /// Upgrade cache search results to live API prices (fresh bid/ask/volume). Default for --search.
+    /// No-op for --search: live network pricing is already the default (kept for
+    /// compatibility). The only way to change behavior is --local.
     #[arg(long, default_value_t = false)]
     live: bool,
 
-    /// Use only the local FTS cache for --search; faster but can be stale and skips live fallback.
+    /// Search only the local FTS catalog: ~20x faster (no network), same field
+    /// schema and 0-1 probability scale as live, but prices are as of the last
+    /// sync/write-back rather than the current moment.
     #[arg(long, conflicts_with = "live")]
     local: bool,
 
@@ -1725,9 +1817,25 @@ struct FinancePaperArgs {
 
 #[derive(clap::Args, Debug)]
 struct FinanceFilingsArgs {
-    /// Ticker to fetch filings for.
+    /// Ticker to fetch filings for. Required unless --search-text is used.
     #[arg(long, visible_alias = "tickers")]
-    ticker: String,
+    ticker: Option<String>,
+
+    /// Cross-filer full-text search over EDGAR: return filings from ANY
+    /// company whose documents contain this phrase (e.g. "share repurchase",
+    /// "data center"). Scoped to --forms (default 8-K,10-K,10-Q; pass
+    /// --forms any for every form type) and --from/--to. Results cap at 50
+    /// per call; total_matches reports the full hit count.
+    #[arg(long)]
+    search_text: Option<String>,
+
+    /// Earliest filing date for --search-text (YYYY-MM-DD).
+    #[arg(long)]
+    from: Option<String>,
+
+    /// Latest filing date for --search-text (YYYY-MM-DD).
+    #[arg(long)]
+    to: Option<String>,
 
     /// Form types to include (comma-separated), e.g. 8-K,10-K,10-Q. Defaults to 8-K,10-K,10-Q.
     #[arg(long, value_delimiter = ',')]

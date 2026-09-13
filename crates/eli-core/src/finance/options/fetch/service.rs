@@ -1192,8 +1192,14 @@ pub async fn fetch_options(req: OptionsRequest) -> Result<OptionsResponse> {
         expirations_analyzed: Some(1),
     });
 
-    // summary_only now keeps the chains (metrics + chains together is more useful)
-    let (final_calls, final_puts) = (calls, puts);
+    // --summary means summary: the flag promised "no full chain" but shipped
+    // 80KB of per-strike rows anyway. Metrics-only when summary_only is set;
+    // callers who want metrics + chains simply omit the flag.
+    let (final_calls, final_puts) = if req.summary_only {
+        (Vec::new(), Vec::new())
+    } else {
+        (calls, puts)
+    };
 
     // Advisory `note` prose dropped — numeric fields (total_call_oi,
     // has_liquid_near_money, expirations) already convey the same info.

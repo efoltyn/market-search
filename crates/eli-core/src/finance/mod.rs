@@ -69,7 +69,10 @@ pub use providers::odds::fetch_odds;
 pub use providers::odds::{fetch_polymarket_orderbooks, PolymarketBookLevel, PolymarketOrderbook};
 
 mod filings;
+pub mod short_interest;
 pub use filings::fetch_filings;
+pub use filings::search_filings_fulltext;
+pub use short_interest::fetch_short_data;
 pub use filings::fetch_insider;
 
 mod timeseries;
@@ -147,6 +150,10 @@ pub(crate) mod credentials;
 
 pub fn has_fred_api_attachment_hint() -> bool {
     credentials::has_fred_api_configuration_hint()
+}
+
+pub fn has_ibkr_attachment_hint() -> bool {
+    credentials::has_ibkr_configuration_hint()
 }
 
 pub fn resolve_eia_api_key() -> std::result::Result<String, String> {

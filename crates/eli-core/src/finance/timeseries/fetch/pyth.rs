@@ -125,7 +125,9 @@ pub(crate) async fn fetch_pyth_series(
         );
 
         let start_time = std::time::Instant::now();
-        let resp = match client.get(&url).send().await {
+        // Pyth 429s under parallel-worker load; one short backoff retry
+        // recovers most of them without meaningfully slowing the happy path.
+        let mut resp = match client.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
                 errors.push(TimeseriesError {
@@ -136,6 +138,20 @@ pub(crate) async fn fetch_pyth_series(
                 continue;
             }
         };
+        if resp.status().as_u16() == 429 {
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            match client.get(&url).send().await {
+                Ok(r) => resp = r,
+                Err(e) => {
+                    errors.push(TimeseriesError {
+                        ticker: ticker.clone(),
+                        stage: Some("fetch".to_string()),
+                        message: format!("pyth fetch failed after 429 retry: {e}"),
+                    });
+                    continue;
+                }
+            }
+        }
 
         let status = resp.status();
         let body = match resp.text().await {

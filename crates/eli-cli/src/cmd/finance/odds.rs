@@ -11,6 +11,9 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
     }
+    if args.limit == Some(0) {
+        anyhow::bail!("--limit must be >= 1");
+    }
     let policy_mode = eli_core::finance::policy::parse_policy_mode(Some(&args.policy_mode))
         .map_err(|e| anyhow::anyhow!(e))
         .context("parse --policy-mode")?;
@@ -46,7 +49,7 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         || args.market.is_some();
 
     if has_search && !has_list_or_ticker {
-        let search_opts = CsvSearchOptions::from_cli(
+        let mut search_opts = CsvSearchOptions::from_cli(
             &args.sort_by,
             &args.profile,
             args.deltas_only,
@@ -55,6 +58,7 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
             resolved_policy.clone(),
             args.include_mentions,
         )?;
+        search_opts.min_volume_usd = args.min_volume;
 
         // Check if local caches exist (SQLite FTS5 preferred, CSV fallback).
         let cache_dir = directories::ProjectDirs::from("", "", "eli")
@@ -130,6 +134,14 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         .await;
     }
 
+    // Fail loud: the polymarket provider path ignores --market entirely and
+    // used to dump an unrelated 100-event listing (88KB of noise) instead.
+    if args.market.is_some() && matches!(provider.as_deref(), Some("polymarket")) {
+        anyhow::bail!(
+            "--market is not supported for --provider polymarket; use --search to find the market — its numeric id in markets[].ticker joins finance_timeseries directly"
+        );
+    }
+
     let req = eli_core::finance::OddsRequest {
         provider,
         disable_kalshi: false,
@@ -198,8 +210,10 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&enriched_resp).context("serialize response")?;
-    println!("{json}");
+    let mut payload = enriched_resp;
+    scrub_empty_odds_bookkeeping(&mut payload);
+    round_json_floats(&mut payload);
+    println!("{}", json_to_stdout_string(&payload)?);
     Ok(())
 }
 
@@ -271,8 +285,10 @@ fn emit_odds_response(
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&enriched_resp).context("serialize response")?;
-    println!("{json}");
+    let mut payload = enriched_resp;
+    scrub_empty_odds_bookkeeping(&mut payload);
+    round_json_floats(&mut payload);
+    println!("{}", json_to_stdout_string(&payload)?);
     Ok(())
 }
 
@@ -429,6 +445,10 @@ fn odds_search_stdout_preserves_ranked_order(resp: &serde_json::Value) -> bool {
 }
 
 fn odds_market_stdout_row(row: &serde_json::Value) -> serde_json::Value {
+    // Field diet, measured on live output: `yes_price` always equals
+    // `probability_yes` (same 0-1 scale), `volume` is exactly volume_usd*100,
+    // and `status` is always open/active because search filters on open.
+    // `ticker` is the join key for finance_timeseries; event_ticker is not.
     let mut out = serde_json::json!({
         "source": row.get("source").cloned().unwrap_or(serde_json::Value::Null),
         "ticker": row.get("ticker").cloned().unwrap_or(serde_json::Value::Null),
@@ -440,13 +460,28 @@ fn odds_market_stdout_row(row: &serde_json::Value) -> serde_json::Value {
             .map(serde_json::Value::String)
             .unwrap_or(serde_json::Value::Null),
         "probability_yes": odds_market_probability(row),
-        "yes_price": row.get("yes_price").and_then(json_to_f64),
         "yes_bid": row.get("yes_bid").and_then(json_to_f64),
         "yes_ask": row.get("yes_ask").and_then(json_to_f64),
-        "volume": odds_market_volume_cents(row),
         "volume_usd": odds_market_volume_usd(row),
-        "status": row.get("status").cloned().unwrap_or(serde_json::Value::Null),
     });
+    // Preserve yes_price only when it genuinely differs from probability_yes
+    // (defensive: some venue could quote them apart).
+    let prob = odds_market_probability(row);
+    let yes_price = row.get("yes_price").and_then(json_to_f64);
+    if let (Some(p), Some(yp)) = (prob, yes_price) {
+        if (p - yp).abs() > 1e-9 {
+            out["yes_price"] = serde_json::json!(yp);
+        }
+    } else if yes_price.is_some() && prob.is_none() {
+        out["yes_price"] = serde_json::json!(yes_price);
+    }
+    // Surface non-open statuses only (search filters open; repeating
+    // "active" per row is dead weight).
+    if let Some(status) = row.get("status").and_then(|v| v.as_str()) {
+        if !matches!(status.to_ascii_lowercase().as_str(), "open" | "active" | "initialized") {
+            out["status"] = serde_json::json!(status);
+        }
+    }
     // Attach compact change_since (prob_delta_pp + vol_delta + the absolute baseline timestamp)
     if let Some(delta) = row.get("change_since") {
         let mut compact = serde_json::Map::new();
@@ -462,11 +497,9 @@ fn odds_market_stdout_row(row: &serde_json::Value) -> serde_json::Value {
         if let Some(vd) = delta.get("volume_delta").and_then(|v| v.as_i64()) {
             compact.insert("vol_delta".to_string(), serde_json::json!(vd));
         }
-        if let Some(as_of) = delta.get("as_of") {
-            if !as_of.is_null() {
-                compact.insert("as_of".to_string(), as_of.clone());
-            }
-        }
+        // The baseline timestamp is identical for every row (one sync
+        // snapshot); it lives once in delta_context.baseline_as_of instead
+        // of being repeated per market.
         if !compact.is_empty() {
             out["change_since"] = serde_json::Value::Object(compact);
         }
@@ -475,7 +508,7 @@ fn odds_market_stdout_row(row: &serde_json::Value) -> serde_json::Value {
 }
 
 fn odds_event_stdout_row(row: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
+    let mut out = serde_json::json!({
         "source": row.get("source").cloned().unwrap_or(serde_json::Value::Null),
         "event_ticker": row
             .get("event_ticker")
@@ -488,8 +521,15 @@ fn odds_event_stdout_row(row: &serde_json::Value) -> serde_json::Value {
             .map(compact_odds_title)
             .map(serde_json::Value::String)
             .unwrap_or(serde_json::Value::Null),
-        "category": row.get("category").cloned().unwrap_or(serde_json::Value::Null),
-    })
+    });
+    // Polymarket never populates category — omit the null instead of
+    // repeating it on every event row.
+    if let Some(cat) = row.get("category") {
+        if !cat.is_null() {
+            out["category"] = cat.clone();
+        }
+    }
+    out
 }
 
 fn compact_odds_search_stdout_payload(resp: &serde_json::Value) -> serde_json::Value {
@@ -593,31 +633,70 @@ fn compact_odds_search_stdout_payload(resp: &serde_json::Value) -> serde_json::V
             let probability_fallback_used = interesting_total == 0 && !stdout_markets.is_empty();
             (stdout_markets, probability_fallback_used)
         };
-    let stdout_events: Vec<serde_json::Value> = events
-        .iter()
+    // Events whose title contains a query token as a whole word lead the
+    // truncated list (same discipline as markets; without it "warsh" put an
+    // unrelated mention-event first while Fed-succession events sat below
+    // the cut).
+    let query_tokens: Vec<String> = resp
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(|q| {
+            q.to_ascii_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|t| t.len() >= 3)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let event_word_hit = |row: &serde_json::Value| -> bool {
+        row.get("title")
+            .and_then(|v| v.as_str())
+            .map(|t| {
+                let lower = t.to_ascii_lowercase();
+                lower
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| query_tokens.iter().any(|q| q == w))
+            })
+            .unwrap_or(false)
+    };
+    let (event_hits, event_rest): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) =
+        events.iter().partition(|row| event_word_hit(row));
+    let stdout_events: Vec<serde_json::Value> = event_hits
+        .into_iter()
+        .chain(event_rest)
         .take(STDOUT_DEFAULT_EVENT_LIMIT)
         .map(odds_event_stdout_row)
         .collect();
 
-    obj.insert(
-        "stdout_compaction".to_string(),
-        serde_json::json!({
-            "enabled": true,
-            "interesting_probability_band": [
-                STDOUT_INTERESTING_MIN_PROBABILITY,
-                STDOUT_INTERESTING_MAX_PROBABILITY
-            ],
-            "interesting_markets_total": interesting_total,
-            "low_signal_markets_total": low_signal_total,
-            "events_total": events.len(),
-            "markets_total": markets.len(),
-            "markets_shown": stdout_markets.len(),
-            "events_shown": stdout_events.len(),
-            "fallback_used": probability_fallback_used,
-            "ranking_preserved": preserve_ranked_order,
-            "full_results_preserved_with_out": true,
-        }),
-    );
+    // Truncation is surfaced loudly only when it happened: how many rows
+    // were omitted and how to get them. When nothing was cut, the block is
+    // absent — a fixed 9-field bookkeeping blob on every call was dead
+    // weight, and diffing markets_total vs len(markets) to detect silent
+    // truncation was too subtle a contract for a machine reader.
+    let markets_omitted = markets.len().saturating_sub(stdout_markets.len());
+    let events_omitted = events.len().saturating_sub(stdout_events.len());
+    if markets_omitted > 0 || events_omitted > 0 || probability_fallback_used {
+        let mut compaction = serde_json::Map::new();
+        if markets_omitted > 0 {
+            compaction.insert("markets_omitted".to_string(), serde_json::json!(markets_omitted));
+        }
+        if events_omitted > 0 {
+            compaction.insert("events_omitted".to_string(), serde_json::json!(events_omitted));
+        }
+        if probability_fallback_used {
+            compaction.insert("fallback_used".to_string(), serde_json::json!(true));
+        }
+        compaction.insert(
+            "note".to_string(),
+            serde_json::json!("pass --out FILE for the full result set"),
+        );
+        obj.insert(
+            "stdout_compaction".to_string(),
+            serde_json::Value::Object(compaction),
+        );
+    } else {
+        obj.remove("stdout_compaction");
+    }
     obj.insert(
         "markets".to_string(),
         serde_json::Value::Array(stdout_markets),
@@ -629,6 +708,122 @@ fn compact_odds_search_stdout_payload(resp: &serde_json::Value) -> serde_json::V
         );
     }
     out
+}
+
+/// Display-order polish for the final live-search slice: markets whose title
+/// contains a query term as a WHOLE WORD rank ahead of substring-only hits
+/// ("warsh" → Kevin Warsh markets before Hormuz "warships" noise), and each
+/// group is volume-descending so the deepest market is scannable first
+/// (deep = information-rich, thin = one-trader opinion).
+fn order_live_markets_for_display(markets: &mut Vec<serde_json::Value>, query_terms: &[String]) {
+    let title_has_word = |m: &serde_json::Value, term: &str| -> bool {
+        m.get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == term)
+    };
+    let whole_word = |m: &serde_json::Value| -> bool {
+        query_terms.iter().any(|t| t.len() >= 3 && title_has_word(m, t))
+    };
+    let vol = |m: &serde_json::Value| odds_market_volume_usd(m);
+    let (mut word_hits, mut rest): (Vec<_>, Vec<_>) =
+        markets.drain(..).partition(|m| whole_word(m));
+    word_hits.sort_by(|a, b| vol(b).partial_cmp(&vol(a)).unwrap_or(std::cmp::Ordering::Equal));
+    rest.sort_by(|a, b| vol(b).partial_cmp(&vol(a)).unwrap_or(std::cmp::Ordering::Equal));
+    *markets = word_hits;
+    markets.extend(rest);
+}
+
+/// Round every JSON float in-place to 7 significant digits.
+/// Kills f32-upcast noise (747.4000244140625 → 747.4, 0.011000000000000001
+/// → 0.011) that costs output tokens and reads as false precision. Seven
+/// significant digits is at least the f32 mantissa every upstream price feed
+/// actually carries, so no real information is lost. Integral floats are
+/// emitted as integers (57447800.0 → 57447800).
+pub(crate) fn round_json_floats(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Number(n) => {
+            if n.is_f64() {
+                let Some(x) = n.as_f64() else { return };
+                if !x.is_finite() {
+                    return;
+                }
+                let rounded = round_to_sig_digits(x, 7);
+                if rounded.fract() == 0.0 && rounded.abs() < 9.007199254740992e15 {
+                    *value = serde_json::Value::Number(serde_json::Number::from(rounded as i64));
+                } else if let Some(num) = serde_json::Number::from_f64(rounded) {
+                    *value = serde_json::Value::Number(num);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(round_json_floats),
+        serde_json::Value::Object(map) => map.values_mut().for_each(round_json_floats),
+        _ => {}
+    }
+}
+
+fn round_to_sig_digits(x: f64, sig: i32) -> f64 {
+    if x == 0.0 {
+        return 0.0;
+    }
+    let mag = x.abs().log10().floor() as i32;
+    let k = sig - 1 - mag;
+    if k <= 0 {
+        // Integer part already carries >= sig digits — leave untouched.
+        return x;
+    }
+    let p = 10f64.powi(k);
+    (x * p).round() / p
+}
+
+/// Serialize a JSON payload for stdout: pretty for a human at a terminal,
+/// compact for pipes/agents (pretty indentation is ~25-30% pure whitespace).
+pub(crate) fn json_to_stdout_string(value: &serde_json::Value) -> Result<String> {
+    use std::io::IsTerminal;
+    let out = if std::io::stdout().is_terminal() {
+        serde_json::to_string_pretty(value).context("serialize response")?
+    } else {
+        serde_json::to_string(value).context("serialize response")?
+    };
+    // Feed the activity trail the exact response the caller saw, so the
+    // information basis of the call is archived, not just its metadata.
+    audit_set_payload(&out);
+    Ok(out)
+}
+
+/// Drop always-empty bookkeeping arrays that carry no information
+/// (`api_errors: []`, `decision_trace: []`, `match_terms: []`).
+fn scrub_empty_odds_bookkeeping(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    for key in ["api_errors", "decision_trace"] {
+        let is_empty = obj
+            .get(key)
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| a.is_empty());
+        if is_empty {
+            obj.remove(key);
+        }
+    }
+    for row in obj
+        .get_mut("markets")
+        .and_then(|v| v.as_array_mut())
+        .into_iter()
+        .flatten()
+    {
+        if let Some(m) = row.as_object_mut() {
+            let empty_terms = m
+                .get("match_terms")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| a.is_empty());
+            if empty_terms {
+                m.remove("match_terms");
+            }
+        }
+    }
 }
 
 fn emit_odds_search_response(
@@ -649,8 +844,15 @@ fn emit_odds_search_response(
         return Ok(());
     }
 
-    let compact = compact_odds_search_stdout_payload(resp);
-    let json = serde_json::to_string_pretty(&compact).context("serialize search results")?;
+    let mut compact = compact_odds_search_stdout_payload(resp);
+    scrub_empty_odds_bookkeeping(&mut compact);
+    round_json_floats(&mut compact);
+    let json = json_to_stdout_string(&compact)?;
+    audit_set_summary(serde_json::json!({
+        "markets": compact.get("markets").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        "events": compact.get("events").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        "bytes": json.len(),
+    }));
     println!("{json}");
     Ok(())
 }
@@ -674,17 +876,13 @@ fn load_sync_delta_lookup(cache_dir: &std::path::Path) -> Option<SyncDeltaLookup
         by_market.insert(sync_delta_key(&delta.source, &delta.ticker), delta);
     }
 
-    // Neutral, world-facing delta context: when the catalog snapshot was taken, the absolute
-    // timestamp the per-market deltas are measured against, and the span between them. No
-    // sync/cache/file-path plumbing, no internal counters, no catalog-wide mover blobs.
-    let baseline_age_seconds = parsed
-        .previous_sync_at
-        .map(|prev| (parsed.current_sync_at - prev).num_seconds());
+    // Neutral, world-facing delta context: when the catalog snapshot was taken
+    // and the absolute timestamp the per-market deltas are measured against.
+    // Both are absolute stamps — the reader derives age; no derived counters,
+    // no sync/cache plumbing, no catalog-wide mover blobs.
     let context = serde_json::json!({
-        "baseline_available": true,
         "catalog_as_of": parsed.current_sync_at,
         "baseline_as_of": parsed.previous_sync_at,
-        "baseline_age_seconds": baseline_age_seconds,
     });
     Some(SyncDeltaLookup { by_market, context })
 }
@@ -1113,6 +1311,9 @@ struct CsvSearchOptions {
     category_filter: Option<String>,
     policy: eli_core::finance::policy::ResolvedPolicy,
     include_mentions: bool,
+    /// Minimum market volume in USD. Applied in live paths post-hydration
+    /// (used to be a local-CSV-only filter that live search silently ignored).
+    min_volume_usd: Option<f64>,
 }
 
 impl CsvSearchOptions {
@@ -1143,6 +1344,7 @@ impl CsvSearchOptions {
             category_filter,
             policy,
             include_mentions,
+            min_volume_usd: None,
         })
     }
 
@@ -1377,22 +1579,34 @@ fn cmd_finance_odds_search_fts(
             let yes_price = r.yes_price.unwrap_or(0);
             let volume = r.volume.unwrap_or(0);
             let vol_usd = volume as f64 / 100.0;
-            // Derive probability from yes_price (cents) if not stored directly
+            // Derive probability from yes_price (cents) if not stored directly.
+            // Same field contract and 0-1 probability scale as the live path —
+            // the local path used to emit yes_price as integer cents, a silent
+            // 100x scale drift for any caller mixing --local and live calls.
             let probability = r.probability.unwrap_or_else(|| yes_price as f64 / 100.0);
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "source": r.source,
                 "ticker": r.ticker,
                 "title": r.title,
                 "event_ticker": r.event_ticker,
-                "yes_price": yes_price,
-                "volume": volume,
                 "volume_usd": vol_usd,
-                "status": r.status,
                 "probability_yes": probability,
-                "category": r.category,
                 "match_score": (-r.fts_rank * 100.0) as i64,
-                "match_terms": [],
-            })
+            });
+            if let Some(status) = r.status.as_deref() {
+                if !matches!(
+                    status.to_ascii_lowercase().as_str(),
+                    "open" | "active" | "initialized"
+                ) {
+                    row["status"] = serde_json::json!(status);
+                }
+            }
+            if let Some(cat) = &r.category {
+                if !cat.is_empty() {
+                    row["category"] = serde_json::json!(cat);
+                }
+            }
+            row
         })
         .collect();
     // Preserve search relevance in the raw response instead of re-sorting by price band.
@@ -1437,7 +1651,10 @@ fn cmd_finance_odds_search_fts(
         let wrapper = serde_json::json!({"ok": true, "path": path.to_string_lossy()});
         println!("{}", serde_json::to_string(&wrapper)?);
     } else {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        let mut payload = response;
+        scrub_empty_odds_bookkeeping(&mut payload);
+        round_json_floats(&mut payload);
+        println!("{}", json_to_stdout_string(&payload)?);
     }
 
     Ok(())
@@ -1571,6 +1788,22 @@ async fn cmd_finance_odds_search_live_fts(
     let db_path = eli_core::finance::odds_db::default_db_path();
     let fts_conn = eli_core::finance::odds_db::open_markets_db_readonly(&db_path)
         .ok_or_else(|| anyhow::anyhow!("markets.db not found — run `eli finance sync` first"))?;
+
+    // Stale-catalog guard: Kalshi discovery rides the local FTS index (live
+    // write-backs only refresh markets already known), so series created
+    // after the last full sync are invisible. Warn on stderr past 7 days.
+    if let Ok(Some(last_sync)) =
+        eli_core::finance::odds_db::get_sync_meta(&fts_conn, "last_sync_at")
+    {
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&last_sync) {
+            let age_days = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_days();
+            if age_days >= 7 {
+                eprintln!(
+                    "hint: odds catalog last synced {age_days}d ago ({last_sync}); Kalshi series created since then are invisible to search — run `eli finance sync` to refresh"
+                );
+            }
+        }
+    }
 
     let fts_filters = eli_core::finance::odds_db::SearchFilters {
         category: opts.category_filter.clone(),
@@ -1715,6 +1948,9 @@ async fn cmd_finance_odds_search_live_fts(
 
     // Dedup, sort, diversity select.
     live_markets.retain(|market| !is_dead_market(market));
+    if let Some(min_vol) = opts.min_volume_usd {
+        live_markets.retain(|market| odds_market_volume_usd(market) >= min_vol);
+    }
     sort_live_markets(&mut live_markets);
     let total_events_found = all_events.len();
     let total_markets_found = live_markets.len();
@@ -1725,6 +1961,7 @@ async fn cmd_finance_odds_search_live_fts(
     live_markets = select_diverse_live_markets(&ranked_live_markets, final_limit);
     // Ensure both sources represented if available.
     ensure_live_source_diversity(&mut live_markets, &ranked_live_markets, final_limit);
+    order_live_markets_for_display(&mut live_markets, &query_terms);
 
     // --orderbook: attach Polymarket book depth to the limited slice the user
     // sees (cheaper than running it across every ranked candidate).
@@ -1746,6 +1983,10 @@ async fn cmd_finance_odds_search_live_fts(
     let _ = (&started, &fts_ms, &fts_results, &kalshi_series_vec, &decision_trace);
     let resp = serde_json::json!({
         "schema_version": "finance.odds.search_live_fts.v1",
+        // Marks ranked output: the stdout compactor preserves this order
+        // instead of re-sorting by probability band (this key was missing,
+        // so live ranking was silently discarded on every stdout response).
+        "source": "fts5_live",
         "query": query,
         "generated_at": generated_at,
         "freshness_summary": odds_search_freshness_summary(generated_at, &live_markets),
@@ -2492,6 +2733,40 @@ fn live_query_kalshi_series_hints(query_terms: &[String]) -> Vec<String> {
 
     if has_any(&["oil", "crude", "wti", "brent"]) {
         for series in ["KXWTI", "KXWTIW", "KXBARRELS"] {
+            push_hint(series);
+        }
+    }
+
+    // Crypto and gas ladders: Kalshi titles say "BTC"/"ETH"/price thresholds,
+    // not "bitcoin"/"ethereum"/"natural gas", so a stale FTS catalog finds
+    // nothing and the whole venue silently vanishes for these topics.
+    if has_any(&["bitcoin", "btc", "crypto"]) {
+        for series in ["KXBTC", "KXBTCD", "KXBTCMAXY", "KXBTCVSGOLD", "KXBTCRESERVES"] {
+            push_hint(series);
+        }
+    }
+    if has_any(&["ethereum", "eth"]) {
+        for series in ["KXETH", "KXETHD", "KXETHMAXY"] {
+            push_hint(series);
+        }
+    }
+    if has_any(&["gas", "natgas", "lng"]) {
+        for series in ["KXNGASMAX", "KXNGASMIN", "KXNATGASD"] {
+            push_hint(series);
+        }
+    }
+    if has_any(&["gold", "silver"]) {
+        for series in ["KXGOLD", "KXGOLDMAXY", "KXSILVER"] {
+            push_hint(series);
+        }
+    }
+    if has_any(&["cpi", "inflation"]) {
+        for series in ["KXCPI", "KXCPIYOY", "KXCPICORE"] {
+            push_hint(series);
+        }
+    }
+    if has_any(&["jobs", "payroll", "payrolls", "unemployment", "nfp"]) {
+        for series in ["KXPAYROLLS", "KXU3", "KXJOBLESS"] {
             push_hint(series);
         }
     }
@@ -4513,6 +4788,9 @@ async fn cmd_finance_odds_search_live_no_csv(
     });
 
     live_markets.retain(|market| !is_dead_market(market));
+    if let Some(min_vol) = opts.min_volume_usd {
+        live_markets.retain(|market| odds_market_volume_usd(market) >= min_vol);
+    }
     sort_live_markets(&mut live_markets);
     let total_events_found = all_events.len();
     let total_markets_found = live_markets.len();
@@ -4522,6 +4800,7 @@ async fn cmd_finance_odds_search_live_no_csv(
     all_events.truncate(final_limit.max(8));
     live_markets = select_diverse_live_markets(&ranked_live_markets, final_limit);
     ensure_live_source_diversity(&mut live_markets, &ranked_live_markets, final_limit);
+    order_live_markets_for_display(&mut live_markets, &query_terms);
 
     // --orderbook: same as the FTS path — only attach to the slice the user sees.
     if let Some(depth) = orderbook_depth {
@@ -4535,6 +4814,7 @@ async fn cmd_finance_odds_search_live_no_csv(
 
     let resp = serde_json::json!({
         "schema_version": "finance.odds.search_live.v3",
+        "source": "live_api",
         "query": query,
         "generated_at": generated_at,
         "freshness_summary": odds_search_freshness_summary(generated_at, &live_markets),
@@ -4687,7 +4967,7 @@ fn cmd_finance_odds_where(args: FinanceOddsWhereArgs) -> Result<()> {
         },
     };
 
-    println!("{}", serde_json::to_string_pretty(&resp)?);
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -5092,7 +5372,8 @@ mod odds_live_tests {
         let markets = compact["markets"].as_array().expect("markets array");
         assert_eq!(markets[0]["ticker"], "TOP");
         assert_eq!(markets[1]["ticker"], "SECOND");
-        assert_eq!(compact["stdout_compaction"]["ranking_preserved"], true);
+        // Nothing was truncated, so the compaction block is absent entirely.
+        assert!(compact.get("stdout_compaction").is_none());
     }
 
     #[test]
@@ -5117,8 +5398,10 @@ mod odds_live_tests {
 
         let compact = compact_odds_search_stdout_payload(&resp);
         let market = &compact["markets"].as_array().expect("markets array")[0];
-        assert_eq!(market["volume"], 82065200);
+        // volume_usd survives; the cents-scale `volume` twin (always exactly
+        // volume_usd * 100) is dropped from stdout rows as dead weight.
         assert_eq!(market["volume_usd"], 820652.0);
+        assert!(market.get("volume").is_none());
     }
 
     #[test]
@@ -5423,4 +5706,14 @@ mod odds_live_tests {
 
         assert_eq!(tickers, vec!["kalshi-direct", "poly-direct"]);
     }
+}
+
+/// Generic payload-capturing print for tools without a bespoke output
+/// funnel: serializes (pretty on TTY, compact piped) and feeds the activity
+/// trail the exact response the caller saw. No field transforms.
+pub(crate) fn emit_tool_payload<T: serde::Serialize>(value: &T) -> Result<()> {
+    let mut v = serde_json::to_value(value).context("serialize response")?;
+    round_json_floats(&mut v);
+    println!("{}", json_to_stdout_string(&v)?);
+    Ok(())
 }

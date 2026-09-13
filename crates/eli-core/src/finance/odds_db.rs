@@ -208,23 +208,50 @@ pub fn prune_stale_markets(conn: &Connection, cutoff: &str) -> Result<usize, Str
     Ok(deleted)
 }
 
-fn tokenize_fts_query(raw: &str) -> Vec<&str> {
-    raw.split_whitespace().filter(|t| !t.is_empty()).collect()
+/// Split raw input into FTS-safe tokens on any non-alphanumeric boundary.
+/// This mirrors how the unicode61 tokenizer indexed the catalog, so tickers
+/// like `KXFEDDECISION-26JUL` become the token sequence ["KXFEDDECISION",
+/// "26JUL"] instead of one token whose `-`/`.`/`:` FTS5 parses as syntax
+/// (which used to error to stderr and silently return zero rows).
+fn tokenize_fts_query(raw: &str) -> Vec<String> {
+    raw.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
-/// Build a strict phrase query for multi-word search terms.
+/// Build a strict phrase query for multi-token search terms.
+/// Every token is emitted inside one quoted phrase, so no user input can
+/// reach FTS5 as bare syntax.
 fn build_phrase_fts_query(raw: &str) -> Option<String> {
     let tokens = tokenize_fts_query(raw);
     if tokens.len() < 2 {
         return None;
     }
-    Some(format!("\"{}\"", tokens.join(" ").replace('"', " ")))
+    Some(format!("\"{}\"", tokens.join(" ")))
+}
+
+/// Build an exact whole-word query: every token quoted, AND-joined.
+/// "warsh" matches the token `warsh` (Kevin Warsh) but NOT `warships`,
+/// which the prefix query would sweep in. Runs before the prefix query so
+/// exact-word hits rank ahead of prefix-expansion noise.
+fn build_exact_fts_query(raw: &str) -> String {
+    let tokens = tokenize_fts_query(raw);
+    if tokens.is_empty() {
+        return String::new();
+    }
+    tokens
+        .iter()
+        .map(|t| format!("\"{}\"", t))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 /// Build a broad fallback FTS5 query from user input.
-/// "federal reserve" → "federal AND reserve"
-/// "recession" → "recession"
-/// Short terms (≤2 chars) are quoted to avoid FTS5 treating them as operators.
+/// "federal reserve" → "\"federal\" AND \"reserve\"*"
+/// "recession" → "\"recession\"*"
+/// Every token is quoted (never bare) so punctuation can't break the query;
+/// prefix `*` after a quoted string is valid FTS5 syntax.
 fn build_fts_query(raw: &str) -> String {
     let tokens = tokenize_fts_query(raw);
     if tokens.is_empty() {
@@ -232,11 +259,11 @@ fn build_fts_query(raw: &str) -> String {
     }
     if tokens.len() == 1 {
         // Single term: use prefix matching with *
-        let t = tokens[0];
+        let t = &tokens[0];
         if t.len() <= 2 {
             return format!("\"{}\"", t);
         }
-        return format!("{}*", t);
+        return format!("\"{}\"*", t);
     }
     // Multiple terms: AND them together, prefix on the final term.
     tokens
@@ -246,9 +273,9 @@ fn build_fts_query(raw: &str) -> String {
             if t.len() <= 2 {
                 format!("\"{}\"", t)
             } else if i == tokens.len() - 1 {
-                format!("{}*", t)
+                format!("\"{}\"*", t)
             } else {
-                t.to_string()
+                format!("\"{}\"", t)
             }
         })
         .collect::<Vec<_>>()
@@ -262,17 +289,27 @@ pub fn search_markets(
     limit: usize,
     filters: &SearchFilters,
 ) -> Result<Vec<MarketRow>, String> {
+    // Query ladder, strictest first: exact phrase → exact whole words →
+    // prefix broadening. Results accumulate across rungs (deduped), so
+    // exact-word hits ("warsh" = Kevin Warsh) rank ahead of prefix noise
+    // ("warsh*" = warships) instead of being crowded out by it.
     let mut fts_queries = Vec::new();
     if let Some(phrase) = build_phrase_fts_query(query) {
         fts_queries.push(phrase);
     }
+    let exact_query = build_exact_fts_query(query);
+    if !exact_query.is_empty() && !fts_queries.contains(&exact_query) {
+        fts_queries.push(exact_query);
+    }
     let fallback_query = build_fts_query(query);
-    if !fallback_query.is_empty() {
+    if !fallback_query.is_empty() && !fts_queries.contains(&fallback_query) {
         fts_queries.push(fallback_query);
     }
     if fts_queries.is_empty() {
         return Ok(Vec::new());
     }
+    let mut merged: Vec<MarketRow> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for fts_query in fts_queries {
         let mut conditions = Vec::new();
         let mut run_bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -358,18 +395,23 @@ pub fn search_markets(
             })
             .map_err(|e| format!("query: {e}"))?;
 
-        let mut results = Vec::new();
         for row in rows {
             match row {
-                Ok(r) => results.push(r),
+                Ok(r) => {
+                    let key = (r.source.clone(), r.ticker.clone());
+                    if seen.insert(key) {
+                        merged.push(r);
+                    }
+                }
                 Err(e) => eprintln!("[odds_db] row error: {e}"),
             }
         }
-        if !results.is_empty() {
-            return Ok(results);
+        if merged.len() >= limit {
+            break;
         }
     }
-    Ok(Vec::new())
+    merged.truncate(limit);
+    Ok(merged)
 }
 
 /// Get distinct event tickers from search results (for hydration grouping).
@@ -424,11 +466,11 @@ pub fn market_count_by_source(conn: &Connection, source: &str) -> Result<usize, 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_fts_query, build_phrase_fts_query};
+    use super::{build_exact_fts_query, build_fts_query, build_phrase_fts_query};
 
     #[test]
     fn build_fts_query_uses_prefix_for_single_term() {
-        assert_eq!(build_fts_query("recession"), "recession*");
+        assert_eq!(build_fts_query("recession"), "\"recession\"*");
     }
 
     #[test]
@@ -437,5 +479,52 @@ mod tests {
             build_phrase_fts_query("march madness"),
             Some("\"march madness\"".to_string())
         );
+    }
+
+    #[test]
+    fn punctuated_ticker_round_trips_without_fts_syntax() {
+        // Tickers the tool itself emits must be searchable verbatim.
+        assert_eq!(
+            build_phrase_fts_query("KXFEDDECISION-26JUL"),
+            Some("\"KXFEDDECISION 26JUL\"".to_string())
+        );
+        assert_eq!(build_fts_query("fed.rate"), "\"fed\" AND \"rate\"*");
+        assert_eq!(build_exact_fts_query("fed:rate"), "\"fed\" AND \"rate\"");
+    }
+
+    #[test]
+    fn exact_query_is_whole_word() {
+        assert_eq!(build_exact_fts_query("warsh"), "\"warsh\"");
+    }
+
+    #[test]
+    fn fts_metachars_never_escape_quoting() {
+        for raw in [
+            "'; DROP TABLE markets--",
+            ".*+?[^]$(){}|\\",
+            "fed(rate)",
+            "a-b_c.d:e/f@g",
+        ] {
+            for q in [
+                build_exact_fts_query(raw),
+                build_fts_query(raw),
+                build_phrase_fts_query(raw).unwrap_or_default(),
+            ] {
+                // Every alphanumeric run must be inside double quotes; the only
+                // bare chars allowed are the FTS operators we emit ourselves.
+                let stripped: String = q
+                    .split('"')
+                    .enumerate()
+                    .filter(|(i, _)| i % 2 == 0)
+                    .map(|(_, s)| s)
+                    .collect();
+                for ch in stripped.chars() {
+                    assert!(
+                        ch.is_whitespace() || ch == '*' || ch.is_ascii_alphabetic(),
+                        "unquoted char {ch:?} leaked into FTS query {q:?} from {raw:?}"
+                    );
+                }
+            }
+        }
     }
 }

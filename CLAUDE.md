@@ -151,10 +151,9 @@ If they want Market Search in claude.ai web or ChatGPT, ask:
 >    Google/GitHub/email signup at ngrok.com. Still only live while the
 >    process runs.
 >
-> (A third 'self-host' mode where TLS keys live on the user's laptop
-> and a VPS gateway only routes encrypted bytes is described in
-> SELFHOST.md, but it's a design spec — not implemented yet. Don't
-> offer it as a setup option.)"
+> (Or self-host: the server is stateless, so on a machine you control
+> you can run `market-search mcp --http` behind your own TLS instead of
+> a tunnel. SELFHOST.md has the recipe.)"
 
 ### If they pick option 1 (temporary):
 
@@ -233,18 +232,22 @@ later."
 
 Have them paste the URL into claude.ai or ChatGPT as described above.
 
-### Self-host (NOT a setup option):
+### Self-host (their own server, no tunnel):
 
-If the user asks about it, explain: "Self-host is a design spec, not
-runnable code yet. SELFHOST.md describes a future architecture where
-your laptop holds the TLS private keys and a VPS gateway only routes
-encrypted bytes (so even a compromised gateway can't decrypt your MCP
-traffic). It requires gateway code that doesn't exist in this build.
-For sensitive work today, use `market-search mcp` over stdio locally —
-no public URL means no public attack surface."
+If the user has a machine with a public hostname and wants no third-party
+tunnel, point them at SELFHOST.md. The short version: the MCP server is
+stateless, so it is one command behind their own TLS/reverse proxy:
 
-If they want to contribute, point them at SELFHOST.md and the GitHub
-repo issues.
+```bash
+MARKET_SEARCH_MCP_TOKEN=<secret> market-search mcp --http --host 127.0.0.1 --port 8484
+```
+
+Run `market-search mcp --check` first; it names which optional env vars
+(`EIA_API_KEY`, `ELI_SEC_USER_AGENT`, `FRED_API_KEY`, `IBKR_*`) unlock
+which tools. Two caveats to say out loud: a token-protected server does
+not work with the claude.ai web connector (only with clients that can
+send an `Authorization` header), and the "sovereign" laptop-holds-the-
+TLS-key gateway in SELFHOST.md is a design, not built.
 
 ## Step 5 — Verify end-to-end
 

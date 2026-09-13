@@ -214,6 +214,7 @@ async fn cmd_finance_curve(args: FinanceCurveArgs) -> Result<()> {
                     .unwrap_or_else(|_| "\"\"".to_string())
             );
         } else {
+            audit_set_payload(&pretty);
             println!("{}", pretty);
         }
         return Ok(());
@@ -427,9 +428,7 @@ async fn cmd_finance_curve(args: FinanceCurveArgs) -> Result<()> {
                 .unwrap_or_else(|_| "\"\"".to_string()),
         );
     } else {
-        let json =
-            serde_json::to_string_pretty(&response).context("serialize curve response")?;
-        println!("{json}");
+        emit_tool_payload(&response)?;
     }
 
     } // end for loop over queries

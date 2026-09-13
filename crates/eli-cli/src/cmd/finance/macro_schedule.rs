@@ -128,6 +128,7 @@ async fn cmd_finance_schedule(args: FinanceScheduleArgs) -> Result<()> {
         return Ok(());
     }
 
+    audit_set_payload(&json);
     println!("{json}");
     Ok(())
 }
@@ -185,8 +186,7 @@ async fn cmd_finance_rate_path(args: FinanceRatePathArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -221,8 +221,7 @@ async fn cmd_finance_auctions(args: FinanceAuctionsArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -277,6 +276,7 @@ pub(crate) async fn cmd_finance_cot(args: FinanceCotArgs) -> Result<()> {
         return Ok(());
     }
 
+    audit_set_payload(&json);
     println!("{json}");
     Ok(())
 }

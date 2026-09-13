@@ -110,14 +110,27 @@ pub async fn fetch_timeseries(
         let valid_tickers: Vec<String> = series.iter().map(|s| s.ticker.clone()).collect();
         // Partial failure: return whatever series succeeded alongside the errors.
         let (status, error_info) = if series.is_empty() {
+            // Derive the hint from what actually failed — a static weekend
+            // hint pasted onto a range-cap or rate-limit error actively
+            // misleads a caller trying to self-correct.
+            let all_messages = errors
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let hint = if all_messages.contains("days") && (all_messages.contains("granularity") || all_messages.contains("bars")) {
+                "Provider history cap hit for this granularity — the per-ticker error names the limit; use a coarser granularity or shorter range.".to_string()
+            } else if all_messages.contains("429") {
+                "Upstream rate limit (429) — retry in a few seconds or reduce parallel calls.".to_string()
+            } else {
+                "All requested tickers must be valid for this provider. An empty result is also expected when a short intraday window (e.g. range=1d with 15m/1h granularity) falls entirely on a weekend or US market holiday — widen to range=5d or use granularity=1d to capture the last trading session.".to_string()
+            };
             (
                 "error".to_string(),
                 Some(ToolErrorInfo {
                     error: "TickerFetchFailed".to_string(),
                     message: "All tickers failed to fetch timeseries data.".to_string(),
-                    hint: Some(
-                        "All requested tickers must be valid for this provider. An empty result is also expected when a short intraday window (e.g. range=1d with 15m/1h granularity) falls entirely on a weekend or US market holiday — widen to range=5d or use granularity=1d to capture the last trading session.".to_string(),
-                    ),
+                    hint: Some(hint),
                     debug: None,
                 }),
             )
@@ -199,12 +212,16 @@ pub async fn fetch_timeseries(
 }
 
 /// Floor a timestamp to the nearest granularity bucket boundary.
-/// Caps bucket size at 1 day so weekly/monthly granularity still hits the cache
-/// once per day rather than once per week/month (which would be too coarse for
-/// freshness).
+/// Caps bucket size at 1 hour so daily/weekly/monthly granularity still hits
+/// the cache within the hour while never excluding the current partial day.
 fn floor_to_bucket(dt: DateTime<Utc>, granularity: Span) -> DateTime<Utc> {
     let raw_secs = granularity.approx_duration().num_seconds();
-    let bucket_secs = raw_secs.clamp(60, 86400);
+    // Cap the bucket at 1 HOUR (not 1 day): flooring a daily request's end
+    // to midnight UTC cut the CURRENT day's bar out of every daily pull for
+    // the whole session — a +6.7% TSLA day was invisible to `--range 5d
+    // --granularity 1d` until midnight. Hourly buckets keep the cache warm
+    // within the hour while always including today.
+    let bucket_secs = raw_secs.clamp(60, 3600);
     let ts = dt.timestamp();
     let floored = (ts / bucket_secs) * bucket_secs;
     DateTime::from_timestamp(floored, 0).unwrap_or(dt)

@@ -1,266 +1,306 @@
-# Market Search — Sovereign Self-Host
+# Self-hosting market-search
 
-Sovereign architecture for organizations that cannot accept third-party tunnel
-providers (ngrok, Cloudflare, tunnelmole) in the TLS trust chain. Designed for
-hedge funds, family offices, RIAs, treasury desks, and any firm running
-compliance-bound research on Market Search.
+The MCP server is stateless, so self-hosting it means running one binary.
+There's no session store, no database server, and no shared mutable state, so
+you don't need sticky routing either.
 
-The defining property: **third-party tunnel providers cannot decrypt MCP
-traffic** because TLS terminates on the user's laptop, not at any provider's
-edge. The gateway VPS sees only encrypted bytes plus SNI hostname / source
-IP / byte counts.
+- **No sessions.** Every `tools/call` runs as a fresh subprocess of the same
+  binary. Nothing carries over from one request to the next. Over HTTP, the
+  `Mcp-Session-Id` header just echoes back whatever the client sent, because
+  some clients need one to be present. Any replica can answer any request.
+- **No external services.** Everything the tools use is a public HTTP API
+  (Yahoo, Kalshi, Polymarket, FRED, SEC, Treasury, the central banks, ...).
+  The odds search index is an embedded SQLite file (compiled in, nothing to
+  install), and it builds itself on first use.
+- **Disk is cache only.** The binary writes rebuildable caches and an optional
+  activity log under your user profile (see [Disk](#disk)). You can delete all
+  of it at any time.
 
-This document is the architecture and engagement scope. **Eli Terminal
-deploys it in your environment as a paid implementation.** Everything stays
-inside your perimeter — your VPS, your domain, your DNS, your laptops, your
-TLS keys. Eli Terminal's role is implementing the architecture correctly so
-its security properties are actually realized in your specific stack.
+Clone to working server:
 
-For scoping: **efoltyn@eliterminal.com**
-
----
-
-## Tunnel modes
-
-| Mode | Command | Who can decrypt MCP traffic? | Provisioning |
-|---|---|---|---|
-| Local stdio MCP | `market-search mcp` | No public network path — nobody but you | Self-serve, OSS binary |
-| Cloudflare quick tunnel | `market-search mcp share --provider cloudflare` | Cloudflare terminates public TLS | Self-serve, OSS binary |
-| Tunnelmole | `market-search mcp share --provider tunnelmole` | Tunnelmole terminates public TLS | Self-serve, OSS binary |
-| Ngrok with reserved subdomain | `market-search mcp share --provider ngrok --domain ...` | Ngrok terminates public TLS | Self-serve, OSS binary |
-| **Sovereign self-host** | (custom deployment in your environment) | **TLS terminates on your laptop — gateway sees encrypted bytes only** | **Per-engagement implementation by Eli Terminal** |
-
-The first four modes are appropriate for individual users running public-data
-research. They ship in the open-source binary on crates.io as
-`cargo install market-search`.
-
-The fifth mode — sovereign self-host — is the architecture this document
-describes. It requires gateway code, domain configuration, certificate
-lifecycle setup, and per-environment hardening that Eli Terminal handles per
-engagement.
-
----
-
-## Why self-host
-
-Even with ngrok or Cloudflare, your MCP traffic flows through their edge.
-They terminate TLS, which means they could in principle observe the contents
-of your queries and tool responses, comply with subpoenas against that data,
-or be compromised in a way that exposes it.
-
-For individual users running public-data research, that's an acceptable
-trade-off. Market Search pulls public market data; the privacy story is
-"hopeful disclosure of finance queries," not "sensitive personal data
-leaking."
-
-For firms running proprietary research, internal watchlists, or any work
-where the security team will not sign off on a third-party tunnel provider
-in the TLS trust chain, sovereign self-host is the architecture that
-satisfies both the technical and compliance requirements.
-
----
-
-## Architecture
-
-```
-                  Claude / ChatGPT / any HTTPS MCP client
-                           │
-                           │  https://device.mcp.yourdomain.com/c-<secret>/mcp
-                           ▼
-        ┌──────────────────────────────────────────────┐
-        │  Gateway on YOUR VPS                         │
-        │                                              │
-        │  - TCP :443 listener                         │
-        │  - Reads TLS ClientHello                     │
-        │  - Routes by SNI to the right tunnel         │
-        │  - Forwards raw encrypted bytes              │
-        │  - Does NOT terminate TLS                    │
-        │  - Does NOT parse HTTP                       │
-        │  - Does NOT hold per-device TLS keys         │
-        └──────────────────────────────────────────────┘
-                           │
-                           │  QUIC tunnel (long-lived outbound from laptop)
-                           ▼
-        ┌──────────────────────────────────────────────┐
-        │  Market Search on YOUR LAPTOP                │
-        │                                              │
-        │  - TLS terminates here (rustls)              │
-        │  - TLS private key generated locally,        │
-        │    never leaves this machine                 │
-        │  - rustls-acme issues cert via TLS-ALPN-01   │
-        │    (challenge traverses the SNI passthrough) │
-        │  - Validates /c-<secret>/mcp path            │
-        │  - Runs the MCP server                       │
-        └──────────────────────────────────────────────┘
+```bash
+git clone https://github.com/efoltyn/market-search.git && cd market-search
+cargo build --release --bin market-search
+./target/release/market-search mcp --check
 ```
 
-Operational cost (yours): ~$5/mo for a VPS (e.g. Hetzner CAX11) + ~$10/yr
-for a domain. Software is AGPL-3.0.
-
-Implementation cost (Eli Terminal): scoped per engagement. Email
-**efoltyn@eliterminal.com** for a quote.
-
 ---
 
-## Threat model
+## Quickstart
 
-### What the gateway CAN see
-- The SNI hostname of incoming TLS connections (e.g. `device.mcp.yourdomain.com`)
-- TCP timing and byte counts
-- Source IP of the client
+### 1. Build
 
-### What the gateway CANNOT see
-- TLS-encrypted MCP request bodies (JSON-RPC method names, tool inputs)
-- Tool responses (current quotes, options chains, time series data, etc.)
-- The path component of the request (`/c-<secret>/mcp`) — that's inside
-  the encrypted TLS session, only the laptop sees it
-- The TLS private key for the device hostname — generated and stored on
-  the laptop, never transmitted
+You need a Rust toolchain from [rustup.rs](https://rustup.rs). On Debian/Ubuntu,
+also install `build-essential pkg-config libssl-dev`. macOS needs only the
+Xcode command line tools.
 
-### Active certificate replacement attack
-A compromised gateway operator could in principle try to obtain a fresh
-certificate for `device.mcp.yourdomain.com` and start MITMing future
-connections.
-
-**Basic mitigation**: detection. Certificate Transparency logs publish every
-issued cert publicly; a `cert-watcher` script can alert you within seconds.
-
-**Compliance-locked mitigation**: prevention via CAA account binding. Add a
-CAA record:
-
-```
-device.mcp.yourdomain.com.  CAA  0 issue "letsencrypt.org;accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/<your-laptop-acct-id>;validationmethods=tls-alpn-01"
-device.mcp.yourdomain.com.  CAA  0 issuewild ";"
+```bash
+cargo build --release --bin market-search      # binary: target/release/market-search
 ```
 
-This restricts cert issuance to your laptop-held ACME account using
-TLS-ALPN-01 specifically. Even if the VPS is fully compromised, the
-attacker cannot issue a replacement cert without also having the
-laptop-side ACME account key.
+The release profile uses full LTO with one codegen unit, so the first build
+is slow: 28 minutes on an Apple Silicon laptop from a clean clone. A debug
+build (`cargo build --bin market-search`, binary in `target/debug/`) finishes
+in about 10 minutes and serves the same tools.
 
-This is the kill shot for the active-MITM threat. Adds ~5 minutes of
-one-time DNS configuration per device.
+No Rust? Use the prebuilt binaries on the
+[releases page](https://github.com/efoltyn/market-search/releases/latest) instead.
 
----
+### 2. See what your machine can serve
 
-## Engagement phases
+```bash
+market-search mcp --check
+```
 
-A typical Eli Terminal in-house implementation runs across these stages.
-Total elapsed time is usually 4-6 weeks depending on your environment's
-DNS provider, change-management process, and security review cycle.
+With no configuration at all, you get:
 
-### Phase 0 — Architecture review + frp prototype (~1 week)
+```
+market-search 0.3.0 mcp --check
+  stateless: no session store; every tool call runs as an isolated subprocess
+  off   finance_eia: EIA_API_KEY not set (free key: https://www.eia.gov/opendata/register.php)
+  off   finance_filings, finance_insider: ELI_SEC_USER_AGENT not set (SEC EDGAR requires a contact, e.g. "Jane Doe jane@example.com"; no signup)
+  basic FRED_API_KEY not set: FRED data still works keyless; finance_search uses its built-in FRED catalog
+  opt   IBKR not configured: IBKR:* tickers unavailable; all other tools use free sources
+  disk  activity trail + response archive at ~/.../eli/logs/activity.jsonl (grows unbounded; ELI_AUDIT_LOG=0 disables)
+```
 
-- Architecture review against your security policies
-- Threat-model walkthrough with your security team
-- Hetzner / your-cloud VPS provisioning
-- Wildcard DNS `*.mcp.yourdomain.com` → VPS, configured in your DNS provider
-- frp on the VPS doing HTTPS subdomain routing (used as scaffolding)
-- Local Rust HTTPS server using `rustls-acme` against Let's Encrypt
-  staging, then production
-- Acceptance test: a designated laptop connects from outside your network to
-  `https://d-test.mcp.yourdomain.com/c-test/mcp`, MCP request roundtrips,
-  no TLS key on VPS, real Let's Encrypt production cert in the browser
+Every tool not listed there works as is. The server prints the same report
+to stderr when it starts.
 
-### Phase 1 — Custom gateway deployment (~2 weeks)
+### 3a. Local use (stdio): Claude Code, Claude Desktop, Cursor, Codex
 
-Replace the frp scaffolding with the proper sovereign gateway:
+```bash
+claude mcp add market-search -- market-search mcp
+```
 
-- TCP :443 listener with TLS ClientHello parser
-- SNI extraction → routing table → raw byte forwarding via QUIC
-- Long-lived QUIC server using `quinn` for laptop tunnels
-- Device enrollment via one-time tokens, Ed25519 public key storage
-- Active session map, signed-nonce reauth on reconnect
-- Confirmed: gateway never terminates TLS, never parses HTTP, never holds
-  per-device TLS keys
+Any other client takes the same two fields: `command: market-search`,
+`args: ["mcp"]`. Stdio has no network surface, so it needs no auth.
 
-### Phase 2 — Service install + state management (~1 week)
+### 3b. Serve over HTTP for other machines
 
-- Laptop-side service install (launchd on macOS, systemd `--user` on Linux,
-  Windows Service on Windows)
-- VPS-side gateway service install with auto-restart
-- State file (`~/.eli/tunnel/state.json`) backup/restore tooling for
-  laptop replacement / device migration
-- ARI-aware ACME renewal (cert lifecycle automated)
-- End-to-end diagnostic command for your IT support
+```bash
+export MARKET_SEARCH_MCP_TOKEN="$(openssl rand -hex 32)"
+market-search mcp --http --host 127.0.0.1 --port 8484
+```
 
-### Phase 3 — Documentation for your security team (~1 week)
+Then put TLS in front and point clients at `https://<your-host>/mcp`. A
+minimal [Caddy](https://caddyserver.com) config:
 
-- Threat-model writeup with assumptions explicit and tied to your environment
-- CAA-locked tier walkthrough with the exact DNS records for your domain
-- Compliance one-pager your security team can hand to legal
-- Operational runbook for your IT / DevOps team
-- Optional: demo video showing the architecture for internal training
-
----
-
-## State file (laptop)
-
-Each laptop running sovereign mode persists its identity in a state file
-under the user's profile (`~/.eli/tunnel/state.json` or platform equivalent):
-
-```json
-{
-  "version": 1,
-  "mode": "sovereign",
-  "gateway_domain": "mcp.yourdomain.com",
-  "device_id": "d-7m4k2p9q8v6x",
-  "device_public_key": "...",
-  "device_private_key_ref": "os-keychain:eli-tunnel-device",
-  "capability_secret_ref": "os-keychain:eli-tunnel-capability",
-  "tls_private_key_path": "~/.eli/tunnel/tls.key",
-  "cert_chain_path": "~/.eli/tunnel/fullchain.pem",
-  "acme_account_key_path": "~/.eli/tunnel/acme-account.key",
-  "acme_account_uri": "https://acme-v02.api.letsencrypt.org/acme/acct/...",
-  "created_at": "...",
-  "last_successful_renewal": "..."
+```
+mcp.example.com {
+    reverse_proxy 127.0.0.1:8484
 }
 ```
 
-The permanent URL is stable as long as this file (and the corresponding
-keychain entries) survive. Backup/restore tooling is included in Phase 2 to
-make device migration a one-command operation — critical for laptop
-replacement cycles or staff turnover.
+A client that can send headers connects with
+`Authorization: Bearer $MARKET_SEARCH_MCP_TOKEN`. For Claude Code:
+
+```bash
+claude mcp add --transport http market-search https://mcp.example.com/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+Endpoints: `POST /mcp` (JSON-RPC, token-gated when a token is set), `GET /`
+(health check, always open, reports nothing about your config).
 
 ---
 
-## Engaging Eli Terminal
+## Environment variables
 
-If your firm needs sovereign self-host deployed in your environment, the
-fastest path is:
+Every variable is optional.
 
-**Email: efoltyn@eliterminal.com**
+| Variable | What it unlocks | Without it |
+|---|---|---|
+| `EIA_API_KEY` | `finance_eia` (US crude, gasoline, distillate, natgas storage). Free key: [eia.gov/opendata/register.php](https://www.eia.gov/opendata/register.php) | `finance_eia` returns an error naming this variable |
+| `ELI_SEC_USER_AGENT` | `finance_filings`, `finance_insider`. SEC EDGAR has no key or signup, but it rejects requests without a contact User-Agent, e.g. `"Jane Doe jane@example.com"` | Both tools return an error naming this variable |
+| `FRED_API_KEY` | Live search across FRED's full series catalog in `finance_search`, and the FRED release calendar in `finance_schedule` | FRED **data** still works (`finance_timeseries --tickers DGS10,UNRATE`). Search falls back to a built-in catalog of common series. |
+| `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `IBKR_ACCOUNT`, `IBKR_MARKET_DATA_TYPE`, `IBKR_TIMEOUT_SECS` | `IBKR:*` tickers through your own running IB Gateway or TWS (premium, needs an IBKR account) | `IBKR:*` tickers fail. Auto-routed tickers use Yahoo. Nothing requires IBKR. |
+| `MARKET_SEARCH_MCP_TOKEN` | Bearer-token auth on `POST /mcp` in HTTP mode. Read from the environment (never a flag) so it doesn't show up in `ps`. | HTTP mode is open to anyone who can reach the port. The server prints a warning when bound to a non-loopback address without a token. |
+| `ELI_AUDIT_LOG=0` | Turns off the local activity trail | On by default (see [Disk](#disk)) |
+| `ELI_AUDIT_ARCHIVE=0` | Keeps activity records but skips archiving response payloads | Payloads are archived gzipped |
+| `ELI_INV_PATH` | Alternate path for the credentials file | `~/.config/eli/inv.toml` |
 
-Subject: "Market Search self-host"
+Instead of environment variables, you can put credentials in
+`~/.config/eli/inv.toml`. Environment variables win when both are set.
 
-Helpful information for the first reply:
-- Cloud or on-prem deployment? Which provider? (AWS / GCP / Azure / Hetzner / your own DC)
-- Which domain would the gateway live under? Is it managed in Cloudflare / Route53 / something else?
-- How many users (laptops) would be in scope at rollout?
-- Compliance framework you're working under (SOC 2, ISO 27001, sector-specific, etc.)
-- Timeline pressure (do you need this in 4 weeks, 4 months, or "exploring")?
+```toml
+[eia]
+api_key = "..."
 
-Engagements are scoped per-environment. AGPL-3.0 covers the open-source
-binary; in-house deployment work is contracted separately.
+[fred]
+api_key = "..."
+
+[ibkr]
+host = "127.0.0.1"
+port = 4001
+client_id = 7
+```
+
+To store the SEC User-Agent persistently instead:
+`market-search config --set sec_user_agent --value "Jane Doe jane@example.com"`.
+
+Kalshi and Polymarket credentials (`KALSHI_*`, `POLYMARKET_*`) are **not**
+needed by any MCP tool. Only the CLI's paper-trading command uses them.
 
 ---
 
-## Open-source contribution
+## What works with zero keys
 
-The first four tunnel modes (ngrok, cloudflare, tunnelmole, local stdio)
-ship in the open-source `market-search` crate on crates.io. The sovereign
-self-host architecture described above is currently implemented as
-per-engagement deployments by Eli Terminal; an OSS CLI version
-(`--provider self-host` self-serve) is on the contribution roadmap.
+We tested this on 2026-09-13 with an empty `HOME`, no credentials file, and a
+stripped environment. Each tool was called through `market-search mcp` over
+stdio:
 
-Phase 0 is well-scoped weekend work for contributors comfortable with frp,
-ACME, and Hetzner. PRs welcome on github.com/efoltyn/market-search.
+| Status | Tools |
+|---|---|
+| **Works, no keys** (21) | `finance_timeseries` (Yahoo, FRED, Kalshi, Polymarket), `finance_odds`, `finance_rate_path`, `finance_options`, `finance_fundamentals`, `finance_movers`, `finance_curve`, `finance_search`, `finance_schedule`, `finance_auctions`, `finance_cot`, `finance_nyfed`, `finance_volsurface`, `finance_stress`, `finance_fiscal`, `finance_ecb`, `finance_bis`, `finance_boj`, `finance_boe`, `finance_short`, `finance_log` |
+| **Needs a contact string, not a key** (2) | `finance_filings`, `finance_insider`: set `ELI_SEC_USER_AGENT` |
+| **Needs a free key** (1) | `finance_eia`: set `EIA_API_KEY` |
+| **Degraded without a key** | `finance_search`: FRED lookup uses the built-in catalog without `FRED_API_KEY` |
+| **Optional premium** | `IBKR:*` tickers: need IB Gateway/TWS. Without it: `provider error: no listener on 127.0.0.1:7497`. |
+
+On first run, `finance_odds` builds its SQLite index while it answers the
+query (about 2.5s for the first search, under 1s after that). No sync step
+is needed.
+
+Both transports (stdio and streamable HTTP) were exercised: `initialize`,
+`tools/list` (24 tools), `tools/call`, token rejection (401), and token
+acceptance.
 
 ---
 
-## "Self-host" vs "sovereign"
+## Disk
 
-You'll see "sovereign" in the architecture and code identifiers — that's
-the security-property name (the user is sovereign over their data path).
-"Self-host" is the user-facing language because it's plainer. Both refer
-to the same thing.
+Everything lives under your user profile. It's all rebuildable and safe to
+delete.
+
+| What | macOS | Linux |
+|---|---|---|
+| Odds search index (`odds/markets.db`), timeseries cache, SEC downloads | `~/Library/Caches/eli/`, `~/Library/Caches/dev.eli.eli/` | `~/.cache/eli/` |
+| Activity trail + archived responses (`logs/`) | `~/Library/Application Support/eli/` | `~/.local/share/eli/` |
+| Config (`config.toml`), audit chain head | `~/Library/Application Support/eli/`, `.../dev.eli.eli/` | `~/.config/eli/` |
+| Large stdio responses (`eli_<tool>_<ts>.json`) | `/tmp` | `/tmp` |
+
+Paths come from `HOME` (and the XDG variables on Linux). A container just
+needs a writable `HOME`. The whole footprint after a full tool sweep was
+about 4 MB.
+
+**The activity trail grows without bound.** It's on by default and appends
+one hash-chained record per tool call. It also archives every response,
+gzipped and deduplicated by content. That's useful for reconstructing what
+data a piece of research saw. On a long-running shared server, turn it off
+(`ELI_AUDIT_LOG=0`), turn off just the payload archive
+(`ELI_AUDIT_ARCHIVE=0`), or rotate the directory yourself.
+
+Over HTTP, responses are returned inline in full, and the scratch-file
+helper tool isn't reachable at all.
+
+---
+
+## Hosting for other people
+
+It works, but here's what that means:
+
+- **One IP, shared rate limits.** Every user's requests go out from your
+  server's IP to Yahoo, SEC, Kalshi, and the rest. SEC enforces 10
+  requests/second per IP. Yahoo throttles heavy traffic from one address
+  without warning. A handful of analysts is fine. A public service for
+  thousands isn't what this is built for.
+- **One token, one trust boundary.** `MARKET_SEARCH_MCP_TOKEN` is a single
+  shared secret. There are no per-user accounts, scopes, or quotas. For those,
+  put an authenticating proxy in front (oauth2-proxy, Cloudflare Access,
+  Tailscale).
+- **Replicas are trivial.** Because nothing is stateful, you can run N copies
+  behind any load balancer, round-robin, no sticky sessions. Each replica
+  keeps its own local cache.
+- **AGPL-3.0.** If you run a modified version as a network service for
+  others, section 13 requires offering those users the source of your
+  modified version.
+
+---
+
+## Honest limits
+
+These are still hard or not built:
+
+- **claude.ai web/mobile connector plus a token.** The claude.ai custom
+  connector requires an OAuth flow. This server ships a rubber-stamp OAuth
+  stub that lets the connector attach without auth. That stub hands out a
+  fixed token, which won't match `MARKET_SEARCH_MCP_TOKEN`. So today there are
+  two options: claude.ai with **no** token (anyone who has the URL can use the
+  tools), or a token with clients that can send a custom header (Claude Code,
+  custom agents). Real OAuth isn't implemented.
+- **No service manager integration.** Nothing installs a launchd, systemd, or
+  Windows service for you. Use your platform's own tooling
+  (`systemd --user`, `launchd`, `nssm`, a container restart policy).
+- **Tested on macOS only.** CI builds Linux and Windows binaries, but the
+  zero-key tool sweep above ran on macOS. The Linux build dependencies listed
+  in the quickstart are the standard OpenSSL requirements, not verified in a
+  clean container. On Windows, large stdio responses go to the OS temp
+  directory.
+- **`market-search mcp share`** is for quick public URLs through a
+  third-party tunnel (Cloudflare, ngrok, tunnelmole). The URL only works while
+  the process runs, and the tunnel provider terminates TLS. It's not a
+  self-hosting mechanism.
+- **Sovereign mode is design only.** The architecture below, where TLS
+  terminates on a laptop behind a VPS gateway that can't decrypt traffic,
+  doesn't exist in this build.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `eia api key missing; set EIA_API_KEY ...` | Set `EIA_API_KEY` (free) in the environment the **server** runs in, not your shell. MCP clients launch stdio servers with their own env: pass it in the client config's `env` block. |
+| `SEC EDGAR requires a User-Agent with contact email` | Set `ELI_SEC_USER_AGENT="Your Name you@example.com"`, or `market-search config --set sec_user_agent --value "..."`. SEC returns 403 for generic or empty User-Agents. |
+| `provider error: no listener on 127.0.0.1:7497` | An `IBKR:*` ticker was requested with no IB Gateway/TWS running. Use a Yahoo ticker (`CL=F` instead of `IBKR:FUT:CL:NYMEX`) or start the gateway. |
+| HTTP `401 missing or invalid bearer token` | The client isn't sending `Authorization: Bearer <MARKET_SEARCH_MCP_TOKEN>`. Check for stray whitespace or newlines in the token. |
+| claude.ai says "not a valid MCP server" | Either `MARKET_SEARCH_MCP_TOKEN` is set (see limits above), the URL is missing `/mcp`, or the binary is older than 0.3.0. |
+| `GET /mcp` returns 405 | Correct. `/mcp` is POST-only per the MCP streamable-HTTP spec. Health is `GET /`. |
+| `bind 127.0.0.1:8484` fails | Port in use. Pick `--port`. |
+| Odds search is empty or stale | Delete the cache dir from [Disk](#disk). It rebuilds on the next query. |
+| Build fails on Linux with an OpenSSL / `pkg-config` error | `apt install build-essential pkg-config libssl-dev` (or your distro's equivalents). |
+| Tools missing in your client | Restart the client after adding the server, then `claude mcp list` to confirm registration. |
+
+---
+
+## Sovereign mode (design, not built)
+
+Some organizations can't accept a third-party tunnel provider (ngrok,
+Cloudflare, tunnelmole) in the TLS trust chain. For them, the target
+architecture keeps the TLS private key on the analyst's machine. A VPS
+gateway routes connections by SNI hostname and forwards encrypted bytes, and
+it never terminates TLS.
+
+```
+     MCP client ── https://device.mcp.yourdomain.com/c-<secret>/mcp
+                           │
+        Gateway on your VPS: reads ClientHello SNI, forwards raw bytes,
+        never terminates TLS, never parses HTTP, holds no device keys
+                           │  QUIC tunnel (outbound from laptop)
+        market-search on the laptop: TLS terminates here (rustls),
+        rustls-acme issues the cert via TLS-ALPN-01 through the passthrough
+```
+
+The gateway **can** see the SNI hostname, source IP, timing, and byte counts.
+It **cannot** see request or response bodies, the capability path, or the
+device's TLS key. A CAA record that binds issuance to the laptop's ACME
+account and `tls-alpn-01` stops a compromised gateway from obtaining a
+replacement certificate:
+
+```
+device.mcp.yourdomain.com.  CAA  0 issue "letsencrypt.org;accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/<laptop-acct-id>;validationmethods=tls-alpn-01"
+device.mcp.yourdomain.com.  CAA  0 issuewild ";"
+```
+
+Building it needs a gateway (TCP :443 ClientHello parser, SNI routing, a QUIC
+server for device tunnels, device enrollment), laptop-side ACME and a service
+install, plus certificate lifecycle tooling. None of that is in this
+repository. The stateless HTTP server above is the part that already exists.
+Sovereign mode would wrap it rather than replace it.
+
+For compliance-bound firms that want it deployed in their own environment,
+Eli Terminal scopes that as an engagement: **efoltyn@eliterminal.com**
+(subject "Market Search self-host"). Contributions toward an open-source
+implementation are welcome at
+[github.com/efoltyn/market-search](https://github.com/efoltyn/market-search).

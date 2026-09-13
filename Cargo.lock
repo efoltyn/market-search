@@ -977,6 +977,7 @@ dependencies = [
  "csv",
  "directories",
  "eli-core",
+ "flate2",
  "futures",
  "indexmap",
  "itertools 0.14.0",

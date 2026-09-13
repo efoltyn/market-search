@@ -105,8 +105,7 @@ async fn cmd_finance_options(args: FinanceOptionsArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -181,8 +180,7 @@ async fn cmd_finance_sync(args: FinanceSyncArgs) -> Result<()> {
         compact_sync_stdout_payload(&mut resp, &resolved_policy.policy.stdout_compaction);
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 

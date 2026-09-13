@@ -138,10 +138,12 @@ async fn cmd_finance_movers(args: FinanceMoversArgs) -> Result<()> {
     let sort_by = movers_parse_sort_by(&args.sort_by)?;
     let mut universe = args.universe.trim().to_ascii_lowercase();
     let provider_arg = args.provider.trim().to_ascii_lowercase();
+    // IBKR is strictly opt-in for movers: auto used to promote to IBKR off
+    // env-var hints alone and then stall on snapshot tick waits (measured 35s
+    // vs 0.7s Yahoo) for a screener query that gains nothing from IBKR data.
     let use_ibkr = match provider_arg.as_str() {
-        "auto" => movers_has_ibkr_hint(&args),
+        "auto" | "yahoo" => false,
         "ibkr" => true,
-        "yahoo" => false,
         other => anyhow::bail!("unsupported --provider '{other}' (supported: auto, yahoo, ibkr)"),
     };
 
@@ -222,10 +224,19 @@ async fn cmd_finance_movers(args: FinanceMoversArgs) -> Result<()> {
 
     if use_ibkr {
         let tickers: Vec<String> = candidates.iter().map(|c| c.ticker.clone()).collect();
+        let mut ibkr_cfg = movers_ibkr_config(&args);
+        if provider_arg == "auto" && args.ibkr_timeout_secs.is_none() {
+            // Auto mode: a slow or unsubscribed IBKR snapshot must not stall
+            // the default path (measured 35s vs 0.7s Yahoo before this cap).
+            // Explicit --provider ibkr / --ibkr-timeout-secs keep full patience.
+            if let Some(cfg) = ibkr_cfg.as_mut() {
+                cfg.timeout_secs = Some(4);
+            }
+        }
         match movers_fetch_snapshot_candidates(
             &tickers,
             eli_core::finance::ProviderKind::Ibkr,
-            &movers_ibkr_config(&args),
+            &ibkr_cfg,
             &mut warnings,
         )
         .await
@@ -273,7 +284,18 @@ async fn cmd_finance_movers(args: FinanceMoversArgs) -> Result<()> {
         .map(movers_candidate_to_output)
         .collect();
 
-    if args.include_extended_hours && !movers.is_empty() {
+    // Extended-hours overlay is automatic whenever the market is NOT in its
+    // regular session: the screener's price/change_pct freeze at the close,
+    // and presenting them next to market_state="after_hours" without the
+    // live extended quote misread as "what the stock is doing right now".
+    // --include-extended-hours still forces the overlay during regular hours.
+    let any_extended_session = movers.iter().any(|m| {
+        m.market_state
+            .as_deref()
+            .map(|st| !st.eq_ignore_ascii_case("regular"))
+            .unwrap_or(false)
+    });
+    if (args.include_extended_hours || any_extended_session) && !movers.is_empty() {
         let tickers: Vec<String> = movers.iter().map(|m| m.ticker.clone()).collect();
         let quotes = fetch_extended_hours_quotes_batch(&tickers).await;
         let by_ticker: std::collections::BTreeMap<String, ExtendedHoursQuote> =
@@ -332,8 +354,7 @@ async fn cmd_finance_movers(args: FinanceMoversArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&response).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&response)?;
     Ok(())
 }
 
@@ -774,7 +795,10 @@ fn movers_candidate_from_yahoo_quote(v: &serde_json::Value, source: &str) -> Opt
         volume: v.get("regularMarketVolume").and_then(|v| v.as_u64()),
         source: source.to_string(),
         quote_source: v.get("quoteSourceName").and_then(|v| v.as_str()).map(str::to_string),
-        market_state: v.get("marketState").and_then(|v| v.as_str()).map(str::to_string),
+        market_state: v
+            .get("marketState")
+            .and_then(|v| v.as_str())
+            .map(normalize_market_state),
         sector: v.get("sector").and_then(|v| v.as_str()).map(str::to_string),
         industry: v.get("industry").and_then(|v| v.as_str()).map(str::to_string),
         quote_type,
@@ -818,7 +842,7 @@ fn movers_candidate_from_snapshot(
         volume: None,
         source: provider.to_string(),
         quote_source: None,
-        market_state: Some(snap.session_state.clone()),
+        market_state: Some(normalize_market_state(&snap.session_state)),
         sector: None,
         industry: None,
         quote_type: None,
@@ -1140,5 +1164,19 @@ fn movers_parse_sort_by(raw: &str) -> anyhow::Result<MoversSortBy> {
         "dollar_volume" | "dollar-volume" | "dollar_vol" | "dollar-vol" | "liquidity" => Ok(MoversSortBy::DollarVolume),
         "volume" | "vol" => Ok(MoversSortBy::Volume),
         other => anyhow::bail!("unsupported --sort-by '{other}' (supported: percent, abs_percent, market_cap, value_change, dollar_volume, volume)"),
+    }
+}
+
+/// One vocabulary for session state regardless of upstream: Yahoo's
+/// screener says "POST"/"PRE"/"REGULAR", the snapshot path says
+/// "after_hours"/"premarket" — a consumer normalizing on one silently
+/// misclassified the other.
+fn normalize_market_state(raw: &str) -> String {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "PRE" | "PREPRE" | "PREMARKET" | "PRE_MARKET" => "premarket".to_string(),
+        "POST" | "POSTPOST" | "AFTER_HOURS" | "AFTERHOURS" => "after_hours".to_string(),
+        "REGULAR" => "regular".to_string(),
+        "CLOSED" => "closed".to_string(),
+        other => other.to_ascii_lowercase(),
     }
 }

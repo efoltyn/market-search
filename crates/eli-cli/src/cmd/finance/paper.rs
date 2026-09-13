@@ -38,6 +38,7 @@ async fn cmd_finance_paper(args: FinancePaperArgs) -> Result<()> {
             serde_json::json!({"ok": true, "path": path.to_string_lossy()})
         );
     } else {
+        audit_set_payload(&json);
         println!("{}", json);
     }
 

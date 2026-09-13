@@ -1833,6 +1833,51 @@ async fn cancel_order(
     }))
 }
 
+/// Cached gateway-liveness memo. IB Gateway restarts itself daily and is
+/// legitimately down a lot; without this, every IBKR attempt while it's down
+/// pays multi-second connect timeouts across four candidate ports before
+/// falling back. With it, the first failed probe writes a 5-minute memo and
+/// every subsequent attempt in that window fails instantly to the fallback.
+fn ibkr_liveness_memo_path() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("", "", "eli")
+        .map(|d| d.cache_dir().join("ibkr_liveness.json"))
+}
+
+fn ibkr_liveness_memo_read() -> Option<(bool, chrono::DateTime<chrono::Utc>)> {
+    let raw = std::fs::read_to_string(ibkr_liveness_memo_path()?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let reachable = v.get("reachable")?.as_bool()?;
+    let checked_at = chrono::DateTime::parse_from_rfc3339(v.get("checked_at")?.as_str()?)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some((reachable, checked_at))
+}
+
+fn ibkr_liveness_memo_write(reachable: bool) {
+    let Some(path) = ibkr_liveness_memo_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let record = serde_json::json!({
+        "reachable": reachable,
+        "checked_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let _ = std::fs::write(path, record.to_string());
+}
+
+async fn tcp_probe(host: &str, port: u16, timeout_ms: u64) -> bool {
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
 async fn connect_client(connection: &IbkrConnectionConfig) -> Result<Client> {
     let host = connection
         .host
@@ -1840,6 +1885,20 @@ async fn connect_client(connection: &IbkrConnectionConfig) -> Result<Client> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("127.0.0.1");
+
+    // Fast-fail on a fresh down-memo (see ibkr_liveness_memo_path docs).
+    if let Some((false, checked_at)) = ibkr_liveness_memo_read() {
+        let age = chrono::Utc::now() - checked_at;
+        if age.num_seconds() < 300 {
+            return Err(Error::Provider(format!(
+                "IB Gateway unreachable as of {} (cached probe, retries after 5min; delete {} to force)",
+                checked_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                ibkr_liveness_memo_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            )));
+        }
+    }
     let client_id = match connection.client_id {
         Some(id) if id > 0 => id,
         _ => {
@@ -1858,9 +1917,20 @@ async fn connect_client(connection: &IbkrConnectionConfig) -> Result<Client> {
 
     let mut last_error = None;
     for port in candidate_ports {
+        // 500ms TCP probe before the heavyweight API handshake: skips dead
+        // ports fast instead of waiting out the full ibapi connect timeout.
+        if !tcp_probe(host, port, 500).await {
+            last_error = Some(format!(
+                "no listener on {host}:{port} (500ms tcp probe)"
+            ));
+            continue;
+        }
         let address = format!("{host}:{port}");
         match Client::connect(&address, client_id).await {
-            Ok(client) => return Ok(client),
+            Ok(client) => {
+                ibkr_liveness_memo_write(true);
+                return Ok(client);
+            }
             Err(err) => {
                 last_error = Some(format!(
                     "no reachable TWS / IB Gateway on {address}: {}",
@@ -1870,6 +1940,7 @@ async fn connect_client(connection: &IbkrConnectionConfig) -> Result<Client> {
         }
     }
 
+    ibkr_liveness_memo_write(false);
     Err(Error::Provider(
         last_error.unwrap_or_else(|| "failed to connect to IBKR".to_string()),
     ))

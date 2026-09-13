@@ -9,7 +9,24 @@ pub async fn run() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::try_parse()?;
+    // Let clap handle --help/--version/parse errors itself: help exits 0
+    // (agents script `cmd --help && next`), parse errors exit 2 with clap's
+    // formatting. Routing these through anyhow printed help behind an
+    // "Error:" prefix and exited 1 on every --help.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Real arg errors (not --help/--version) get an audit-trail line
+            // before clap prints and exits.
+            if !matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                audit_log_arg_error(&e.to_string());
+            }
+            e.exit()
+        }
+    };
 
     match cli.cmd {
         None => {
@@ -23,13 +40,19 @@ pub async fn run() -> Result<()> {
         Some(Command::Init) => cmd_init().await,
         Some(Command::Config { set, value }) => cmd_config(set, value).await,
         Some(Command::ToolInfo { path }) => cmd_tool_info(path),
-        Some(Command::Finance { cmd }) => cmd_finance(cmd).await,
+        Some(Command::Finance { cmd }) => run_finance_with_audit(cmd).await,
         Some(Command::Web { cmd }) => cmd_web(cmd).await,
         Some(Command::Mcp(args)) => {
             if let Some(McpSubcommand::Share(share_args)) = args.cmd {
                 cmd_mcp_share(share_args).await
+            } else if args.check {
+                println!("market-search {} mcp --check", env!("CARGO_PKG_VERSION"));
+                for line in mcp_capability_report() {
+                    println!("  {line}");
+                }
+                Ok(())
             } else if args.http {
-                cmd_mcp_http(args.port).await
+                cmd_mcp_http(&args.host, args.port).await
             } else {
                 cmd_mcp().await
             }
@@ -53,6 +76,9 @@ async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
         FinanceCommand::Options(args) => cmd_finance_options(args).await,
         FinanceCommand::Sync(args) => cmd_finance_sync(args).await,
         FinanceCommand::Paper(args) => cmd_finance_paper(args).await,
+        FinanceCommand::Log(args) => cmd_finance_log(args),
+        FinanceCommand::Insider(args) => cmd_finance_insider(args).await,
+        FinanceCommand::Short(args) => cmd_finance_short(args).await,
         FinanceCommand::Ibkr(args) => cmd_finance_ibkr(args).await,
         FinanceCommand::Auctions(args) => cmd_finance_auctions(args).await,
         FinanceCommand::Cot(args) => cmd_finance_cot(args).await,

@@ -21,7 +21,7 @@ This gives it market search: the live odds of recession on Kalshi and Polymarket
   KALSHI:KXRECSSNBER-26:YES    30 candles    22% → 36%   +63.6%
 ```
 
-21 tools, one timeseries axis. Stocks, options, futures curves, crypto, forex, prediction markets, FRED macro, Treasury auctions, SEC filings, and central banks (Fed, ECB, BOJ, BOE, BIS). Runs on your machine. No API keys for the core data.
+24 tools, one timeseries axis. Stocks, options, futures curves, crypto, forex, prediction markets, FRED macro, Treasury auctions, SEC filings, and central banks (Fed, ECB, BOJ, BOE, BIS). Runs on your machine. No API keys for the core data.
 
 ---
 
@@ -43,7 +43,7 @@ curl -fsSL https://eliterminal.com/install.sh | sh
 
 ```bash
 git clone https://github.com/efoltyn/market-search.git
-cd market-search/eli && cargo build --release
+cd market-search && cargo build --release --bin market-search
 ```
 
 **Or let your AI set it up.** Tell Claude Code (or any coding agent):
@@ -70,6 +70,8 @@ Or add it to your client config (`.mcp.json`, Claude Desktop, Codex, Cursor, Gem
 
 **From claude.ai or your phone** (optional): run `market-search mcp share` on a machine that stays on. It opens a tunnel and prints a URL to paste into a claude.ai custom connector. The link lives only while that process runs, so use a box that stays awake (there's no background service yet).
 
+**Self-host** (optional): the server is stateless, so serving it from your own machine is one command, `market-search mcp --http`, behind your own TLS. `market-search mcp --check` shows which tools your keys unlock. See [SELFHOST.md](SELFHOST.md).
+
 ---
 
 ## Tools
@@ -84,6 +86,9 @@ Or add it to your client config (`.mcp.json`, Claude Desktop, Codex, Cursor, Gem
 | `finance_fundamentals` | Income statement, P/E, margins, ROE, debt/equity | `--ticker NVDA` |
 | `finance_curve` | Futures forward curve: every contract month, front/back spread. Oil, brent, gold, silver, natgas, copper, more | `--commodity wti` |
 | `finance_search` | Ticker lookup + FRED macro series discovery | `--query "semiconductor"` |
+| `finance_insider` | Insider buys and sells parsed from SEC Form 4: who, role, shares, price, net summary | `--ticker NVDA --days 90` |
+| `finance_short` | FINRA short interest (days-to-cover, change vs prior print) + daily per-venue short volume | `--ticker GME` |
+| `finance_log` | Local, hash-chained trail of every tool call with archived responses; verify or export it | `--stats` |
 
 ### Prediction markets
 
@@ -149,7 +154,7 @@ Core tools need no API keys.
 | Polymarket | None |
 | FRED | None |
 | CFTC | None |
-| SEC EDGAR | None |
+| SEC EDGAR | None (set `ELI_SEC_USER_AGENT` to a contact, e.g. `"Jane Doe jane@example.com"`) |
 | NY Fed | None |
 | US Treasury | None |
 | OFR | None |

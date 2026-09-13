@@ -743,6 +743,186 @@ fn is_sec_complete_submission_text(filename: &str) -> bool {
             .all(|part| part.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// Cross-filer full-text search over SEC EDGAR (efts.sec.gov). Answers
+/// "which filings mention X across the whole market" — the per-ticker path
+/// above can only enumerate one known company's filings. Same-day freshness,
+/// no auth beyond the standard SEC User-Agent policy.
+pub async fn search_filings_fulltext(
+    query: &str,
+    forms: &[String],
+    from: Option<&str>,
+    to: Option<&str>,
+    limit: usize,
+    user_agent: Option<&str>,
+) -> Result<serde_json::Value> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(Error::InvalidInput("--search-text query cannot be empty".to_string()));
+    }
+    if limit == 0 {
+        return Err(Error::InvalidInput("--limit must be >= 1".to_string()));
+    }
+    let limit = limit.min(50);
+    let client = sec_client(user_agent)?;
+
+    // Multi-word input becomes a phrase query unless the caller already
+    // supplied quotes/operators of their own.
+    let q = if query.contains('"') || !query.contains(char::is_whitespace) {
+        query.to_string()
+    } else {
+        format!("\"{query}\"")
+    };
+    let forms_join = forms
+        .iter()
+        .map(|f| f.trim().to_ascii_uppercase())
+        .filter(|f| !f.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // EDGAR FTS pages 10 hits at a time via a 0-based `from` offset.
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut total: Option<u64> = None;
+    let mut total_is_lower_bound = false;
+    let mut offset = 0usize;
+    while results.len() < limit {
+        let mut url = reqwest::Url::parse("https://efts.sec.gov/LATEST/search-index")
+            .map_err(|e| Error::Provider(format!("efts url: {e}")))?;
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("q", &q);
+            if !forms_join.is_empty() {
+                qp.append_pair("forms", &forms_join);
+            }
+            if let Some(from) = from {
+                qp.append_pair("startdt", from);
+            }
+            if let Some(to) = to {
+                qp.append_pair("enddt", to);
+            }
+            if offset > 0 {
+                qp.append_pair("from", &offset.to_string());
+            }
+        }
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("efts request failed: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(Error::Provider(format!(
+                "efts full-text search returned http {}",
+                resp.status()
+            )));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Provider(format!("efts parse failed: {e}")))?;
+        if total.is_none() {
+            total = body
+                .pointer("/hits/total/value")
+                .and_then(|v| v.as_u64());
+            // EDGAR reports totals above 10000 as a floor ("gte"), not an
+            // exact count — surface that instead of a suspiciously round number.
+            total_is_lower_bound = body
+                .pointer("/hits/total/relation")
+                .and_then(|v| v.as_str())
+                .map(|r| r == "gte")
+                .unwrap_or(false);
+        }
+        let hits = body
+            .pointer("/hits/hits")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if hits.is_empty() {
+            break;
+        }
+        let page_len = hits.len();
+        for hit in hits {
+            if results.len() >= limit {
+                break;
+            }
+            let src = hit.get("_source").cloned().unwrap_or_default();
+            // display_names[0] looks like "Empery Digital Inc.  (EMPD)  (CIK 0001829794)"
+            let display = src
+                .get("display_names")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let ticker = display
+                .split('(')
+                .map(str::trim)
+                .filter_map(|part| part.strip_suffix(')').map(str::trim))
+                .find(|part| {
+                    !part.starts_with("CIK")
+                        && !part.is_empty()
+                        && part.len() <= 6
+                        && part.chars().all(|c| c.is_ascii_uppercase() || c == '.' || c == '-')
+                });
+            let company = display.split('(').next().unwrap_or("").trim().to_string();
+            let cik = src
+                .get("ciks")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim_start_matches('0')
+                .to_string();
+            let adsh = src.get("adsh").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // _id is "adsh:filename" — enough to build the document URL.
+            let doc_url = hit
+                .get("_id")
+                .and_then(|v| v.as_str())
+                .and_then(|id| id.split_once(':'))
+                .map(|(a, file)| {
+                    format!(
+                        "https://www.sec.gov/Archives/edgar/data/{}/{}/{}",
+                        cik,
+                        a.replace('-', ""),
+                        file
+                    )
+                });
+            let mut row = serde_json::json!({
+                "company": company,
+                "cik": cik,
+                "form": src.get("form").cloned().unwrap_or(serde_json::Value::Null),
+                "file_date": src.get("file_date").cloned().unwrap_or(serde_json::Value::Null),
+                "accession_number": adsh,
+            });
+            if let Some(t) = ticker {
+                row["ticker"] = serde_json::json!(t);
+            }
+            if let Some(items) = src.get("items").filter(|v| !v.is_null()) {
+                row["items"] = items.clone();
+            }
+            if let Some(u) = doc_url {
+                row["url"] = serde_json::json!(u);
+            }
+            results.push(row);
+        }
+        offset += page_len;
+        if page_len < 10 {
+            break;
+        }
+    }
+
+    let mut out = serde_json::json!({
+        "query": query,
+        "forms": if forms_join.is_empty() { serde_json::Value::Null } else { serde_json::json!(forms_join) },
+        "from": from,
+        "to": to,
+        "total_matches": total,
+        "returned": results.len(),
+        "results": results,
+        "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    });
+    if total_is_lower_bound {
+        out["total_matches_is_lower_bound"] = serde_json::json!(true);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

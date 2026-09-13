@@ -66,8 +66,7 @@ async fn cmd_finance_fundamentals(args: FinanceFundamentalsArgs) -> Result<()> {
         );
         return Ok(());
     }
-    let json = serde_json::to_string_pretty(&resps).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resps)?;
 
     Ok(())
 }
@@ -133,8 +132,7 @@ async fn cmd_finance_search(args: FinanceSearchArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -160,9 +158,64 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
 
     let user_agent = args.user_agent.or_else(|| config.and_then(|c| c.chat.sec_user_agent));
 
-    let ticker_for_meta = args.ticker.clone();
+    // Cross-filer full-text search mode: no ticker needed, answers
+    // "which companies filed documents mentioning X" market-wide.
+    if let Some(query) = args.search_text.as_deref() {
+        if args.ticker.is_some() {
+            anyhow::bail!(
+                "--ticker and --search-text are mutually exclusive: --search-text searches ALL filers (drop --ticker, or put the company name in the query)"
+            );
+        }
+        // Same default form scope as ticker mode; pass --forms any to search
+        // every form type.
+        let effective_forms: Vec<String> = if args.forms.iter().all(|f| f.trim().is_empty()) {
+            vec!["8-K".to_string(), "10-K".to_string(), "10-Q".to_string()]
+        } else if args
+            .forms
+            .iter()
+            .any(|f| matches!(f.trim().to_ascii_lowercase().as_str(), "any" | "all"))
+        {
+            Vec::new()
+        } else {
+            args.forms.clone()
+        };
+        let resp = eli_core::finance::search_filings_fulltext(
+            query,
+            &effective_forms,
+            args.from.as_deref(),
+            args.to.as_deref(),
+            args.limit,
+            user_agent.as_deref(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("edgar full-text search")?;
+        if let Some(out_path) = args.out {
+            let wr = write_json_out_with_meta(
+                out_path,
+                &resp,
+                "finance.filings.search",
+                &[format!("query={query}")],
+            )?;
+            println!(
+                "{{\"ok\":true,\"path\":{}}}",
+                serde_json::to_string(&wr.out_path.display().to_string())
+                    .unwrap_or_else(|_| "\"\"".to_string()),
+            );
+            return Ok(());
+        }
+        let mut payload = resp;
+        round_json_floats(&mut payload);
+        println!("{}", json_to_stdout_string(&payload)?);
+        return Ok(());
+    }
+
+    let Some(ticker) = args.ticker else {
+        anyhow::bail!("--ticker is required (or use --search-text for cross-filer search)");
+    };
+    let ticker_for_meta = ticker.clone();
     let req = eli_core::finance::FilingsRequest {
-        ticker: args.ticker,
+        ticker,
         forms: args.forms,
         limit: Some(if args.single_file { 1 } else { args.limit }),
         download: !args.no_download
@@ -202,7 +255,42 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
+    Ok(())
+}
+
+async fn cmd_finance_insider(args: FinanceInsiderArgs) -> Result<()> {
+    let paths = Paths::discover().context("discover paths")?;
+    paths.ensure_dirs().context("ensure dirs")?;
+    let config = config::load_or_default(&paths).ok();
+    let user_agent = args
+        .user_agent
+        .or_else(|| config.and_then(|c| c.chat.sec_user_agent));
+
+    let req = eli_core::finance::InsiderRequest {
+        ticker: args.ticker,
+        days: args.days,
+        limit: args.limit,
+        summary_only: args.summary_only,
+        user_agent,
+    };
+    let resp = eli_core::finance::fetch_insider(req, &paths.cache_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("fetch insider transactions")?;
+    let mut payload = serde_json::to_value(&resp).context("serialize response")?;
+    round_json_floats(&mut payload);
+    println!("{}", json_to_stdout_string(&payload)?);
+    Ok(())
+}
+
+async fn cmd_finance_short(args: FinanceShortArgs) -> Result<()> {
+    let resp = eli_core::finance::fetch_short_data(&args.ticker)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("fetch finra short data")?;
+    let mut payload = resp;
+    round_json_floats(&mut payload);
+    println!("{}", json_to_stdout_string(&payload)?);
     Ok(())
 }

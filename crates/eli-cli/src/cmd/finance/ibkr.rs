@@ -177,6 +177,6 @@ async fn cmd_finance_ibkr(args: FinanceIbkrArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    emit_tool_payload(&output)?;
     Ok(())
 }

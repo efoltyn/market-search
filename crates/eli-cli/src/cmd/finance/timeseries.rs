@@ -6,6 +6,136 @@ const KALSHI_CANDLESTICKS_URL: &str =
 const POLYMARKET_GAMMA_URL: &str = "https://gamma-api.polymarket.com";
 const POLYMARKET_CLOB_HISTORY_URL: &str = "https://clob.polymarket.com/prices-history";
 
+/// Collapse redundant candle fields in a serialized timeseries response:
+/// - when o==h==l==c (macro point series, carried-forward prediction-market
+///   buckets) the o/h/l fields are omitted — a candle with only `c` means
+///   "no intra-bucket movement", which also makes thin-market carry-forward
+///   stretches visible at a glance;
+/// - `v` is dropped when zero across the whole series (indices like ^VIX
+///   report no real volume — repeating `"v": 0.0` per candle is dead weight).
+fn collapse_point_candles(value: &mut serde_json::Value) {
+    let Some(series) = value.get_mut("series").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for s in series {
+        let Some(candles) = s.get_mut("candles").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        let all_zero_vol = candles.iter().all(|c| {
+            c.get("v")
+                .map_or(true, |v| v.as_f64().unwrap_or(0.0) == 0.0)
+        });
+        for c in candles.iter_mut() {
+            let Some(obj) = c.as_object_mut() else { continue };
+            // Never collapse a candle with real volume: a thin stock can print
+            // o==h==l==c on a 1m bar with thousands of shares traded, and that
+            // is real activity, not a carried-forward placeholder.
+            let traded = obj
+                .get("v")
+                .and_then(|v| v.as_f64())
+                .is_some_and(|v| v > 0.0);
+            if !traded {
+                if let Some(close) = obj.get("c").and_then(|v| v.as_f64()) {
+                    let all_eq = ["o", "h", "l"]
+                        .iter()
+                        .all(|k| obj.get(*k).and_then(|v| v.as_f64()) == Some(close));
+                    if all_eq {
+                        obj.remove("o");
+                        obj.remove("h");
+                        obj.remove("l");
+                    }
+                }
+            }
+            if all_zero_vol {
+                obj.remove("v");
+            }
+        }
+    }
+}
+
+/// Final output shaping shared by every timeseries stdout path:
+/// - `sources` = distinct series[].source — the truth on mixed calls (the
+///   top-level `provider` reflects only the dispatch-time main bucket);
+/// - `status` recomputed as a real aggregate: absent = every ticker
+///   returned, "partial" = some failed, "error" = nothing returned (the old
+///   logic flipped to "error" when any single provider bucket struck out,
+///   even at 9/10 tickers succeeding);
+/// - point-candle collapse + all-zero volume drop;
+/// - floats rounded to 7 significant digits (kills f32 feed noise like
+///   747.4000244140625);
+/// - pretty JSON only at a terminal; compact for pipes/agents.
+fn emit_timeseries_stdout(resp: &eli_core::finance::TimeseriesResponse) -> Result<()> {
+    let mut resp = resp.clone();
+    let mut distinct: Vec<String> = Vec::new();
+    for s in &resp.series {
+        if let Some(src) = &s.source {
+            if !distinct.iter().any(|x| x == src) {
+                distinct.push(src.clone());
+            }
+        }
+    }
+    distinct.sort();
+    resp.sources = distinct;
+    // Informational entries (granularity downgrades, data-quality caveats,
+    // transparent fallbacks) are notices, not failures: they must not flip
+    // status to "partial" and shouldn't drown real errors in the same list.
+    let mut notices: Vec<eli_core::finance::TimeseriesError> = Vec::new();
+    if let Some(errs) = resp.errors.take() {
+        let mut real = Vec::new();
+        for e in errs {
+            let informational = matches!(
+                e.stage.as_deref(),
+                Some("granularity_downgrade") | Some("data_quality") | Some("ibkr_fallback")
+            );
+            if informational {
+                notices.push(e);
+            } else {
+                real.push(e);
+            }
+        }
+        if !real.is_empty() {
+            resp.errors = Some(real);
+        }
+    }
+    let err_count = resp.errors.as_ref().map_or(0, |e| e.len());
+    resp.status = if resp.series.is_empty() && err_count > 0 {
+        Some("error".to_string())
+    } else if err_count > 0 {
+        Some("partial".to_string())
+    } else {
+        None
+    };
+    let mut value = serde_json::to_value(&resp).context("serialize response")?;
+    if !notices.is_empty() {
+        value["notices"] = serde_json::to_value(&notices).context("serialize notices")?;
+    }
+    // The dispatch-time `provider` lies on mixed calls (any FRED fallback —
+    // even for a bare unknown ticker — used to flip it to "fred" over three
+    // healthy yahoo series). `sources` is the truth; drop `provider` whenever
+    // it doesn't match a single-source reality.
+    let single_source_matches = resp.sources.len() == 1
+        && value
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .is_some_and(|p| p.eq_ignore_ascii_case(&resp.sources[0]));
+    if !single_source_matches {
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("provider");
+        }
+    }
+    collapse_point_candles(&mut value);
+    round_json_floats(&mut value);
+    let out = json_to_stdout_string(&value)?;
+    audit_set_summary(serde_json::json!({
+        "series": resp.series.len(),
+        "sources": resp.sources,
+        "status": resp.status,
+        "bytes": out.len(),
+    }));
+    println!("{out}");
+    Ok(())
+}
+
 async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     if args.format.trim().to_ascii_lowercase() != "json" {
         anyhow::bail!("unsupported --format (only 'json' is implemented)");
@@ -17,7 +147,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     // preset=list (or presets/help) → return the self-documenting preset catalog and exit.
     // This is the discovery path: presets were previously only learnable from the tool desc.
     if matches!(preset_name.as_deref(), Some("list") | Some("presets") | Some("help")) {
-        println!("{}", serde_json::to_string_pretty(&list_timeseries_presets())?);
+        emit_tool_payload(&list_timeseries_presets())?;
         return Ok(());
     }
     if let Some(ref preset) = preset_name {
@@ -145,11 +275,41 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 fetch_prediction_market_series_batch(&prediction_markets, start, end, granularity)
                     .await;
             if market_series.is_empty() {
+                // Emit the same JSON error envelope every other provider path
+                // uses (a bare anyhow bail printed plain text + exit 1, so
+                // callers needed two different error parsers).
                 let err_msg = market_errors
                     .first()
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| "no usable prediction market series found".to_string());
-                anyhow::bail!("{err_msg}");
+                let resp = eli_core::finance::TimeseriesResponse {
+                    provider: prediction_market_response_provider(&prediction_markets),
+                    sources: Vec::new(),
+                    tickers: prediction_markets.iter().map(|p| p.market.clone()).collect(),
+                    granularity,
+                    range,
+                    start,
+                    end,
+                    generated_at: now,
+                    series: Vec::new(),
+                    status: Some("error".to_string()),
+                    error: Some(eli_core::finance::ToolErrorInfo {
+                        error: "TickerFetchFailed".to_string(),
+                        message: err_msg,
+                        hint: None,
+                        debug: None,
+                    }),
+                    errors: if market_errors.is_empty() {
+                        None
+                    } else {
+                        Some(market_errors)
+                    },
+                    valid_tickers: None,
+                    analytics: None,
+                    cache: None,
+                };
+                emit_timeseries_stdout(&resp)?;
+                return Ok(());
             }
             let series = market_series;
             let analytics =
@@ -203,8 +363,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 return Ok(());
             }
 
-            let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-            println!("{json}");
+            emit_timeseries_stdout(&resp)?;
             return Ok(());
         }
     }
@@ -347,8 +506,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                     .unwrap_or_else(|_| "\"\"".to_string()),
             );
         } else {
-            let json = serde_json::to_string_pretty(&resp)?;
-            println!("{json}");
+            emit_timeseries_stdout(&resp)?;
         }
         return Ok(());
     }
@@ -427,8 +585,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                     .unwrap_or_else(|_| "\"\"".to_string()),
             );
         } else {
-            let json = serde_json::to_string_pretty(&resp)?;
-            println!("{json}");
+            emit_timeseries_stdout(&resp)?;
         }
         return Ok(());
     }
@@ -503,13 +660,16 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                     "granularity downgraded from requested {:?} to 1d for FRED provider (sub-daily not supported)",
                     granularity.unit
                 );
-                r.errors.get_or_insert_with(Vec::new).push(
-                    eli_core::finance::TimeseriesError {
-                        ticker: main_tickers.join(","),
+                // One entry per ticker: errors[].ticker is a single-identifier
+                // contract — a comma-joined string breaks per-ticker lookup.
+                let errs = r.errors.get_or_insert_with(Vec::new);
+                for t in &main_tickers {
+                    errs.push(eli_core::finance::TimeseriesError {
+                        ticker: t.clone(),
                         stage: Some("granularity_downgrade".to_string()),
-                        message: warn,
-                    },
-                );
+                        message: warn.clone(),
+                    });
+                }
             }
             // IBKR strips its `IBKR:` prefix before fetch (line ~354). Restore it on
             // returned series so callers see the round-tripped ticker — matching how
@@ -575,203 +735,168 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
     };
 
-    // If FRED is main and there are Yahoo tickers, fetch Yahoo separately and merge.
-    if has_fred && !yahoo_tickers.is_empty() {
-        let yahoo_req = eli_core::finance::TimeseriesRequest {
-            tickers: yahoo_tickers.clone(),
-            range,
-            granularity,
-            as_of,
-            provider: eli_core::finance::ProviderKind::Yahoo,
-            max_points_per_ticker: args.max_points_per_ticker,
-            ibkr: None,
-        };
-        match eli_core::finance::fetch_timeseries(yahoo_req, &cache_dir).await {
-            Ok(yahoo_resp) => {
-                resp.series.extend(yahoo_resp.series);
-                resp.tickers.extend(yahoo_tickers.clone());
-                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-                    &resp.series,
-                    resp.granularity,
-                ));
-            }
-            Err(e) => {
-                eprintln!("warning: Yahoo fetch failed for mixed request: {e}");
-            }
+    // ---- Stage 2: every remaining provider group fetches CONCURRENTLY ----
+    // These used to run as six sequential awaits, so a mixed-source call paid
+    // the SUM of provider latencies instead of the MAX. Fetch first (joined),
+    // merge in deterministic order afterwards, compute analytics once at the
+    // end instead of after every merge.
+    let window_start = resp.start;
+    let window_end = resp.end;
+    let max_points = args.max_points_per_ticker;
+
+    let yahoo_extra_fut = async {
+        if has_fred && !yahoo_tickers.is_empty() {
+            Some(
+                eli_core::finance::fetch_timeseries(
+                    eli_core::finance::TimeseriesRequest {
+                        tickers: yahoo_tickers.clone(),
+                        range,
+                        granularity,
+                        as_of,
+                        provider: eli_core::finance::ProviderKind::Yahoo,
+                        max_points_per_ticker: max_points,
+                        ibkr: None,
+                    },
+                    &cache_dir,
+                )
+                .await,
+            )
+        } else {
+            None
         }
-    }
-
-    // (FRED merge into Yahoo is not needed — when has_fred, FRED IS the main provider.
-    //  Yahoo tickers merge into FRED above.)
-
-    // If mixed tickers: fetch Pyth tickers separately and merge into the response.
-    if has_pyth && (has_fred || !yahoo_tickers.is_empty()) {
-        let pyth_req = eli_core::finance::TimeseriesRequest {
-            tickers: pyth_tickers.clone(),
-            range,
-            granularity,
-            as_of,
-            provider: eli_core::finance::ProviderKind::Pyth,
-            max_points_per_ticker: args.max_points_per_ticker,
-            ibkr: None,
-        };
-        match eli_core::finance::fetch_timeseries(pyth_req, &cache_dir).await {
-            Ok(pyth_resp) => {
-                resp.series.extend(pyth_resp.series);
-                resp.tickers.extend(pyth_tickers.clone());
-                if let Some(ref pyth_errors) = pyth_resp.errors {
-                    resp.errors
-                        .get_or_insert_with(Vec::new)
-                        .extend(pyth_errors.clone());
+    };
+    let pyth_fut = async {
+        if has_pyth && (has_fred || !yahoo_tickers.is_empty()) {
+            Some(
+                eli_core::finance::fetch_timeseries(
+                    eli_core::finance::TimeseriesRequest {
+                        tickers: pyth_tickers.clone(),
+                        range,
+                        granularity,
+                        as_of,
+                        provider: eli_core::finance::ProviderKind::Pyth,
+                        max_points_per_ticker: max_points,
+                        ibkr: None,
+                    },
+                    &cache_dir,
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    };
+    let binance_fut = async {
+        if has_binance && !binance_tickers.iter().all(|t| main_tickers.contains(t)) {
+            Some(
+                eli_core::finance::fetch_timeseries(
+                    eli_core::finance::TimeseriesRequest {
+                        tickers: binance_tickers.clone(),
+                        range,
+                        granularity,
+                        as_of,
+                        provider: eli_core::finance::ProviderKind::Binance,
+                        max_points_per_ticker: max_points,
+                        ibkr: None,
+                    },
+                    &cache_dir,
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    };
+    let ibkr_fut = async {
+        if has_ibkr && !use_ibkr {
+            let stripped: Vec<String> = ibkr_tickers
+                .iter()
+                .map(|t| {
+                    t.strip_prefix("IBKR:")
+                        .or_else(|| t.strip_prefix("ibkr:"))
+                        .unwrap_or(t)
+                        .to_string()
+                })
+                .collect();
+            let ibkr_conn = eli_core::finance::IbkrConnectionConfig {
+                market_data_type: Some(3), // delayed
+                ..Default::default()
+            };
+            Some(
+                eli_core::finance::fetch_timeseries(
+                    eli_core::finance::TimeseriesRequest {
+                        tickers: stripped,
+                        range,
+                        granularity,
+                        as_of,
+                        provider: eli_core::finance::ProviderKind::Ibkr,
+                        max_points_per_ticker: max_points,
+                        ibkr: Some(ibkr_conn),
+                    },
+                    &cache_dir,
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    };
+    let clev_fut = async {
+        if has_cleveland && !only_cleveland {
+            let now = chrono::Utc::now();
+            let clev_end = as_of.unwrap_or(now).min(now);
+            match clev_end.checked_sub_signed(range.approx_duration()) {
+                Some(clev_start) => {
+                    Some(fetch_cleveland_fed_series(&cleveland_tickers, clev_start, clev_end).await)
                 }
-                // Recompute analytics with all series (Yahoo/FRED + Pyth).
-                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-                    &resp.series,
-                    resp.granularity,
-                ));
+                None => Some(Err(anyhow::anyhow!("range underflow"))),
             }
-            Err(e) => {
-                eprintln!("warning: Pyth fetch failed: {e}");
-                resp.errors
-                    .get_or_insert_with(Vec::new)
-                    .push(eli_core::finance::TimeseriesError {
-                        ticker: pyth_tickers.join(","),
-                        stage: Some("pyth".to_string()),
-                        message: format!("Pyth provider failed: {e}"),
-                    });
-            }
+        } else {
+            None
         }
-    }
-
-    // If mixed tickers: fetch Binance tickers separately and merge.
-    if has_binance && !binance_tickers.iter().all(|t| main_tickers.contains(t)) {
-        let binance_req = eli_core::finance::TimeseriesRequest {
-            tickers: binance_tickers.clone(),
-            range,
-            granularity,
-            as_of,
-            provider: eli_core::finance::ProviderKind::Binance,
-            max_points_per_ticker: args.max_points_per_ticker,
-            ibkr: None,
-        };
-        match eli_core::finance::fetch_timeseries(binance_req, &cache_dir).await {
-            Ok(binance_resp) => {
-                resp.series.extend(binance_resp.series);
-                resp.tickers.extend(binance_tickers.clone());
-                if let Some(ref binance_errors) = binance_resp.errors {
-                    resp.errors
-                        .get_or_insert_with(Vec::new)
-                        .extend(binance_errors.clone());
-                }
-                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-                    &resp.series,
-                    resp.granularity,
-                ));
-            }
-            Err(e) => {
-                eprintln!("warning: Binance fetch failed: {e}");
-                resp.errors
-                    .get_or_insert_with(Vec::new)
-                    .push(eli_core::finance::TimeseriesError {
-                        ticker: binance_tickers.join(","),
-                        stage: Some("binance".to_string()),
-                        message: format!("Binance provider failed: {e}"),
-                    });
-            }
+    };
+    let pm_fut = async {
+        if !prediction_markets.is_empty() {
+            Some(
+                fetch_prediction_market_series_batch(
+                    &prediction_markets,
+                    window_start,
+                    window_end,
+                    granularity,
+                )
+                .await,
+            )
+        } else {
+            None
         }
-    }
-
-    // If mixed tickers: fetch IBKR tickers separately and merge.
-    // Skip if IBKR is already the main provider (all tickers were IBKR).
-    if has_ibkr && !use_ibkr {
-        let stripped: Vec<String> = ibkr_tickers
-            .iter()
-            .map(|t| {
-                t.strip_prefix("IBKR:")
-                    .or_else(|| t.strip_prefix("ibkr:"))
-                    .unwrap_or(t)
-                    .to_string()
-            })
-            .collect();
-        let ibkr_conn = eli_core::finance::IbkrConnectionConfig {
-            market_data_type: Some(3), // delayed
-            ..Default::default()
-        };
-        let ibkr_req = eli_core::finance::TimeseriesRequest {
-            tickers: stripped,
-            range,
-            granularity,
-            as_of,
-            provider: eli_core::finance::ProviderKind::Ibkr,
-            max_points_per_ticker: args.max_points_per_ticker,
-            ibkr: Some(ibkr_conn),
-        };
-        match eli_core::finance::fetch_timeseries(ibkr_req, &cache_dir).await {
-            Ok(mut ibkr_resp) => {
-                // Re-attach IBKR: prefix on returned series so round-trip is consistent
-                // with PYTH:/CLEV:/POLYMARKET:/KALSHI: prefix preservation.
-                for s in &mut ibkr_resp.series {
-                    if !s.ticker.starts_with("IBKR:") && !s.ticker.starts_with("ibkr:") {
-                        s.ticker = format!("IBKR:{}", s.ticker);
-                    }
-                }
-                resp.series.extend(ibkr_resp.series);
-                resp.tickers.extend(ibkr_tickers.clone());
-                if let Some(ref ibkr_errors) = ibkr_resp.errors {
-                    resp.errors
-                        .get_or_insert_with(Vec::new)
-                        .extend(ibkr_errors.clone());
-                }
-                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-                    &resp.series,
-                    resp.granularity,
-                ));
-            }
-            Err(e) => {
-                eprintln!("warning: IBKR fetch failed: {e}");
-                resp.errors
-                    .get_or_insert_with(Vec::new)
-                    .push(eli_core::finance::TimeseriesError {
-                        ticker: ibkr_tickers.join(","),
-                        stage: Some("ibkr".to_string()),
-                        message: format!("IBKR provider failed: {e}"),
-                    });
-            }
+    };
+    let rp_fut = async {
+        if has_ratepath {
+            Some(
+                fetch_ratepath_series_batch(&ratepath_tickers, window_start, window_end, granularity)
+                    .await,
+            )
+        } else {
+            None
         }
-    }
+    };
 
-    // If mixed tickers: fetch Cleveland Fed tickers separately and merge.
-    if has_cleveland && !only_cleveland {
-        let now = chrono::Utc::now();
-        let clev_end = as_of.unwrap_or(now).min(now);
-        let clev_start = clev_end
-            .checked_sub_signed(range.approx_duration())
-            .ok_or_else(|| anyhow::anyhow!("range underflow"))?;
-        match fetch_cleveland_fed_series(&cleveland_tickers, clev_start, clev_end).await {
-            Ok(clev_series) => {
-                resp.series.extend(clev_series);
-                resp.tickers.extend(cleveland_tickers.clone());
-                resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-                    &resp.series,
-                    resp.granularity,
-                ));
-            }
-            Err(e) => {
-                eprintln!("warning: Cleveland Fed fetch failed: {e}");
-                resp.errors
-                    .get_or_insert_with(Vec::new)
-                    .push(eli_core::finance::TimeseriesError {
-                        ticker: cleveland_tickers.join(","),
-                        stage: Some("cleveland_fed".to_string()),
-                        message: format!("Cleveland Fed provider failed: {e}"),
-                    });
-            }
-        }
-    }
+    let (yahoo_extra_res, pyth_res, binance_res, ibkr_res, clev_res, pm_res, rp_res) = tokio::join!(
+        yahoo_extra_fut,
+        pyth_fut,
+        binance_fut,
+        ibkr_fut,
+        clev_fut,
+        pm_fut,
+        rp_fut
+    );
 
-    // Auto-fallback: if in auto mode and Yahoo returned errors, retry failed tickers with FRED.
-    // Also re-fetch valid Yahoo tickers individually so their data isn't lost (the core drops
-    // all series when any ticker fails).
+    // Auto-fallback: if in auto mode and Yahoo returned errors, retry failed tickers
+    // with FRED, and re-fetch valid Yahoo tickers individually so their data isn't
+    // lost (the core drops all series when any ticker fails). Runs on the MAIN
+    // response only, BEFORE side merges — so Pyth/Binance error tickers are never
+    // mistaken for failed Yahoo tickers, and side-provider series can't be dropped
+    // by the rebuild (both were latent bugs of the old sequential ordering).
     let auto_fallback_needed = is_auto
         && matches!(resp.provider, eli_core::finance::ProviderKind::Yahoo)
         && (resp.series.is_empty()
@@ -796,7 +921,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 granularity,
                 as_of,
                 provider: eli_core::finance::ProviderKind::Yahoo,
-                max_points_per_ticker: args.max_points_per_ticker,
+                max_points_per_ticker: max_points,
                 ibkr: None,
             };
             if let Ok(re_resp) = eli_core::finance::fetch_timeseries(re_req, &cache_dir).await {
@@ -812,7 +937,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 granularity,
                 as_of,
                 provider: eli_core::finance::ProviderKind::Fred,
-                max_points_per_ticker: args.max_points_per_ticker,
+                max_points_per_ticker: max_points,
                 ibkr: None,
             };
             match eli_core::finance::fetch_timeseries(fred_req, &cache_dir).await {
@@ -841,18 +966,10 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
 
         if !merged_series.is_empty() {
-            // If all data came from FRED (no Yahoo successes), label provider as fred;
-            // if mixed, label as yahoo (primary) — the data speaks for itself.
+            // If all data came from FRED (no Yahoo successes), label provider as fred.
             if valid_tickers.is_empty() {
                 resp.provider = eli_core::finance::ProviderKind::Fred;
             }
-            // Preserve any Pyth series that were already merged before auto-fallback.
-            let pyth_series: Vec<_> = resp
-                .series
-                .drain(..)
-                .filter(|s| eli_core::finance::is_pyth_ticker(&s.ticker))
-                .collect();
-            merged_series.extend(pyth_series);
             resp.series = merged_series;
             resp.status = if remaining_errors.is_empty() {
                 None
@@ -866,18 +983,116 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 Some(remaining_errors)
             };
             resp.valid_tickers = None;
-            // Recompute analytics with the merged series.
-            resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-                &resp.series,
-                resp.granularity,
-            ));
         }
     }
 
-    if !prediction_markets.is_empty() {
-        let (market_series, market_errors) =
-            fetch_prediction_market_series_batch(&prediction_markets, resp.start, resp.end, granularity)
-                .await;
+    // ---- Merges (deterministic order) ----
+    if let Some(result) = yahoo_extra_res {
+        match result {
+            Ok(yahoo_resp) => {
+                resp.series.extend(yahoo_resp.series);
+                resp.tickers.extend(yahoo_tickers.clone());
+            }
+            Err(e) => {
+                eprintln!("warning: Yahoo fetch failed for mixed request: {e}");
+            }
+        }
+    }
+    if let Some(result) = pyth_res {
+        match result {
+            Ok(pyth_resp) => {
+                resp.series.extend(pyth_resp.series);
+                resp.tickers.extend(pyth_tickers.clone());
+                if let Some(ref pyth_errors) = pyth_resp.errors {
+                    resp.errors
+                        .get_or_insert_with(Vec::new)
+                        .extend(pyth_errors.clone());
+                }
+            }
+            Err(e) => {
+                eprintln!("warning: Pyth fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: pyth_tickers.join(","),
+                        stage: Some("pyth".to_string()),
+                        message: format!("Pyth provider failed: {e}"),
+                    });
+            }
+        }
+    }
+    if let Some(result) = binance_res {
+        match result {
+            Ok(binance_resp) => {
+                resp.series.extend(binance_resp.series);
+                resp.tickers.extend(binance_tickers.clone());
+                if let Some(ref binance_errors) = binance_resp.errors {
+                    resp.errors
+                        .get_or_insert_with(Vec::new)
+                        .extend(binance_errors.clone());
+                }
+            }
+            Err(e) => {
+                eprintln!("warning: Binance fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: binance_tickers.join(","),
+                        stage: Some("binance".to_string()),
+                        message: format!("Binance provider failed: {e}"),
+                    });
+            }
+        }
+    }
+    if let Some(result) = ibkr_res {
+        match result {
+            Ok(mut ibkr_resp) => {
+                // Re-attach IBKR: prefix on returned series so round-trip is consistent
+                // with PYTH:/CLEV:/POLYMARKET:/KALSHI: prefix preservation.
+                for s in &mut ibkr_resp.series {
+                    if !s.ticker.starts_with("IBKR:") && !s.ticker.starts_with("ibkr:") {
+                        s.ticker = format!("IBKR:{}", s.ticker);
+                    }
+                }
+                resp.series.extend(ibkr_resp.series);
+                resp.tickers.extend(ibkr_tickers.clone());
+                if let Some(ref ibkr_errors) = ibkr_resp.errors {
+                    resp.errors
+                        .get_or_insert_with(Vec::new)
+                        .extend(ibkr_errors.clone());
+                }
+            }
+            Err(e) => {
+                eprintln!("warning: IBKR fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: ibkr_tickers.join(","),
+                        stage: Some("ibkr".to_string()),
+                        message: format!("IBKR provider failed: {e}"),
+                    });
+            }
+        }
+    }
+    if let Some(result) = clev_res {
+        match result {
+            Ok(clev_series) => {
+                resp.series.extend(clev_series);
+                resp.tickers.extend(cleveland_tickers.clone());
+            }
+            Err(e) => {
+                eprintln!("warning: Cleveland Fed fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: cleveland_tickers.join(","),
+                        stage: Some("cleveland_fed".to_string()),
+                        message: format!("Cleveland Fed provider failed: {e}"),
+                    });
+            }
+        }
+    }
+    if let Some((market_series, market_errors)) = pm_res {
         let mut existing_series: HashSet<String> =
             resp.series.iter().map(|s| s.ticker.clone()).collect();
         for series in market_series {
@@ -894,22 +1109,9 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         if !resp.series.is_empty() {
             resp.error = None;
             resp.valid_tickers = None;
-            resp.status = match resp.errors.as_ref() {
-                Some(errors) if !errors.is_empty() => Some("partial".to_string()),
-                _ => None,
-            };
-            resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-                &resp.series,
-                resp.granularity,
-            ));
         }
     }
-
-    // RATEPATH merge: aggregate per-meeting rate-path probability buckets across
-    // Polymarket + Kalshi constituents (same shape as prediction_markets merge).
-    if has_ratepath {
-        let (rp_series, rp_errors) =
-            fetch_ratepath_series_batch(&ratepath_tickers, resp.start, resp.end, granularity).await;
+    if let Some((rp_series, rp_errors)) = rp_res {
         let mut existing_series: HashSet<String> =
             resp.series.iter().map(|s| s.ticker.clone()).collect();
         for series in rp_series {
@@ -924,15 +1126,16 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         if !resp.series.is_empty() {
             resp.error = None;
             resp.valid_tickers = None;
-            resp.status = match resp.errors.as_ref() {
-                Some(errors) if !errors.is_empty() => Some("partial".to_string()),
-                _ => None,
-            };
-            resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-                &resp.series,
-                resp.granularity,
-            ));
         }
+    }
+
+    // Single analytics pass over the final merged series set (was recomputed
+    // after every individual merge above).
+    if !resp.series.is_empty() {
+        resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+            &resp.series,
+            resp.granularity,
+        ));
     }
 
     // Populate top-level `sources` with distinct providers actually present in series.
@@ -996,14 +1199,29 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
         let dropped: Vec<String> = requested.difference(&accounted).cloned().collect();
         if !dropped.is_empty() {
+            // Give the caller a reason it can act on instead of the old
+            // "no error was recorded" shrug repeated verbatim per ticker.
+            let window_days = (resp.end - resp.start).num_days();
+            let intraday = granularity.approx_duration().num_seconds() < 86_400;
             let drop_errors: Vec<eli_core::finance::TimeseriesError> = dropped
                 .into_iter()
-                .map(|t| eli_core::finance::TimeseriesError {
-                    ticker: t,
-                    stage: Some("silent_drop".to_string()),
-                    message:
-                        "no provider returned data and no error was recorded for this ticker"
-                            .to_string(),
+                .map(|t| {
+                    let looks_like_pm_slug = t == t.to_ascii_lowercase()
+                        && t.contains('-')
+                        && !t.contains('=')
+                        && t.chars().any(|c| c.is_ascii_alphabetic());
+                    let message = if looks_like_pm_slug {
+                        "looks like a Polymarket slug — slugs don't join here; use the numeric market id from finance_odds markets[].ticker".to_string()
+                    } else if intraday && window_days <= 3 {
+                        "no data in window — a short intraday range can fall entirely on a weekend/holiday; widen --range (e.g. 5d) or use --granularity 1d".to_string()
+                    } else {
+                        "no provider returned data for this ticker in the requested window".to_string()
+                    };
+                    eli_core::finance::TimeseriesError {
+                        ticker: t,
+                        stage: Some("silent_drop".to_string()),
+                        message,
+                    }
                 })
                 .collect();
             resp.errors.get_or_insert_with(Vec::new).extend(drop_errors);
@@ -1034,8 +1252,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_timeseries_stdout(&resp)?;
     Ok(())
 }
 
@@ -1779,7 +1996,22 @@ async fn fetch_kalshi_market_series(
         .await
         .context("parse kalshi candlesticks response")?;
     let market = parsed.markets.into_iter().next().ok_or_else(|| {
-        anyhow::anyhow!("kalshi returned no candlesticks for market {}", req.market)
+        // Bare event tickers (KXFEDDECISION-26JUL) hit this: candlesticks only
+        // exist for market legs. Say so instead of a dead-end "no data".
+        let has_leg_suffix = req
+            .market
+            .rsplit('-')
+            .next()
+            .is_some_and(|leg| leg.len() <= 6 && leg.chars().next().is_some_and(|c| c.is_ascii_alphabetic()));
+        if has_leg_suffix {
+            anyhow::anyhow!("kalshi returned no candlesticks for market {}", req.market)
+        } else {
+            anyhow::anyhow!(
+                "kalshi returned no candlesticks for {} — this looks like an event ticker; candlesticks exist only for market legs (use finance_odds markets[].ticker, e.g. {}-H0)",
+                req.market,
+                req.market
+            )
+        }
     })?;
 
     let mut candles: Vec<eli_core::finance::Candle> = Vec::new();
@@ -2032,7 +2264,7 @@ async fn fetch_polymarket_market_series(
 
     if buckets.is_empty() {
         anyhow::bail!(
-            "no polymarket price history points found for market {} in requested window",
+            "no polymarket price history points found for market {} in requested window — the market may be closed or the id stale; re-run finance_odds --search to get a live market id",
             req.market
         );
     }
@@ -2272,6 +2504,25 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
             "BAMLH0A3HYC",    // CCC & Lower OAS
             "BAMLEMCBPIOAS",   // EM Corporate OAS
         ],
+        // Private credit / BDC complex: listed BDC equities as the liquid
+        // proxy for private-credit stress, CLO tranche ETFs for the funding
+        // stack, plus HY-vs-CCC public-credit reference points. The chain
+        // (BDC tape + CCC OAS + credit ETFs) kept being assembled by hand in
+        // research sessions — frozen here as a preset.
+        "private_credit" | "bdc" => vec![
+            "ARCC",           // Ares Capital (largest BDC)
+            "OBDC",           // Blue Owl Capital Corp
+            "FSK",            // FS KKR Capital
+            "HTGC",           // Hercules Growth Capital (venture debt)
+            "MAIN",           // Main Street Capital
+            "BXSL",           // Blackstone Secured Lending
+            "CLOI",           // VanEck CLO ETF (IG tranches)
+            "JBBB",           // Janus Henderson B-BBB CLO ETF (mezz)
+            "JAAA",           // Janus Henderson AAA CLO ETF
+            "HYG",            // HY corporate bond ETF reference
+            "BKLN",           // Leveraged loan ETF reference
+            "BAMLH0A3HYC",    // CCC & Lower OAS (public-credit stress rung)
+        ],
         // Financial conditions indices (weekly)
         "financial_conditions" | "conditions" | "nfci" => vec![
             "NFCI",           // Chicago Fed National Financial Conditions
@@ -2404,6 +2655,7 @@ fn list_timeseries_presets() -> serde_json::Value {
         ("macro", "", "34-series US macro dashboard: inflation, jobs, GDP, rates, debt, money, consumer, credit + live Pyth oil/gold/BTC"),
         ("recession", "recession_indicators", "Recession gauges: Sahm rule, 10Y-2Y & 10Y-3M curves, claims, unemployment, industrial production, Chicago Fed NAI"),
         ("credit", "credit_spreads,spreads", "Full ICE BofA OAS stack: IG, BBB, HY, BB, B, CCC, EM corporate spreads"),
+        ("private_credit", "bdc", "Private credit / BDC complex: ARCC, OBDC, FSK, HTGC, MAIN, BXSL + CLO ETFs (JAAA/JBBB/CLOI) + HYG/BKLN + CCC OAS"),
         ("financial_conditions", "conditions,nfci", "Financial conditions / stress: NFCI, ANFCI, St. Louis FSI, VIX"),
         ("inflation", "", "Inflation deep-dive: headline & core CPI, core PCE, PPI, breakevens, 5y5y forward, UMich, sticky & median CPI"),
         ("labor", "employment", "Labor market: payrolls, U-3/U-6, initial+continued claims, JOLTS openings/quits, participation, wages, hours"),

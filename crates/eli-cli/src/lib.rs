@@ -18,4 +18,5 @@ include!("cmd/finance/movers_extended.rs");
 include!("cmd/finance/curve.rs");
 include!("cmd/finance/fed.rs");
 include!("cmd/finance/mod.rs");
+include!("cmd/finance/audit.rs");
 include!("cmd/picks.rs");

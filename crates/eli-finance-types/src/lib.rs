@@ -607,6 +607,20 @@ pub struct TimeseriesAnalytics {
 pub struct TimeseriesStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_return: Option<f64>,
+    /// Last close of the window (saves re-scanning candles for "where is it now").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<f64>,
+    /// Timestamp of that last candle — compare against generated_at to see
+    /// how stale "last" is (an equity close can be hours old during
+    /// pre/post-market or overnight).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_at: Option<DateTime<Utc>>,
+    /// Where the last close sits inside the window's close range:
+    /// 0.0 = at the window low, 1.0 = at the window high. The relative read
+    /// ("near its 1y high") that otherwise has to be recomputed from raw
+    /// candles on every multi-series pull.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_position: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1988,6 +2002,10 @@ pub struct InsiderTransaction {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InsiderSummary {
+    /// How many transactions the summary aggregates (the full parsed window,
+    /// which can exceed the number of echoed transaction rows).
+    #[serde(default)]
+    pub transactions_analyzed: usize,
     pub buy_count: u32,
     pub sell_count: u32,
     pub buy_shares: f64,

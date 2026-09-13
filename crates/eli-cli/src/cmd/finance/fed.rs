@@ -23,8 +23,7 @@ async fn cmd_finance_nyfed(args: FinanceNyfedArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -61,8 +60,7 @@ async fn cmd_finance_volsurface(args: FinanceVolsurfaceArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -91,8 +89,7 @@ async fn cmd_finance_stress(args: FinanceStressArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -121,8 +118,7 @@ async fn cmd_finance_fiscal(args: FinanceFiscalArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -167,8 +163,7 @@ async fn cmd_finance_ecb(args: FinanceEcbArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize ecb response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -217,8 +212,7 @@ async fn cmd_finance_eia(args: FinanceEiaArgs) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&resp).context("serialize eia response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -247,8 +241,7 @@ async fn cmd_finance_bis(args: FinanceBisArgs) -> Result<()> {
         println!("{{\"ok\":true,\"path\":{},\"meta_path\":{}}}", serde_json::to_string(&wr.out_path.display().to_string()).unwrap_or_else(|_| "\"\"".to_string()), serde_json::to_string(&wr.meta_path.display().to_string()).unwrap_or_else(|_| "\"\"".to_string()));
         return Ok(());
     }
-    let json = serde_json::to_string_pretty(&resp).context("serialize bis response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -276,8 +269,7 @@ async fn cmd_finance_boj(args: FinanceBojArgs) -> Result<()> {
         println!("{{\"ok\":true,\"path\":{},\"meta_path\":{}}}", serde_json::to_string(&wr.out_path.display().to_string()).unwrap_or_else(|_| "\"\"".to_string()), serde_json::to_string(&wr.meta_path.display().to_string()).unwrap_or_else(|_| "\"\"".to_string()));
         return Ok(());
     }
-    let json = serde_json::to_string_pretty(&resp).context("serialize boj response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }
 
@@ -305,7 +297,6 @@ async fn cmd_finance_boe(args: FinanceBoeArgs) -> Result<()> {
         println!("{{\"ok\":true,\"path\":{},\"meta_path\":{}}}", serde_json::to_string(&wr.out_path.display().to_string()).unwrap_or_else(|_| "\"\"".to_string()), serde_json::to_string(&wr.meta_path.display().to_string()).unwrap_or_else(|_| "\"\"".to_string()));
         return Ok(());
     }
-    let json = serde_json::to_string_pretty(&resp).context("serialize boe response")?;
-    println!("{json}");
+    emit_tool_payload(&resp)?;
     Ok(())
 }

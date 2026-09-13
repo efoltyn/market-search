@@ -5,17 +5,19 @@
 //   ngrok       → permanent URL via `ngrok` (account required, your reserved subdomain persists)
 //   tunnelmole  → temporary URL via `npx tunnelmole` (less reliable; dies silently after hours)
 //
-// Plus a placeholder for `self-host` (sovereign) mode that points at
-// SELFHOST.md until the Rust gateway/laptop-ACME stack ships.
+// `--provider self-host` prints how to run the stateless HTTP server behind
+// your own TLS instead (see SELFHOST.md); the sovereign SNI gateway is not built.
 
-const SHARE_PID_FILE: &str = "/tmp/market-search-share-children.pid";
+fn share_pid_file() -> std::path::PathBuf {
+    std::env::temp_dir().join("market-search-share-children.pid")
+}
 
 async fn cmd_mcp_share(args: ShareArgs) -> Result<()> {
     let provider = args.provider.to_ascii_lowercase();
     let port = args.port;
 
-    // Self-host is design-phase only — short-circuit BEFORE booting any local
-    // server, since this isn't actually a runnable provider yet.
+    // Self-host needs no tunnel — print the direct-serve recipe BEFORE booting
+    // any local server.
     if matches!(
         provider.as_str(),
         "self-host" | "selfhost" | "self_host" | "sovereign"
@@ -36,7 +38,7 @@ async fn cmd_mcp_share(args: ShareArgs) -> Result<()> {
         "cloudflare" | "cloudflared" | "cf" => provider_cloudflare(port).await,
         "ngrok" => provider_ngrok(args).await,
         other => anyhow::bail!(
-            "unknown provider '{}'. Pick one of: tunnelmole, cloudflare, ngrok (self-host is not implemented yet — see SELFHOST.md)",
+            "unknown provider '{}'. Pick one of: tunnelmole, cloudflare, ngrok (to self-host, run `market-search mcp --http` behind your own TLS — see SELFHOST.md)",
             other
         ),
     }
@@ -48,7 +50,8 @@ async fn cmd_mcp_share(args: ShareArgs) -> Result<()> {
 /// to shut down. If the port is already serving our MCP, returns None and
 /// reuses the existing process.
 async fn ensure_local_mcp(port: u16) -> Result<Option<tokio::task::JoinHandle<()>>> {
-    let url = format!("http://127.0.0.1:{}/mcp", port);
+    // Probe the health route: /mcp is POST-only and answers GET with 405.
+    let url = format!("http://127.0.0.1:{}/", port);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -70,7 +73,7 @@ async fn ensure_local_mcp(port: u16) -> Result<Option<tokio::task::JoinHandle<()
 
     eprintln!("[eli mcp share] booting local HTTP MCP on :{}", port);
     let handle = tokio::spawn(async move {
-        if let Err(e) = cmd_mcp_http(port).await {
+        if let Err(e) = cmd_mcp_http("0.0.0.0", port).await {
             eprintln!("[eli mcp share] local MCP exited: {e}");
         }
     });
@@ -218,14 +221,11 @@ async fn provider_ngrok(args: ShareArgs) -> Result<()> {
 
 fn provider_selfhost() -> Result<()> {
     anyhow::bail!(
-        "self-host / sovereign mode is NOT IMPLEMENTED yet — it is a design spec, not a runnable provider.\n\n\
-         What works today:\n  \
-         market-search mcp share --provider ngrok --domain <your>.ngrok-free.dev   (permanent, free, requires ngrok account)\n  \
-         market-search mcp share --provider cloudflare                              (instant temporary URL, dies on process exit)\n  \
-         market-search mcp share --provider tunnelmole                              (instant temporary, dies after a few hours)\n\n\
-         The planned sovereign architecture (SNI-pass-through gateway, TLS terminates on laptop, gateway cannot decrypt MCP traffic) requires \
-         a separate eli-gateway crate plus rustls-acme + quinn integration that doesn't exist in this build. See SELFHOST.md for the design.\n\n\
-         If you want to pilot the self-host architecture, file an issue at github.com/efoltyn/market-search.")
+        "`share` opens a third-party tunnel; self-hosting doesn't need one. The MCP server is stateless, so run it directly:\n\n  \
+         MARKET_SEARCH_MCP_TOKEN=<secret> market-search mcp --http --host 127.0.0.1 --port 8484\n\n\
+         then put your own TLS in front (Caddy, nginx, a cloud load balancer) and point clients at https://<your-host>/mcp.\n\
+         `market-search mcp --check` lists which tools your keys unlock. Full guide: SELFHOST.md.\n\n\
+         Not built: the sovereign SNI-passthrough gateway (TLS terminating on the laptop behind a VPS). SELFHOST.md covers that design.")
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -315,11 +315,11 @@ async fn wait_for_signal_or_exit(mut child: tokio::process::Child) -> Result<()>
         _ = tokio::signal::ctrl_c() => {
             eprintln!("\n[eli mcp share] shutting down tunnel...");
             let _ = child.kill().await;
-            let _ = std::fs::remove_file(SHARE_PID_FILE);
+            let _ = std::fs::remove_file(share_pid_file());
             Ok(())
         }
         status = child.wait() => {
-            let _ = std::fs::remove_file(SHARE_PID_FILE);
+            let _ = std::fs::remove_file(share_pid_file());
             let status = status.context("tunnel child wait")?;
             anyhow::bail!("tunnel process exited unexpectedly: {}", status);
         }
@@ -336,12 +336,12 @@ async fn wait_for_signal_or_exit(mut child: tokio::process::Child) -> Result<()>
 
 fn record_child_pid(child: &tokio::process::Child) {
     if let Some(pid) = child.id() {
-        let _ = std::fs::write(SHARE_PID_FILE, format!("{}\n", pid));
+        let _ = std::fs::write(share_pid_file(), format!("{}\n", pid));
     }
 }
 
 fn cleanup_orphan_children() {
-    let Ok(content) = std::fs::read_to_string(SHARE_PID_FILE) else {
+    let Ok(content) = std::fs::read_to_string(share_pid_file()) else {
         return;
     };
     for line in content.lines() {
@@ -357,5 +357,5 @@ fn cleanup_orphan_children() {
             eprintln!("[eli mcp share] reaped orphan tunnel PID {}", pid);
         }
     }
-    let _ = std::fs::remove_file(SHARE_PID_FILE);
+    let _ = std::fs::remove_file(share_pid_file());
 }

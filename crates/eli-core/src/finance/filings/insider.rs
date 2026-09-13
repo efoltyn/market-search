@@ -8,7 +8,12 @@ pub async fn fetch_insider(req: InsiderRequest, cache_dir: &Path) -> Result<Insi
     }
 
     let days = req.days.unwrap_or(90);
-    let limit = req.limit.unwrap_or(50).clamp(1, 200);
+    let row_limit = req.limit.unwrap_or(50).clamp(1, 200);
+    // The summary must aggregate over the full lookback window, not the
+    // echoed-row cap: --summary-only --limit 5 used to report zero sells
+    // when the true window held $410M of them. Parse up to the hard cap;
+    // truncate the ROWS afterwards.
+    let limit = if req.summary_only { 200 } else { row_limit.max(50) };
     let cutoff_date = Utc::now() - Duration::days(days as i64);
 
     // Reuse existing SEC infrastructure
@@ -166,6 +171,7 @@ pub async fn fetch_insider(req: InsiderRequest, cache_dir: &Path) -> Result<Insi
     }
 
     let summary = InsiderSummary {
+        transactions_analyzed: transactions.len(),
         buy_count,
         sell_count,
         buy_shares,
@@ -177,6 +183,8 @@ pub async fn fetch_insider(req: InsiderRequest, cache_dir: &Path) -> Result<Insi
         unique_insiders: insiders_seen.len(),
     };
 
+    let mut transactions = transactions;
+    transactions.truncate(row_limit);
     let final_transactions = if req.summary_only {
         vec![]
     } else {

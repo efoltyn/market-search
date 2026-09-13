@@ -88,8 +88,25 @@ pub fn build_timeseries_analytics(series: &[TickerSeries], _granularity: Span) -
 
         let first = prices.first().copied();
         let last = prices.last().copied();
+        let last_at = s.candles.last().map(|c| c.t);
         let total_return = match (first, last) {
             (Some(f), Some(l)) if f != 0.0 => Some((l / f) - 1.0),
+            _ => None,
+        };
+        // Position of the last close inside the window's close range
+        // (0 = window low, 1 = window high) — the relative read ("near its
+        // 1y high") that otherwise gets recomputed by hand from raw candles
+        // on every multi-series pull.
+        let range_position = match last {
+            Some(l) if !prices.is_empty() => {
+                let lo = prices.iter().copied().fold(f64::INFINITY, f64::min);
+                let hi = prices.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                if hi > lo {
+                    Some((l - lo) / (hi - lo))
+                } else {
+                    None
+                }
+            }
             _ => None,
         };
 
@@ -97,6 +114,9 @@ pub fn build_timeseries_analytics(series: &[TickerSeries], _granularity: Span) -
             s.ticker.clone(),
             TimeseriesStats {
                 total_return,
+                last,
+                last_at,
+                range_position,
             },
         );
     }

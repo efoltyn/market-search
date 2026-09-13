@@ -16,7 +16,7 @@ fn sec_user_agent(override_ua: Option<&str>) -> Result<String> {
     let ua = ua.trim();
     if ua.is_empty() {
         return Err(Error::InvalidInput(
-            "SEC EDGAR requires a User-Agent with contact email. Set `ELI_SEC_USER_AGENT=\"eli (me@example.com)\"`, pass `--user-agent \"eli (me@example.com)\"`, or run `eli config --set sec_user_agent --value \"eli (me@example.com)\"`.".to_string(),
+            "SEC EDGAR requires a User-Agent with contact email (no signup, no key). Set `ELI_SEC_USER_AGENT=\"Jane Doe jane@example.com\"`, pass `--user-agent \"Jane Doe jane@example.com\"`, or run `market-search config --set sec_user_agent --value \"Jane Doe jane@example.com\"`.".to_string(),
         ));
     }
     Ok(ua.to_string())

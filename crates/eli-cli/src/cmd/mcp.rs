@@ -3,6 +3,13 @@
 // Usage: eli mcp   ← Claude Code connects automatically via .mcp.json
 
 async fn cmd_mcp() -> Result<()> {
+    // stdout is the JSON-RPC channel; the startup report goes to stderr, which
+    // MCP clients surface in their server logs.
+    eprintln!("market-search {} mcp (stdio)", env!("CARGO_PKG_VERSION"));
+    for line in mcp_capability_report() {
+        eprintln!("  {line}");
+    }
+
     let stdin = tokio::io::stdin();
     let mut reader = tokio::io::BufReader::new(stdin);
     let stdout = std::io::stdout();
@@ -38,6 +45,71 @@ async fn cmd_mcp() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Which tools this machine can serve, derived from optional credentials only.
+/// The server holds no session state, so this is the entire setup surface: every
+/// tool not named here works with zero configuration.
+fn mcp_capability_report() -> Vec<String> {
+    let mut lines = vec![
+        "stateless: no session store; every tool call runs as an isolated subprocess".to_string(),
+    ];
+
+    if eli_core::finance::resolve_eia_api_key().is_ok() {
+        lines.push("ok    finance_eia (EIA key found)".to_string());
+    } else {
+        lines.push(
+            "off   finance_eia: EIA_API_KEY not set (free key: https://www.eia.gov/opendata/register.php)"
+                .to_string(),
+        );
+    }
+
+    let sec_ua_env = std::env::var("ELI_SEC_USER_AGENT")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let sec_ua_config = Paths::discover()
+        .ok()
+        .and_then(|p| config::load_or_default(&p).ok())
+        .and_then(|c| c.chat.sec_user_agent)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if sec_ua_env || sec_ua_config {
+        lines.push("ok    finance_filings, finance_insider (SEC User-Agent set)".to_string());
+    } else {
+        lines.push(
+            "off   finance_filings, finance_insider: ELI_SEC_USER_AGENT not set (SEC EDGAR requires a contact, e.g. \"Jane Doe jane@example.com\"; no signup)"
+                .to_string(),
+        );
+    }
+
+    if eli_core::finance::has_fred_api_attachment_hint() {
+        lines.push("ok    FRED API key found (live FRED series search)".to_string());
+    } else {
+        lines.push(
+            "basic FRED_API_KEY not set: FRED data still works keyless; finance_search uses its built-in FRED catalog"
+                .to_string(),
+        );
+    }
+
+    if eli_core::finance::has_ibkr_attachment_hint() {
+        lines.push("ok    IBKR configured (IBKR:* tickers; needs a running IB Gateway/TWS)".to_string());
+    } else {
+        lines.push(
+            "opt   IBKR not configured: IBKR:* tickers unavailable; all other tools use free sources"
+                .to_string(),
+        );
+    }
+
+    let audit_on = std::env::var("ELI_AUDIT_LOG").map(|v| v != "0").unwrap_or(true);
+    match (audit_on, audit_log_path()) {
+        (true, Some(path)) => lines.push(format!(
+            "disk  activity trail + response archive at {} (grows unbounded; ELI_AUDIT_LOG=0 disables)",
+            path.display()
+        )),
+        _ => lines.push("disk  activity trail disabled".to_string()),
+    }
+
+    lines
 }
 
 async fn mcp_read_request<R>(reader: &mut R) -> Result<Option<serde_json::Value>>
@@ -178,8 +250,10 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
         .cloned()
         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
-    // ── data_query: jq on cached /tmp/eli_* files (no subprocess needed) ──
-    if tool_name == "data_query" {
+    // ── data_query: jq on cached eli_* scratch files (no subprocess needed) ──
+    // Stdio only: HTTP clients already get full output inline and never see a
+    // `_file` pointer, and a network-reachable jq is a file/env disclosure risk.
+    if tool_name == "data_query" && !full_output {
         return mcp_data_query(id, &args).await;
     }
 
@@ -289,7 +363,7 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
 
                 // Save (cleaned) output to file
                 let ts = chrono::Utc::now().timestamp_millis();
-                let path = format!("/tmp/eli_{tool_name}_{ts}.json");
+                let path = mcp_scratch_path(&format!("eli_{tool_name}_{ts}.json"));
                 let saved = std::fs::write(&path, save_data).is_ok();
 
                 // Build per-tool compact summary
@@ -337,7 +411,22 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
     }
 }
 
-/// Handle data_query: run jq on a cached /tmp/eli_* file.
+/// Where large stdio tool outputs are saved. `/tmp` on Unix (stable, short
+/// paths clients already know); the OS temp dir elsewhere, where `/tmp` does
+/// not exist and every save would silently fall back to a truncated response.
+fn mcp_scratch_dir() -> std::path::PathBuf {
+    if cfg!(unix) {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+fn mcp_scratch_path(file_name: &str) -> String {
+    mcp_scratch_dir().join(file_name).display().to_string()
+}
+
+/// Handle data_query: run jq on a cached eli_* scratch file.
 /// This is the "filing cabinet drawer pull" — lets the AI extract specific
 /// slices from large cached outputs without loading the whole file into context.
 async fn mcp_data_query(id: serde_json::Value, args: &serde_json::Value) -> serde_json::Value {
@@ -352,12 +441,19 @@ async fn mcp_data_query(id: serde_json::Value, args: &serde_json::Value) -> serd
         }
     };
 
-    // Security: only allow /tmp/eli_* files
-    if !file.starts_with("/tmp/eli_") {
+    // Security: only allow eli_* files directly inside the scratch dir (no
+    // `..` or nested components that could walk out of it).
+    let requested = std::path::Path::new(file);
+    let in_scratch = requested.parent() == Some(mcp_scratch_dir().as_path())
+        && requested
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("eli_"));
+    if !in_scratch {
         return json!({
             "jsonrpc": "2.0",
             "id": id,
-            "error": { "code": -32602, "message": "file must be a /tmp/eli_* path from a previous tool call" }
+            "error": { "code": -32602, "message": "file must be an eli_* scratch path from a previous tool call" }
         });
     }
 
@@ -381,7 +477,10 @@ async fn mcp_data_query(id: serde_json::Value, args: &serde_json::Value) -> serd
     };
 
     // Run jq on the file
+    // Clear the environment so a jq `env`/`$ENV` expression cannot read API keys.
     let result = TokioCommand::new("jq")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .arg("-c")
         .arg(jq_expr)
         .arg(file)
@@ -408,7 +507,7 @@ async fn mcp_data_query(id: serde_json::Value, args: &serde_json::Value) -> serd
                 stdout
             } else {
                 let ts = chrono::Utc::now().timestamp_millis();
-                let out_path = format!("/tmp/eli_query_{ts}.json");
+                let out_path = mcp_scratch_path(&format!("eli_query_{ts}.json"));
                 let _ = std::fs::write(&out_path, &stdout);
                 format!(
                     "{{\"_file\":\"{}\",\"_chars\":{}}}",
@@ -1502,6 +1601,55 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             Ok(v)
         }
+        "finance_insider" => {
+            let ticker = args
+                .get("ticker")
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| anyhow::anyhow!("ticker required"))?;
+            let mut v = vec![s("finance"), s("insider"), s("--ticker"), s(ticker)];
+            if let Some(days) = args.get("days").and_then(|n| n.as_u64()) {
+                v.extend([s("--days"), days.to_string()]);
+            }
+            if let Some(limit) = args.get("limit").and_then(|n| n.as_u64()) {
+                v.extend([s("--limit"), limit.to_string()]);
+            }
+            if args.get("summary_only").and_then(|b| b.as_bool()).unwrap_or(false) {
+                v.push(s("--summary-only"));
+            }
+            Ok(v)
+        }
+        "finance_short" => {
+            let ticker = args
+                .get("ticker")
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| anyhow::anyhow!("ticker required"))?;
+            Ok(vec![s("finance"), s("short"), s("--ticker"), s(ticker)])
+        }
+        "finance_log" => {
+            let mut v = vec![s("finance"), s("log")];
+            if let Some(tail) = args.get("tail").and_then(|n| n.as_u64()) {
+                v.extend([s("--tail"), tail.to_string()]);
+            }
+            if let Some(grep) = args.get("grep").and_then(|g| g.as_str()) {
+                v.extend([s("--grep"), s(grep)]);
+            }
+            if let Some(since) = args.get("since").and_then(|g| g.as_str()) {
+                v.extend([s("--since"), s(since)]);
+            }
+            if let Some(until) = args.get("until").and_then(|g| g.as_str()) {
+                v.extend([s("--until"), s(until)]);
+            }
+            if args.get("stats").and_then(|b| b.as_bool()).unwrap_or(false) {
+                v.push(s("--stats"));
+            }
+            if args.get("verify").and_then(|b| b.as_bool()).unwrap_or(false) {
+                v.push(s("--verify"));
+            }
+            if let Some(seq) = args.get("show_payload").and_then(|n| n.as_u64()) {
+                v.extend([s("--show-payload"), seq.to_string()]);
+            }
+            Ok(v)
+        }
         "finance_movers" => {
             let mut v = vec![s("finance"), s("movers")];
             if let Some(universe) = args.get("universe").and_then(|u| u.as_str()) {
@@ -2099,11 +2247,23 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             Ok(v)
         }
         "finance_filings" => {
-            let ticker = args
-                .get("ticker")
-                .and_then(|t| t.as_str())
-                .ok_or_else(|| anyhow::anyhow!("ticker required"))?;
-            let mut v = vec![s("finance"), s("filings"), s("--ticker"), s(ticker)];
+            let search_text = args.get("search_text").and_then(|t| t.as_str());
+            let mut v = vec![s("finance"), s("filings")];
+            if let Some(query) = search_text {
+                v.extend([s("--search-text"), s(query)]);
+                if let Some(from) = args.get("from").and_then(|t| t.as_str()) {
+                    v.extend([s("--from"), s(from)]);
+                }
+                if let Some(to) = args.get("to").and_then(|t| t.as_str()) {
+                    v.extend([s("--to"), s(to)]);
+                }
+            } else {
+                let ticker = args
+                    .get("ticker")
+                    .and_then(|t| t.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("ticker required (or pass search_text for cross-filer full-text search)"))?;
+                v.extend([s("--ticker"), s(ticker)]);
+            }
             if let Some(forms) = args.get("forms").and_then(|f| f.as_str()) {
                 v.extend([s("--forms"), s(forms)]);
             }
@@ -2162,6 +2322,13 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             if let Some(user_agent) = args.get("user_agent").and_then(|ua| ua.as_str()) {
                 v.extend([s("--user-agent"), s(user_agent)]);
+            }
+            if args
+                .get("press_release_text")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                v.push(s("--press-release-text"));
             }
             Ok(v)
         }
@@ -2438,7 +2605,42 @@ async fn mcp_run_subprocess(args: Vec<String>) -> anyhow::Result<String> {
 // POST /mcp  → JSON-RPC request/response (same handlers as stdio mode)
 // GET  /     → health check
 
-async fn cmd_mcp_http(port: u16) -> Result<()> {
+/// Optional shared secret for the HTTP transport, read once at startup from
+/// MARKET_SEARCH_MCP_TOKEN (env, not a flag, so it never shows up in `ps`).
+/// Immutable config, not session state: any replica with the same env behaves
+/// identically, so no sticky routing is needed.
+static MCP_HTTP_TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn mcp_http_token() -> Option<&'static str> {
+    MCP_HTTP_TOKEN
+        .get_or_init(|| {
+            std::env::var("MARKET_SEARCH_MCP_TOKEN")
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+        })
+        .as_deref()
+}
+
+/// Constant-time comparison of the presented bearer token.
+fn mcp_bearer_matches(headers: &axum::http::HeaderMap, expected: &str) -> bool {
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+        .unwrap_or("")
+        .trim()
+        .as_bytes();
+    let expected = expected.as_bytes();
+    presented.len() == expected.len()
+        && presented
+            .iter()
+            .zip(expected)
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+async fn cmd_mcp_http(host: &str, port: u16) -> Result<()> {
     use axum::{
         extract::Json as AxumJson,
         http::{header, HeaderName, Method, StatusCode},
@@ -2512,13 +2714,29 @@ async fn cmd_mcp_http(port: u16) -> Result<()> {
         .route("/token", post(oauth_token))
         .layer(cors);
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    eprintln!("eli mcp http → http://0.0.0.0:{port}/mcp");
-    eprintln!("Waiting for connections...");
-
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = tokio::net::TcpListener::bind((host, port))
         .await
-        .with_context(|| format!("bind port {port}"))?;
+        .with_context(|| format!("bind {host}:{port}"))?;
+    let bound = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| format!("{host}:{port}"));
+
+    eprintln!("eli mcp http → http://{bound}/mcp");
+    eprintln!("market-search {} mcp (streamable http)", env!("CARGO_PKG_VERSION"));
+    for line in mcp_capability_report() {
+        eprintln!("  {line}");
+    }
+    let loopback = listener.local_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
+    if mcp_http_token().is_some() {
+        eprintln!("  auth  MARKET_SEARCH_MCP_TOKEN set: /mcp requires Authorization: Bearer <token>");
+    } else if !loopback {
+        eprintln!(
+            "  WARN  no auth on a non-loopback address: anyone who can reach {bound} can call every tool. \
+             Bind --host 127.0.0.1 behind a tunnel/reverse proxy, or set MARKET_SEARCH_MCP_TOKEN."
+        );
+    }
+    eprintln!("Waiting for connections...");
 
     axum::serve(listener, app).await.context("mcp http serve")?;
     Ok(())
@@ -2748,6 +2966,21 @@ async fn mcp_http_handle(
         .get("method")
         .and_then(|m| m.as_str())
         .map(|s| s.to_string());
+
+    if let Some(expected) = mcp_http_token() {
+        if !mcp_bearer_matches(&headers, expected) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                axum::Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                    "error": { "code": -32001, "message": "missing or invalid bearer token" }
+                })),
+            )
+                .into_response();
+        }
+    }
 
     let mut response = match method.as_deref() {
         None => (
@@ -3093,5 +3326,19 @@ mod mcp_tool_tests {
         });
         let raw = serde_json::to_string(&input).unwrap();
         assert!(mcp_strip_metadata(&raw).is_none());
+    }
+
+    #[test]
+    fn mcp_bearer_matches_requires_exact_token() {
+        let with = |value: &str| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(axum::http::header::AUTHORIZATION, value.parse().unwrap());
+            h
+        };
+        assert!(mcp_bearer_matches(&with("Bearer s3cret"), "s3cret"));
+        assert!(!mcp_bearer_matches(&with("Bearer s3cre"), "s3cret"));
+        assert!(!mcp_bearer_matches(&with("Bearer s3cretX"), "s3cret"));
+        assert!(!mcp_bearer_matches(&with("s3cret"), "s3cret"));
+        assert!(!mcp_bearer_matches(&axum::http::HeaderMap::new(), "s3cret"));
     }
 }

@@ -75,7 +75,8 @@ async fn fetch_single_yahoo_snapshot(
     collected_at: DateTime<Utc>,
     freshness_policy: &crate::finance::policy::FreshnessPolicy,
 ) -> Result<TickerSnapshot> {
-        let request_ticker = yahoo_alias_ticker(ticker).unwrap_or(ticker);
+        let request_ticker = normalize_yahoo_request_ticker(ticker);
+        let request_ticker = request_ticker.as_str();
         let info = connector.get_ticker_info(request_ticker).await.map_err(|e| {
             Error::Provider(format!("yahoo quote summary failed for '{ticker}': {e}"))
         })?;
@@ -316,6 +317,21 @@ fn fx_session_state(now: DateTime<Utc>) -> String {
     }
 }
 
+/// Resolve the symbol actually sent to Yahoo. Beyond the static aliases,
+/// strip `/` from slashed FX forms: `USD/JPY=X` (the common written form)
+/// breaks Yahoo's chart URL and returns a deserialization error, while the
+/// canonical `USDJPY=X` works. Only `=X` tickers ever carry a slash.
+fn normalize_yahoo_request_ticker(ticker: &str) -> String {
+    if let Some(alias) = yahoo_alias_ticker(ticker) {
+        return alias.to_string();
+    }
+    let t = ticker.trim();
+    if t.contains('/') && t.to_ascii_uppercase().ends_with("=X") {
+        return t.replace('/', "");
+    }
+    t.to_string()
+}
+
 fn yahoo_alias_ticker(ticker: &str) -> Option<&'static str> {
     match ticker.trim().to_ascii_uppercase().as_str() {
         "DXY" => Some("DX-Y.NYB"),
@@ -363,7 +379,13 @@ async fn fetch_yahoo_series(
                         },
                     )?;
                 let intraday = matches!(base_span.unit, SpanUnit::Minute | SpanUnit::Hour);
-                let include_prepost = intraday && aligned_intraday;
+                // Intraday requests include pre/post-market bars for ALL
+                // ticker types. Equities used to be excluded, which froze
+                // every intraday series at the 20:00Z close during live
+                // extended sessions — a stock doubling after hours (CRNX
+                // +100% on 2026-07-06) showed a flat completed day with no
+                // hint that trading was still happening.
+                let include_prepost = intraday;
                 let base_step = base_span.approx_duration();
                 let base_step_seconds = base_step.num_seconds();
                 if base_step_seconds <= 0 {
@@ -386,9 +408,7 @@ async fn fetch_yahoo_series(
                         });
                     }
                 }
-                let request_ticker = yahoo_alias_ticker(&ticker)
-                    .unwrap_or(ticker.as_str())
-                    .to_string();
+                let request_ticker = normalize_yahoo_request_ticker(&ticker);
                 let quotes = yahoo_fetch_quotes_retry(
                     &request_ticker,
                     start_ts,
@@ -658,7 +678,16 @@ fn yahoo_base_interval(
         return Ok(("1d", Span { n: 1, unit: SpanUnit::Day }));
     }
 
+    // >= not >: a request for exactly 730d computes start = now-730d, and by
+    // the time it lands at Yahoo the elapsed wall-clock is past the cap — the
+    // raw provider error leaked for round-number ranges like --range 2y.
+    let hourly_limit = 730 * 24 * 60 * 60;
     if requested == 3600 {
+        if range_seconds >= hourly_limit {
+            return Err(
+                "yahoo serves 1h bars only for the last 730 days; use --granularity 1d for longer ranges (or --provider ibkr for deep intraday futures history)".to_string()
+            );
+        }
         return Ok(("1h", Span { n: 1, unit: SpanUnit::Hour }));
     }
 
@@ -672,6 +701,11 @@ fn yahoo_base_interval(
     }
 
     if aligned_intraday && requested > 3600 && requested % 3600 == 0 {
+        if range_seconds >= hourly_limit {
+            return Err(
+                "yahoo serves 1h bars only for the last 730 days; use --granularity 1d for longer ranges (or --provider ibkr for deep intraday futures history)".to_string()
+            );
+        }
         return Ok(("1h", Span { n: 1, unit: SpanUnit::Hour }));
     }
 
@@ -696,6 +730,11 @@ fn yahoo_base_interval(
     for &(interval, span, secs) in exact_candidates {
         if secs != requested {
             continue;
+        }
+        if secs == 60 && range_seconds >= 8 * 24 * 60 * 60 {
+            return Err(
+                "yahoo serves at most 8 days of 1m bars per request; use --range <=8d or a coarser granularity".to_string()
+            );
         }
         if secs < 3600 && range_seconds > fine_intraday_limit {
             return Err(format!(
