@@ -52,6 +52,12 @@ enum Command {
         cmd: WebCommand,
     },
 
+    /// Legal research tools (case law, dockets, citations, regulations, statutes)
+    Legal {
+        #[command(subcommand)]
+        cmd: LegalCommand,
+    },
+
     /// Start MCP (Model Context Protocol) server — exposes market-search tools as native Claude Code tools via JSON-RPC stdio.
     Mcp(McpArgs),
 
@@ -104,6 +110,11 @@ struct McpArgs {
     /// Print which tools this machine can serve (and which env var unlocks the rest), then exit.
     #[arg(long, default_value_t = false)]
     check: bool,
+
+    /// Which tool families to advertise: all (default) | finance | legal.
+    /// The `legal-search` binary defaults to `legal`.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

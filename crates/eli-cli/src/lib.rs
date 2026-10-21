@@ -2,6 +2,7 @@
 
 include!("context.rs");
 include!("args.rs");
+include!("args_legal.rs");
 include!("dispatch.rs");
 include!("cmd/mcp.rs");
 include!("cmd/mcp_share.rs");
@@ -19,4 +20,5 @@ include!("cmd/finance/curve.rs");
 include!("cmd/finance/fed.rs");
 include!("cmd/finance/mod.rs");
 include!("cmd/finance/audit.rs");
+include!("cmd/legal/mod.rs");
 include!("cmd/picks.rs");
