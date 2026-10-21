@@ -3099,6 +3099,17 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             Ok(v)
         }
+        "legal_state_guide" => {
+            let mut v = vec![s("legal"), s("guide")];
+            let Some(state) = args.get("state").and_then(|x| x.as_str()) else {
+                anyhow::bail!("legal_state_guide needs state");
+            };
+            v.extend([s("--state"), s(state)]);
+            if let Some(t) = args.get("topic").and_then(|x| x.as_str()) {
+                v.extend([s("--topic"), s(t)]);
+            }
+            Ok(v)
+        }
         _ => Err(anyhow::anyhow!("Unknown tool: {tool}")),
     }
 }
@@ -3872,7 +3883,7 @@ mod mcp_tool_tests {
     fn every_advertised_legal_tool_dispatches() {
         let catalog: Vec<serde_json::Value> =
             serde_json::from_str(include_str!("legal_tools.json")).expect("legal catalog parses");
-        assert_eq!(catalog.len(), 14, "catalog size changed — update the samples below");
+        assert_eq!(catalog.len(), 15, "catalog size changed — update the samples below");
 
         // One minimally-valid argument set per tool, chosen to satisfy each
         // tool's required-argument check.
@@ -3891,6 +3902,7 @@ mod mcp_tool_tests {
             ("legal_deadlines", serde_json::json!({"injury_date": "2024-03-15", "mechanism": "motor_vehicle"})),
             ("legal_caps", serde_json::json!({"accrual_date": "2024-06-01", "filing_date": "2025-07-01"})),
             ("legal_entity", serde_json::json!({"state": "co", "name": "STATE FARM"})),
+            ("legal_state_guide", serde_json::json!({"state": "fl"})),
         ];
 
         for tool in &catalog {
@@ -3917,6 +3929,7 @@ mod mcp_tool_tests {
         let empty = serde_json::json!({});
         for tool in [
             "legal_entity",
+            "legal_state_guide",
             "legal_cite",
             "legal_cfr",
             "legal_search",

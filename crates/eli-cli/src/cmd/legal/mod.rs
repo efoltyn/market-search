@@ -303,6 +303,17 @@ async fn cmd_legal_caps(args: LegalCapsArgs) -> Result<()> {
     legal_emit(&resp, args.out, "legal.caps", &args.format)
 }
 
+async fn cmd_legal_guide(args: LegalGuideArgs) -> Result<()> {
+    let req = eli_core::legal::states::guide::GuideRequest {
+        state: args.state,
+        topic: args.topic,
+    };
+    let resp = eli_core::legal::states::guide::fetch(req)
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("legal guide")?;
+    legal_emit(&resp, args.out, "legal.guide", &args.format)
+}
+
 async fn cmd_legal_entity(args: LegalEntityArgs) -> Result<()> {
     if args.name.is_none() && args.id.is_none() {
         anyhow::bail!("legal entity requires --name or --id");

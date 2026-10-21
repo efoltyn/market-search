@@ -32,6 +32,22 @@ enum LegalCommand {
     Caps(LegalCapsArgs),
     /// Business entity and registered-agent lookup.
     Entity(LegalEntityArgs),
+    /// Per-state map: official sources, traps, tool coverage, and cited PI facts to verify.
+    Guide(LegalGuideArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LegalGuideArgs {
+    /// Two-letter state code (or full name), any of the 50 states or dc.
+    #[arg(long)]
+    pub state: String,
+    /// Keyword filter over facts and traps, e.g. "notice", "cap", "medical".
+    #[arg(long)]
+    pub topic: Option<String>,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -85,7 +101,7 @@ pub struct LegalCapsArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct LegalEntityArgs {
-    /// State code. Currently co.
+    /// State code: co, ct, ny, or, pa, tx.
     #[arg(long, default_value = "co")]
     pub state: String,
     /// Entity name (substring match).
@@ -409,7 +425,7 @@ pub struct LegalEnforcementArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct LegalStatuteArgs {
-    /// State code (e.g. wi, ma). Switches from the US Code to that state's code.
+    /// State code (e.g. wi, ma, fl, oh). Switches from the US Code to that state's code.
     #[arg(long)]
     pub state: Option<String>,
     /// Chapter, for states that address law as chapter + section (e.g. MA ch. 90).

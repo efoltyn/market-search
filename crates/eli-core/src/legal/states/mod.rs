@@ -26,8 +26,11 @@ pub mod colorado;
 pub mod colorado_damages;
 pub mod colorado_deadlines;
 pub mod colorado_entity;
+pub mod guide;
 pub mod massachusetts;
 pub mod opinions;
+pub mod socrata_entities;
+pub mod templated;
 pub mod wisconsin;
 
 /// What a given state can actually answer. Kept as data rather than prose so
@@ -101,14 +104,14 @@ pub const COVERAGE: &[StateCoverage] = &[
         statutes: false,
         trial_records: false,
         opinions: true,
-            entities: false,
+            entities: true,
         damages_caps: false,
         deadlines: false,
     },
     StateCoverage {
         code: "mi",
         name: "Michigan",
-        statutes: false,
+        statutes: true,
         trial_records: false,
         opinions: true,
             entities: false,
@@ -125,12 +128,232 @@ pub const COVERAGE: &[StateCoverage] = &[
         damages_caps: false,
         deadlines: false,
     },
+    StateCoverage {
+        code: "ak",
+        name: "Alaska",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "az",
+        name: "Arizona",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "dc",
+        name: "District of Columbia",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "fl",
+        name: "Florida",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "ks",
+        name: "Kansas",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "me",
+        name: "Maine",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "mn",
+        name: "Minnesota",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "mo",
+        name: "Missouri",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "nc",
+        name: "North Carolina",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "ne",
+        name: "Nebraska",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "nv",
+        name: "Nevada",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "oh",
+        name: "Ohio",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "or",
+        name: "Oregon",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: true,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "ri",
+        name: "Rhode Island",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "sd",
+        name: "South Dakota",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "va",
+        name: "Virginia",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "wa",
+        name: "Washington",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "wv",
+        name: "West Virginia",
+        statutes: true,
+        trial_records: false,
+        opinions: false,
+        entities: false,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "ct",
+        name: "Connecticut",
+        statutes: false,
+        trial_records: false,
+        opinions: false,
+        entities: true,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "ny",
+        name: "New York",
+        statutes: false,
+        trial_records: false,
+        opinions: false,
+        entities: true,
+        damages_caps: false,
+        deadlines: false,
+    },
+    StateCoverage {
+        code: "tx",
+        name: "Texas",
+        statutes: false,
+        trial_records: false,
+        opinions: false,
+        entities: true,
+        damages_caps: false,
+        deadlines: false,
+    },
 ];
 
 pub fn supported(code: &str) -> Option<&'static StateCoverage> {
     let c = normalize_state(code);
     COVERAGE.iter().find(|s| s.code == c)
 }
+
+/// Names for the states with no coverage row yet, so "Alabama" still resolves.
+const OTHER_STATES: &[(&str, &str)] = &[
+    ("al", "Alabama"), ("ar", "Arkansas"), ("ca", "California"), ("de", "Delaware"),
+    ("ga", "Georgia"), ("hi", "Hawaii"), ("id", "Idaho"), ("in", "Indiana"), ("ia", "Iowa"),
+    ("ky", "Kentucky"), ("la", "Louisiana"), ("md", "Maryland"), ("ms", "Mississippi"),
+    ("mt", "Montana"), ("nh", "New Hampshire"), ("nm", "New Mexico"), ("nd", "North Dakota"),
+    ("ok", "Oklahoma"), ("sc", "South Carolina"), ("tn", "Tennessee"), ("ut", "Utah"),
+    ("vt", "Vermont"), ("wy", "Wyoming"),
+];
 
 /// Accept "wi", "WI", "Wisconsin" — a model will pass any of them.
 pub fn normalize_state(input: &str) -> String {
@@ -140,8 +363,10 @@ pub fn normalize_state(input: &str) -> String {
     }
     COVERAGE
         .iter()
-        .find(|s| s.name.to_ascii_lowercase() == raw)
-        .map(|s| s.code.to_string())
+        .map(|s| (s.code, s.name))
+        .chain(OTHER_STATES.iter().copied())
+        .find(|(_, name)| name.to_ascii_lowercase() == raw)
+        .map(|(code, _)| code.to_string())
         .unwrap_or(raw)
 }
 
@@ -204,6 +429,7 @@ pub async fn fetch_state_statute(req: StateStatuteRequest) -> Result<StateStatut
         "wi" => wisconsin::fetch_statute(req).await,
         "ma" => massachusetts::fetch_statute(req).await,
         "co" => colorado::fetch_statute(req).await,
+        c if templated::STATES.contains(&c) => templated::fetch_statute(req).await,
         _ => Err(unsupported(&code, "statute", |s| s.statutes)),
     }
 }
@@ -345,7 +571,7 @@ mod tests {
         for s in COVERAGE {
             if s.statutes {
                 assert!(
-                    matches!(s.code, "wi" | "ma" | "co"),
+                    matches!(s.code, "wi" | "ma" | "co") || templated::STATES.contains(&s.code),
                     "statute arm missing for {}",
                     s.code
                 );
@@ -360,11 +586,17 @@ mod tests {
                     s.code
                 );
             }
-            // The three Colorado-only layers. The table is what a caller reads
+            // The Colorado-only layers. The table is what a caller reads
             // to know what is answerable, so a row claiming a layer with no
             // dispatcher behind it would be the table telling a lie.
+            if s.entities {
+                assert!(
+                    s.code == "co" || socrata_entities::STATES.contains(&s.code),
+                    "entity arm missing for {}",
+                    s.code
+                );
+            }
             for (claimed, layer) in [
-                (s.entities, "entity"),
                 (s.damages_caps, "damages cap"),
                 (s.deadlines, "deadline"),
             ] {
@@ -519,6 +751,7 @@ pub async fn fetch_entity(req: EntityRequest) -> Result<EntityResponse> {
     let code = normalize_state(&req.state);
     match code.as_str() {
         "co" => colorado_entity::fetch_entity(req).await,
-        _ => Err(unsupported(&code, "entity lookup", |s| s.code == "co")),
+        c if socrata_entities::STATES.contains(&c) => socrata_entities::fetch_entity(req).await,
+        _ => Err(unsupported(&code, "entity lookup", |s| s.entities)),
     }
 }

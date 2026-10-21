@@ -54,6 +54,30 @@ name them in the error when you ask for one they don't.
 | Michigan | — | — | ✅ unpublished per curiams |
 | New Jersey | — | — | ✅ unpublished appellate |
 
+**Statutes in 19 more jurisdictions** — ak, az, dc, fl, ks, me, mi, mn, mo, nc, ne, nv,
+oh, or, ri, sd, va, wa, wv — come from one templated fetcher
+(`states/templated.rs`): one URL rule per state, each probed against the live
+legislature site, and one heuristic extractor that picks the occurrence of the
+section number followed by a catchline and the most prose (skipping
+breadcrumbs, tables of contents, cross-references and history notes). It is a
+heuristic, so every answer carries the official `source_url`. Maryland was
+dropped: its statute page renders the text client-side.
+
+**Business entities in five more states** — ct, ny, or, pa, tx — via their
+Socrata open-data portals (`states/socrata_entities.rs`). Each dataset is a
+different slice and every answer says so: New York and Oregon are active-only,
+Texas is the Comptroller's franchise-tax roll (no agent), Connecticut has no
+agent column, Pennsylvania lists the registered office and officers.
+
+**`legal_state_guide`** covers all 50 states and DC from a fast research
+sweep: the official source for every layer and whether a script can reach it,
+known traps, and seed personal-injury facts (limitations, notice deadlines,
+caps, comparative fault) each with a citation and a confidence rating. The
+facts are a map, not an authority — the first one checked (Florida's two-year
+negligence period) had the right value but a stale pin cite, § 95.11(4)(a),
+which a 2024 amendment moved to (5)(a). Read the section before relying on a
+row.
+
 **Wisconsin is the only state where the loop closes end to end**: find the
 traffic case, read the statute charged, pull the appellate law, verify the
 citations. Every other state is missing the trial-court leg, which is where a

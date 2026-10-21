@@ -117,5 +117,6 @@ async fn cmd_legal(cmd: LegalCommand) -> Result<()> {
         LegalCommand::Deadlines(args) => cmd_legal_deadlines(args).await,
         LegalCommand::Caps(args) => cmd_legal_caps(args).await,
         LegalCommand::Entity(args) => cmd_legal_entity(args).await,
+        LegalCommand::Guide(args) => cmd_legal_guide(args).await,
     }
 }
