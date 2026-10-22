@@ -38,6 +38,47 @@ structurally cannot. Not "answers it better" — cannot.
 | `legal_opinion` | The complete opinion as a payload you can pincite, not a summarizer's description of one. |
 | `legal_enforcement` | The agencies' own records, rather than reporting about them. |
 
+## Brief checking (`legal_cite`)
+
+Pass a brief (`text`, or `file` for a local file) and every authority is
+checked four ways in one call:
+
+| Check | Catches | Source |
+|---|---|---|
+| Existence | an invented citation (`925 F.3d 1339`, *Varghese*) | CourtListener `/c/` resolver, key-free |
+| Attribution | a real reporter page under an invented name (*Petersen v. Iran Air* at a page that is *U.S. v. ISS Marine*) | the resolver's case name vs. the name in the brief |
+| Quotations + pin cites | a fabricated quote from a real case; a real quote on the wrong page | Caselaw Access Project static HTML, which carries the reporter's `*161` page breaks |
+| Treatment (opt-in) | a case later overruled / abrogated | citing opinions with negative-treatment language, from the search index |
+
+Buckets are deliberately strict: a cite that exists but whose name could not
+be compared is `unconfirmed`, never `verified`; Westlaw (`2019 WL ...`), Lexis
+and state neutral cites are listed as `unchecked`, never dropped; a throttled
+lookup is `unchecked`, never "not found".
+
+Measured on a Mata-style brief (three invented cases, one fabricated quote,
+real Supreme Court authority): every invented or misattributed cite caught,
+the fabricated quotation `not_found`, real quotations `verbatim` with their
+pins confirmed, a paraphrase `close` with the court's real words and "pin cite
+says 158, but the passage is on page 161."
+
+Traps found building it:
+
+- **Corporate suffixes ended the case-name parse.** "Miller v. United
+  Airlines, Inc.," stopped at the comma, no name was read, and a page that is
+  really *Greenleaf v. Garlock* passed as verified. The party pattern now
+  allows `, Inc.` / `, Ltd.` / `, Co.`, and an unparsed caption is never
+  counted as verified.
+- **Digitised reporters are OCR.** *Tseng* reads "een-trally" for "centrally",
+  hyphenated across a page break. Matching is word-level with a small edit
+  distance, and a word split by a page label is rejoined.
+- **"Overruled" next to a case name is not about that case.** "(quoting Nken
+  v. Holder ...), overruled on other grounds by ..." is about the outer
+  citation. Treatment counts only "overruling X" or "X ..., overruled by"
+  with balanced parentheses between.
+- **Quote text after ~2020 needs a token.** CAP's digitisation ends there; the
+  remaining key-free routes are a bot-walled page and a search snippet, so
+  without `COURTLISTENER_TOKEN` those quotes come back `unchecked`.
+
 ## State law
 
 The federal tools are national; state coverage is deliberately narrow, and each

@@ -277,6 +277,15 @@ pub struct LegalCiteArgs {
     /// CourtListener opinion id for the network walk.
     #[arg(long)]
     pub id: Option<u64>,
+    /// Skip checking quotations (on by default with --text).
+    #[arg(long, default_value_t = false)]
+    pub no_quotes: bool,
+    /// Also look for negative treatment (overruled, abrogated...) of each case.
+    #[arg(long, default_value_t = false)]
+    pub treatment: bool,
+    /// Read the passage from a file (plain text or HTML) instead of --text.
+    #[arg(long)]
+    pub file: Option<PathBuf>,
     /// Max network results (default 25).
     #[arg(long, default_value = "25")]
     pub limit: usize,

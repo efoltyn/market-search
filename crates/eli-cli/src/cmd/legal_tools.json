@@ -1,7 +1,7 @@
 [
   {
     "name": "legal_cite",
-    "description": "VERIFY CITATIONS BEFORE YOU RELY ON THEM. Resolves a reporter citation against CourtListener's index of ~10M opinions and tells you whether the case exists and what it actually is. This is the antidote to the signature failure mode of AI legal work: a citation that looks perfectly well-formed and is not real, or is real but stands for a different case than the one named. A web search cannot do this — search engines index what exists and have no representation of 'this reporter page is empty', so absence of results conflates fabricated / unpublished / not-digitized / not-indexed. This tool distinguishes them. Pass `text` with a whole paragraph, brief section, or draft memo and EVERY citation in it is extracted and checked in one call — that is the intended use. Pass `cite` for a single citation. Each verdict returns exists (bool), the real case_name, court, date, and a link. IMPORTANT: a not-found verdict is strong evidence of fabrication but not proof — unpublished and un-digitized opinions exist, and the `note` field says so; report it that way rather than flatly declaring a case fake. Also walks the citation network: `cited_by` gives you what has cited this opinion since (the free equivalent of a Shepard's/KeyCite pull for checking whether authority is still good), `authorities` gives you what it relied on. Works with no API key; setting COURTLISTENER_TOKEN (free) raises rate limits and enables the authoritative parallel-citation lookup.",
+    "description": "CHECK A BRIEF BEFORE IT IS FILED. Pass `text` (or `file`) with a paragraph, a section, or a whole brief and every authority in it is checked in one call, four ways: (1) EXISTENCE — does the reporter page hold a case at all (CourtListener's ~10M opinions, key-free); (2) ATTRIBUTION — is it the case the brief names? A real reporter page wearing an invented case name is the fabrication that survives every existence check, and is reported as `misattributed`. A cite that exists but whose name could not be compared is `unconfirmed`, never `verified`; (3) QUOTATIONS AND PIN CITES — every quotation is tied to its case (the cite after it, a short form like '525 U.S. at 161', an Id., or the case named in the sentence), checked word by word against the opinion's text (OCR-tolerant, ellipses and [alterations] honoured), and graded verbatim / close (with the court's actual words in `found_text`) / not_found. Where the text carries reporter page breaks (Caselaw Access Project, through ~2020) the pin cite is checked against the page the passage is really on, and a passage from a dissent is flagged. A fabricated quotation from a real case is what courts now sanction on its own; (4) TREATMENT (opt-in `treatment: true`) — later opinions that cite each case and use overruled / abrogated / superseded language, each with the highlighted passage and whether it names this case: a free first pass at 'is this still good law', not a KeyCite flag — read the passages. Westlaw (2019 WL ...), Lexis and state neutral cites are listed as NOT CHECKED rather than dropped — the free corpus cannot see them, and invented briefs lean on them. Short cites with no matching full citation are flagged. Buckets: verified, misattributed, unconfirmed, unverified (not found — strong evidence of fabrication, not proof: unpublished and undigitised opinions exist, and the note says so), unchecked (no finding). Also walks the citation network: `cited_by` (who relies on it since), `authorities` (what it rests on). Works with no key; COURTLISTENER_TOKEN (free) adds authoritative case names, parallel cites, and full text for post-2020 opinions.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -28,6 +28,18 @@
         "limit": {
           "type": "integer",
           "description": "Max network results (default 25)."
+        },
+        "quotes": {
+          "type": "boolean",
+          "description": "Check quotations and pin cites in `text` (default true)."
+        },
+        "treatment": {
+          "type": "boolean",
+          "description": "Also search for negative treatment of each case (overruled, abrogated, superseded). Opt-in: two searches per case against a tight anonymous budget."
+        },
+        "file": {
+          "type": "string",
+          "description": "Path to a local .txt/.html/.md file holding the passage or brief, instead of `text`."
         }
       }
     }

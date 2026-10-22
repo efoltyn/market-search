@@ -90,16 +90,24 @@ async fn cmd_legal_docket(args: LegalDocketArgs) -> Result<()> {
 }
 
 async fn cmd_legal_cite(args: LegalCiteArgs) -> Result<()> {
-    if args.text.is_none() && args.cite.is_none() && args.id.is_none() {
-        anyhow::bail!("legal cite requires --text, --cite, or --id");
+    let text = match (&args.file, args.text) {
+        (Some(path), _) => Some(
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
+        ),
+        (None, t) => t,
+    };
+    if text.is_none() && args.cite.is_none() && args.id.is_none() {
+        anyhow::bail!("legal cite requires --text, --file, --cite, or --id");
     }
     let req = eli_core::legal::citator::CitationRequest {
-        text: args.text,
+        text,
         cite: args.cite,
         opinion_id: args.id,
         cited_by: args.cited_by,
         authorities: args.authorities,
         limit: args.limit.clamp(1, 100),
+        quotes: !args.no_quotes,
+        treatment: args.treatment,
     };
     let resp = eli_core::legal::citator::fetch_citations(req)
         .await

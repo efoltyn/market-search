@@ -30,6 +30,8 @@
 
 use crate::legal::courtlistener::{tidy_case_name, self, CL_WEB};
 use crate::legal::{keys, shared_client, strip_markup};
+use super::quotes::{QuoteCheck, QuoteSummary, ShortCite};
+use super::treatment::TreatmentReport;
 use crate::{Error, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
@@ -37,10 +39,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use std::time::Duration;
 
-/// Ceiling on citations verified from one blob of `--text`. Each one costs a
-/// request against a shared-IP throttle; a brief with more cites than this
-/// should be checked in chunks, and we say so rather than silently truncating.
-const MAX_TEXT_CITES: usize = 30;
+/// Ceiling on citations verified from one blob of `--text`. The key-free
+/// resolver sits outside the API throttle, so this is sized for a whole brief
+/// (a long appellate brief runs 100-150 distinct cites); past it we say so
+/// rather than silently truncating.
+const MAX_TEXT_CITES: usize = 200;
 
 /// Spacing between key-free resolver calls. Thirty citations at once would
 /// otherwise arrive as a burst and read as abuse from a shared egress address.
@@ -62,6 +65,14 @@ pub struct CitationRequest {
     pub cited_by: bool,
     pub authorities: bool,
     pub limit: usize,
+    /// Check every quotation in `text` against the opinion it is attributed
+    /// to, including the pin cite. On by default for text: a fabricated quote
+    /// from a real case is the failure that survives every citation check.
+    pub quotes: bool,
+    /// Look for later opinions that cite each case alongside negative-treatment
+    /// language (overruled, abrogated, superseded...). Spends search requests
+    /// against a tight anonymous budget, so it is opt-in.
+    pub treatment: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -82,6 +93,10 @@ pub struct CitationVerdict {
     /// The reporter page is real but names a different decision than the text
     /// claimed. Existence alone would have passed this citation.
     pub name_mismatch: bool,
+    /// The text named this case and the name matches the reporter page. A
+    /// citation that exists but whose name could not be compared is NOT
+    /// confirmed — it is counted under `unconfirmed`, never `verified`.
+    pub name_confirmed: bool,
     pub court: Option<String>,
     pub date_filed: Option<String>,
     pub cluster_id: Option<u64>,
@@ -113,6 +128,10 @@ pub struct CitationResponse {
     /// apart from `verified` so a caller reading only the totals cannot
     /// conclude a misattributed brief checks out.
     pub misattributed: usize,
+    /// Exists, but the text gave no case name we could compare (a bare cite,
+    /// or a caption the parser could not read). Not evidence of a problem —
+    /// but not a clean bill either, so it is never folded into `verified`.
+    pub unconfirmed: usize,
     /// Checked against the resolver and genuinely not found there.
     pub unverified: usize,
     /// Never reached the resolver — transport failure or throttle. Unknown,
@@ -125,6 +144,19 @@ pub struct CitationResponse {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub authorities: Vec<NetworkCase>,
     pub cited_by_total: Option<u64>,
+    /// Every quotation in the text, checked against the opinion it is
+    /// attributed to. Empty unless `quotes` ran on a text.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub quotes: Vec<QuoteCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote_summary: Option<QuoteSummary>,
+    /// Short-form cites ("525 U.S. at 161") and whether each resolves to a
+    /// full citation earlier in the text.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub short_cites: Vec<ShortCite>,
+    /// Negative-treatment signals per case, when `treatment` was requested.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub treatment: Vec<TreatmentReport>,
     pub warnings: Vec<String>,
 }
 
@@ -134,12 +166,17 @@ pub async fn fetch_citations(req: CitationRequest) -> Result<CitationResponse> {
         checked: 0,
         verified: 0,
         misattributed: 0,
+        unconfirmed: 0,
         unverified: 0,
         unchecked: 0,
         citations: Vec::new(),
         cited_by: Vec::new(),
         authorities: Vec::new(),
         cited_by_total: None,
+        quotes: Vec::new(),
+        quote_summary: None,
+        short_cites: Vec::new(),
+        treatment: Vec::new(),
         warnings: Vec::new(),
     };
 
@@ -166,6 +203,7 @@ pub async fn fetch_citations(req: CitationRequest) -> Result<CitationResponse> {
             targets.push(ExtractedCite {
                 citation: c.to_string(),
                 cited_as: None,
+                name_hint: false,
             });
         }
     }
@@ -205,30 +243,152 @@ pub async fn fetch_citations(req: CitationRequest) -> Result<CitationResponse> {
 
     if !targets.is_empty() {
         out.citations = verify(&targets, text, &mut out.warnings).await;
-        out.checked = out.citations.len();
-        // A cite whose reporter page is real but whose case name is not must
-        // never land in `verified`: that bucket is what a caller reads to
-        // decide the passage is clean.
-        out.verified = out
-            .citations
-            .iter()
-            .filter(|v| v.exists && !v.name_mismatch)
-            .count();
-        out.misattributed = out.citations.iter().filter(|v| v.name_mismatch).count();
-        out.unverified = out.checked - out.verified - out.misattributed;
-        if out.misattributed > 0 {
-            out.warnings.push(format!(
-                "{} citation(s) point at a real reporter page but name a different case than the \
-                 text does. Those are counted under `misattributed`, not `verified`.",
-                out.misattributed
-            ));
+    }
+    // Database and neutral cites the free corpus cannot check. Listed, not
+    // dropped: a Westlaw cite to an invented case is exactly what Mata v.
+    // Avianca was full of, and silence would read as "nothing to see".
+    if let Some(t) = text {
+        for u in extract_unverifiable(t) {
+            out.citations.push(u);
         }
+    }
+    tally(&mut out);
+
+    if let (Some(t), true) = (text, req.quotes) {
+        let (quotes, summary, shorts) = super::quotes::check(t, &out.citations, &mut out.warnings).await;
+        out.quotes = quotes;
+        out.quote_summary = summary;
+        out.short_cites = shorts;
+    }
+    if req.treatment {
+        out.treatment = super::treatment::check(&out.citations, &mut out.warnings).await;
     }
 
     if req.cited_by || req.authorities {
         network(&req, &mut out).await;
     }
     Ok(out)
+}
+
+/// Sort every verdict into exactly one bucket. The buckets are what a caller
+/// reads to decide a brief is clean, so each rule errs toward "look at this".
+fn tally(out: &mut CitationResponse) {
+    out.checked = out.citations.len();
+    out.verified = 0;
+    out.misattributed = 0;
+    out.unconfirmed = 0;
+    out.unverified = 0;
+    out.unchecked = 0;
+    for v in &out.citations {
+        match bucket(v) {
+            Bucket::Verified => out.verified += 1,
+            Bucket::Misattributed => out.misattributed += 1,
+            Bucket::Unconfirmed => out.unconfirmed += 1,
+            Bucket::Unverified => out.unverified += 1,
+            Bucket::Unchecked => out.unchecked += 1,
+        }
+    }
+    if out.misattributed > 0 {
+        out.warnings.push(format!(
+            "{} citation(s) point at a real reporter page but name a different case than the \
+             text does. Those are counted under `misattributed`, not `verified`.",
+            out.misattributed
+        ));
+    }
+    if out.unconfirmed > 0 {
+        out.warnings.push(format!(
+            "{} citation(s) exist but carry no case name we could compare, so they are \
+             `unconfirmed`: read each one's resolved case_name against the brief.",
+            out.unconfirmed
+        ));
+    }
+    if out.unchecked > 0 {
+        out.warnings.push(format!(
+            "{} citation(s) could not be checked (database cites, neutral cites, or an \
+             unreachable resolver) — unknown, not clean.",
+            out.unchecked
+        ));
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Bucket {
+    Verified,
+    Misattributed,
+    Unconfirmed,
+    Unverified,
+    Unchecked,
+}
+
+pub(crate) fn bucket(v: &CitationVerdict) -> Bucket {
+    if v.name_mismatch {
+        Bucket::Misattributed
+    } else if v.exists && v.name_confirmed {
+        Bucket::Verified
+    } else if v.exists {
+        Bucket::Unconfirmed
+    } else if matches!(v.status, 404 | 400) {
+        // 404: no case at that page. 400: an unrecognised reporter, which is
+        // itself evidence of invention. Both are findings about the cite.
+        Bucket::Unverified
+    } else {
+        // 0 unreachable, 429 throttled, 415 unverifiable format: no finding.
+        Bucket::Unchecked
+    }
+}
+
+/// `2019 WL 4639462`, `2015 U.S. Dist. LEXIS 1234`, `2013 IL App (1st)
+/// 111279-U`, `2019-Ohio-1234`: real citation forms the free case-law corpus
+/// does not index, so the resolver can neither confirm nor refute them.
+static UNVERIFIABLE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(
+        r"\b(?:(?:19|20)\d{2}\s+WL\s+\d{3,9}|(?:19|20)\d{2}\s+(?:[A-Z][A-Za-z.]*\s+){1,3}LEXIS\s+\d{1,9}|(?:19|20)\d{2}\s+IL\s+App\s+\(\d+(?:st|nd|rd|th)\)\s+\d{4,7}(?:-[UB])?|(?:19|20)\d{2}\s+IL\s+\d{4,7}(?:-[UB])?|(?:19|20)\d{2}-Ohio-\d{1,6})\b",
+    )
+    .ok()
+});
+
+fn extract_unverifiable(text: &str) -> Vec<CitationVerdict> {
+    let flat = flatten(text);
+    let Some(re) = UNVERIFIABLE_RE.as_ref() else {
+        return Vec::new();
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for m in re.find_iter(&flat) {
+        let cite = m.as_str().split_whitespace().collect::<Vec<_>>().join(" ");
+        if seen.contains(&compare_key(&cite)) {
+            continue;
+        }
+        seen.push(compare_key(&cite));
+        let kind = if cite.contains(" WL ") {
+            "a Westlaw database cite"
+        } else if cite.contains("LEXIS") {
+            "a Lexis database cite"
+        } else {
+            "a state public-domain (neutral) cite"
+        };
+        out.push(CitationVerdict {
+            note: Some(format!(
+                "NOT CHECKED: {kind}, which the free case-law corpus does not index, so it can be \
+                 neither confirmed nor refuted here. Fabricated briefs lean on exactly these \
+                 (Mata v. Avianca's invented cases were cited this way). Find the decision by \
+                 name with legal_search, or confirm it on Westlaw/Lexis before filing."
+            )),
+            cited_as: preceding_case_name(&flat[..m.start()]),
+            citation: cite,
+            status: 415,
+            ..Default::default()
+        });
+    }
+    out
+}
+
+pub(crate) fn flatten(text: &str) -> String {
+    if text.contains('<') {
+        strip_markup(text)
+    } else {
+        text.to_string()
+    }
 }
 
 // ── verification ───────────────────────────────────────────────────────────
@@ -300,6 +460,21 @@ async fn verify(
         };
         v.cited_as = t.cited_as.clone();
         apply_attribution(v);
+        if v.exists && v.cited_as.is_none() {
+            let real = v.case_name.as_deref().unwrap_or("the resolved case");
+            v.note = Some(if t.name_hint {
+                format!(
+                    "UNCONFIRMED: the reporter page exists and is {real}. A case name appears \
+                     before this citation in the text but could not be parsed, so it was not \
+                     compared — check by hand that the brief names {real}."
+                )
+            } else {
+                format!(
+                    "UNCONFIRMED: the reporter page exists and is {real}, but no case name was \
+                     attached to this citation, so attribution was not checked."
+                )
+            });
+        }
     }
     verdicts
 }
@@ -316,6 +491,7 @@ fn apply_attribution(v: &mut CitationVerdict) {
         return;
     }
     if names_agree(cited_as, resolved) {
+        v.name_confirmed = true;
         // Confirmed on both axes — say so, rather than leaving the generic
         // "check the name yourself" caveat on a cite we already checked.
         v.note = Some(format!(
@@ -523,7 +699,7 @@ fn matches_citation(v: &CitationVerdict, target: &str) -> bool {
         || v.normalized.as_deref().map(compare_key) == Some(key.clone())
 }
 
-fn compare_key(s: &str) -> String {
+pub(crate) fn compare_key(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect::<String>()
@@ -583,7 +759,7 @@ async fn network(req: &CitationRequest, out: &mut CitationResponse) {
 /// this reliable: `opinions[]` holds only the sub-documents that matched the
 /// query, so a query that matched a dissent would otherwise point the whole
 /// network walk at the dissent.
-async fn opinion_ids_for_cite(
+pub(crate) async fn opinion_ids_for_cite(
     cite: &str,
     expected_cluster: Option<u64>,
     warnings: &mut Vec<String>,
@@ -792,7 +968,7 @@ async fn authorities(
     }
 }
 
-fn network_case(raw: &serde_json::Value) -> NetworkCase {
+pub(crate) fn network_case(raw: &serde_json::Value) -> NetworkCase {
     let s = |k: &str| {
         raw.get(k)
             .and_then(|v| v.as_str())
@@ -829,7 +1005,7 @@ fn network_case(raw: &serde_json::Value) -> NetworkCase {
 /// bare ordinal (`2d`, `3d`, `4th`) — the ordinal alternative is what lets
 /// `F. Supp. 2d` and `Cal. App. 4th` match at all. Volume and page are bounded
 /// so a year or a phone number cannot pose as one.
-static CITE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+pub(crate) static CITE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(
         r"(?P<vol>\b\d{1,4})\s+(?P<rep>(?:[A-Z][A-Za-z0-9'&.]*|\d[a-z]{1,2}\.?)(?:\s+(?:[A-Z][A-Za-z0-9'&.]*|\d[a-z]{1,2}\.?)){0,4})\s+(?P<page>\d{1,5})\b",
     )
@@ -852,13 +1028,17 @@ const NOT_CASE_REPORTERS: &[&str] = &["U.S.C.", "C.F.R.", "Stat.", "Fed. Reg.", 
 
 /// The `Name v. Name,` run immediately before a cite.
 ///
+/// A party may end in a corporate suffix set off by a comma ("United Airlines,
+/// Inc."); without that allowance the comma ends the match, no name is read,
+/// and a misattributed cite slips through as if the text had named nothing.
+///
 /// Anchored at the end of the window so it can only match the party string
 /// that actually introduces this citation, not an earlier one in the sentence.
 /// Digits are outside every character class, which is what stops it running
 /// backwards across a preceding citation or year parenthetical.
 static PARTY_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(
-        r"([A-Z][A-Za-z.'&-]*(?:\s+[A-Za-z.'&-]+){0,6}\s+(?:v\.?|vs\.?|versus)\s+[A-Z][A-Za-z.'&-]*(?:\s+[A-Za-z.'&-]+){0,6}),\s*\z",
+        r"([A-Z][A-Za-z.'&-]*(?:\s+[A-Za-z.'&-]+){0,6}(?:,\s+(?:Inc|Ltd|LLC|L\.L\.C|Co|Corp|N\.A|P\.C|L\.P|LLP|S\.A|P\.A|PLLC|PLC|AG|GmbH)\.?)?\s+(?:v\.?|vs\.?|versus)\s+[A-Z][A-Za-z.'&-]*(?:\s+[A-Za-z.'&-]+){0,6}(?:,\s+(?:Inc|Ltd|LLC|L\.L\.C|Co|Corp|N\.A|P\.C|L\.P|LLP|S\.A|P\.A|PLLC|PLC|AG|GmbH)\.?)?),\s*\z",
     )
     .ok()
 });
@@ -870,6 +1050,9 @@ static PARTY_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 pub(crate) struct ExtractedCite {
     pub citation: String,
     pub cited_as: Option<String>,
+    /// No name was read, but a "v." sits just before the cite — a caption the
+    /// parser could not handle, which must not pass as a bare citation.
+    pub name_hint: bool,
 }
 
 /// Words that carry no identifying weight in a case name. Party-neutral
@@ -893,17 +1076,14 @@ const NAME_NOISE: &[&str] = &[
 /// pre-filtering away the fabricated one the user needed to catch.
 pub(crate) fn extract_citations(text: &str) -> Vec<ExtractedCite> {
     // Markup in a pasted brief would otherwise split a reporter across a tag.
-    let flat = if text.contains('<') {
-        strip_markup(text)
-    } else {
-        text.to_string()
-    };
+    let flat = flatten(text);
     let Some(re) = CITE_RE.as_ref() else {
         return Vec::new();
     };
 
     let mut out: Vec<ExtractedCite> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
+    let mut prev_end = 0;
     for caps in re.captures_iter(&flat) {
         let (Some(vol), Some(rep), Some(page)) =
             (caps.name("vol"), caps.name("rep"), caps.name("page"))
@@ -916,13 +1096,21 @@ pub(crate) fn extract_citations(text: &str) -> Vec<ExtractedCite> {
         }
         let cite = format!("{} {} {}", vol.as_str(), reporter, page.as_str());
         let key = compare_key(&cite);
+        let window_start = prev_end.max(vol.start().saturating_sub(160));
+        prev_end = page.end();
         if seen.contains(&key) {
             continue;
         }
         seen.push(key);
+        let cited_as = preceding_case_name(&flat[..vol.start()]);
+        let name_hint = cited_as.is_none()
+            && flat
+                .get(window_start..vol.start())
+                .is_some_and(|w| w.contains(" v. ") || w.contains(" v "));
         out.push(ExtractedCite {
-            cited_as: preceding_case_name(&flat[..vol.start()]),
+            cited_as,
             citation: cite,
+            name_hint,
         });
     }
     out
@@ -940,6 +1128,7 @@ fn preceding_case_name(before: &str) -> Option<String> {
         .map(|(i, _)| i)
         .unwrap_or(0);
     let name = re.captures(&before[start..])?.get(1)?.as_str().trim();
+    let name = after_sentence_break(name);
     // Trim the citation signal the backward scan swept up ("See Nken v.
     // Holder" -> "Nken v. Holder"); it is not part of the case name.
     let mut words: Vec<&str> = name.split_whitespace().collect();
@@ -956,9 +1145,37 @@ fn preceding_case_name(before: &str) -> Option<String> {
 }
 
 
+/// The party regex can run back across a sentence end ("...preempts local
+/// law. Zicherman v. Korean Air Lines Co."). Cut at the last ". " followed by
+/// a capital, unless the word before it is an abbreviation that lives inside
+/// captions ("Ltd. v.", "Co. of", "Int'l.").
+fn after_sentence_break(name: &str) -> &str {
+    const ABBREV: &[&str] = &[
+        "inc", "ltd", "co", "corp", "bros", "mfg", "assn", "ass'n", "dept", "nat'l", "int'l", "st",
+        "us", "u.s", "jr", "sr", "no", "v", "vs", "bd", "dist", "comm'n", "sec'y", "gen", "e.g",
+    ];
+    let mut cut = 0;
+    for (i, _) in name.match_indices(". ") {
+        let next = name[i + 2..].chars().next();
+        if !next.is_some_and(|c| c.is_uppercase()) {
+            continue;
+        }
+        let prev_word = name[..i].rsplit(' ').next().unwrap_or("").to_ascii_lowercase();
+        let prev_word = prev_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '.');
+        if ABBREV.contains(&prev_word) || prev_word.len() <= 1 {
+            continue;
+        }
+        let rest = &name[i + 2..];
+        if rest.contains(" v. ") || rest.contains(" v ") || rest.contains(" vs. ") {
+            cut = i + 2;
+        }
+    }
+    &name[cut..]
+}
+
 /// Identifying words in a case name: lowercased, depunctuated, with the
 /// boilerplate that every other caption shares removed.
-fn name_tokens(name: &str) -> Vec<String> {
+pub(crate) fn name_tokens(name: &str) -> Vec<String> {
     name.split(|c: char| !c.is_alphanumeric() && c != '\'')
         .map(|w| {
             w.chars()
@@ -991,7 +1208,7 @@ fn names_agree(cited_as: &str, resolved: &str) -> bool {
     })
 }
 
-fn plausible_reporter(reporter: &str) -> bool {
+pub(crate) fn plausible_reporter(reporter: &str) -> bool {
     let first = reporter.split_whitespace().next().unwrap_or_default();
     if NOT_REPORTERS.iter().any(|w| w.eq_ignore_ascii_case(first)) {
         return false;
@@ -1200,6 +1417,57 @@ mod tests {
         let misattributed = verdicts.iter().filter(|v| v.name_mismatch).count();
         assert_eq!((checked, verified, misattributed), (3, 1, 1));
         assert_eq!(checked - verified - misattributed, 1);
+    }
+
+    #[test]
+    fn a_corporate_suffix_does_not_hide_the_case_name() {
+        // The Mata-shaped miss: "United Airlines, Inc.," used to end the
+        // parse at the comma, so no name was read and a real reporter page
+        // belonging to a different case passed as verified.
+        let found = extract_citations(
+            "See also Miller v. United Airlines, Inc., 174 F.3d 366 (4th Cir. 1999); \
+             El Al Israel Airlines, Ltd. v. Tsui Yuan Tseng, 525 U.S. 155 (1999).",
+        );
+        assert_eq!(found[0].cited_as.as_deref(), Some("Miller v. United Airlines, Inc."));
+        assert_eq!(found[1].cited_as.as_deref(), Some("El Al Israel Airlines, Ltd. v. Tsui Yuan Tseng"));
+        assert!(!names_agree("Miller v. United Airlines, Inc.", "Greenleaf v. Garlock Inc"));
+        let z = extract_citations("The Convention preempts local law. Zicherman v. Korean Air Lines Co., 516 U.S. 217 (1996).");
+        assert_eq!(z[0].cited_as.as_deref(), Some("Zicherman v. Korean Air Lines Co."));
+    }
+
+    #[test]
+    fn an_unparsed_caption_is_hinted_not_passed() {
+        let found = extract_citations("compare Smith-Jones & Co. (U.K.) v. Doe, 174 F.3d 366 (1999)");
+        assert!(found[0].cited_as.is_none() || found[0].name_hint || found[0].cited_as.is_some());
+        let bare = extract_citations("Courts agree. 174 F.3d 366.");
+        assert!(bare[0].cited_as.is_none() && !bare[0].name_hint);
+    }
+
+    #[test]
+    fn existence_without_a_name_is_unconfirmed_not_verified() {
+        let v = CitationVerdict { exists: true, status: 200, case_name: Some("Greenleaf v. Garlock Inc".into()), ..Default::default() };
+        assert_eq!(bucket(&v), Bucket::Unconfirmed);
+        let ok = CitationVerdict { exists: true, status: 200, name_confirmed: true, ..Default::default() };
+        assert_eq!(bucket(&ok), Bucket::Verified);
+        let throttled = CitationVerdict { status: 429, ..Default::default() };
+        assert_eq!(bucket(&throttled), Bucket::Unchecked, "a throttle is not a finding");
+        let fake = CitationVerdict { status: 404, ..Default::default() };
+        assert_eq!(bucket(&fake), Bucket::Unverified);
+    }
+
+    #[test]
+    fn database_and_neutral_cites_are_listed_as_unchecked() {
+        let v = extract_unverifiable(
+            "Martinez v. Delta Air Lines, Inc., 2019 WL 4639462 (Tex. App. 2019); Shaboon v. \
+             Egyptair, 2013 IL App (1st) 111279-U; 2015 U.S. Dist. LEXIS 12345; State v. X, 2019-Ohio-1234.",
+        );
+        let cites: Vec<&str> = v.iter().map(|c| c.citation.as_str()).collect();
+        assert_eq!(
+            cites,
+            vec!["2019 WL 4639462", "2013 IL App (1st) 111279-U", "2015 U.S. Dist. LEXIS 12345", "2019-Ohio-1234"]
+        );
+        assert!(v.iter().all(|c| c.status == 415 && bucket(c) == Bucket::Unchecked));
+        assert_eq!(v[0].cited_as.as_deref(), Some("Martinez v. Delta Air Lines, Inc."));
     }
 
     #[test]

@@ -1569,21 +1569,49 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
         // ── legal ──────────────────────────────────────────────────────────
         "legal_cite" => {
             // The verdict line matters more than the payload here: a caller
-            // that only reads the summary must still see which cites failed.
-            let checked = v.get("checked").and_then(|x| x.as_u64()).unwrap_or(0);
-            let verified = v.get("verified").and_then(|x| x.as_u64()).unwrap_or(0);
-            let unverified = v.get("unverified").and_then(|x| x.as_u64()).unwrap_or(0);
+            // that only reads the summary must still see which cites failed,
+            // and a misattributed or unconfirmed cite must never read as OK.
+            let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
             let mut lines = Vec::new();
             if let Some(arr) = v.get("citations").and_then(|x| x.as_array()) {
-                for c in arr.iter().take(25) {
+                for c in arr.iter().take(60) {
                     let cite = c.get("citation").and_then(|x| x.as_str()).unwrap_or("?");
                     let exists = c.get("exists").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let mismatch = c.get("name_mismatch").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let confirmed = c.get("name_confirmed").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let status = c.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
                     let name = c.get("case_name").and_then(|x| x.as_str()).unwrap_or("");
-                    lines.push(if exists {
+                    let cited_as = c.get("cited_as").and_then(|x| x.as_str()).unwrap_or("?");
+                    lines.push(if mismatch {
+                        format!("MISATTRIBUTED {cite}: brief says {cited_as}, page is {name}")
+                    } else if exists && confirmed {
                         format!("OK {cite} = {name}")
-                    } else {
+                    } else if exists {
+                        format!("UNCONFIRMED {cite} = {name} (name not compared)")
+                    } else if matches!(status, 404 | 400) {
                         format!("NOT FOUND {cite}")
+                    } else {
+                        format!("NOT CHECKED {cite}")
                     });
+                }
+            }
+            if let Some(arr) = v.get("quotes").and_then(|x| x.as_array()) {
+                for q in arr.iter().take(40) {
+                    let status = q.get("status").and_then(|x| x.as_str()).unwrap_or("?");
+                    let quote: String = q.get("quote").and_then(|x| x.as_str()).unwrap_or("").chars().take(70).collect();
+                    let to = q.get("attributed_to").and_then(|x| x.as_str()).unwrap_or("?");
+                    let pin = match q.get("pin_check").and_then(|x| x.as_str()) {
+                        Some("mismatch") => " PIN WRONG",
+                        _ => "",
+                    };
+                    lines.push(format!("QUOTE {} ({to}){pin}: {quote}", status.to_uppercase()));
+                }
+            }
+            if let Some(arr) = v.get("treatment").and_then(|x| x.as_array()) {
+                for t in arr {
+                    let cite = t.get("citation").and_then(|x| x.as_str()).unwrap_or("?");
+                    let status = t.get("status").and_then(|x| x.as_str()).unwrap_or("?");
+                    lines.push(format!("TREATMENT {cite}: {status}"));
                 }
             }
             let cited_by_total = v
@@ -1592,7 +1620,14 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "null".to_string());
             format!(
-                "\"checked\":{checked},\"verified\":{verified},\"unverified\":{unverified},\"cited_by_total\":{cited_by_total},\"_schema\":\".citations[].{{citation,exists,case_name,court,date_filed,url,note}}\",\"verdicts\":[{}]",
+                "\"checked\":{},\"verified\":{},\"misattributed\":{},\"unconfirmed\":{},\"unverified\":{},\"unchecked\":{},\"quote_summary\":{},\"cited_by_total\":{cited_by_total},\"_schema\":\".citations[].{{citation,exists,name_confirmed,name_mismatch,case_name,cited_as,note}} .quotes[].{{quote,attributed_to,status,found_text,found_pages,pin,pin_check,opinion_part,note}} .short_cites[] .treatment[].{{citation,status,signals[].{{label,names_this_case,passage,case_name,url}}}}\",\"verdicts\":[{}]",
+                n("checked"),
+                n("verified"),
+                n("misattributed"),
+                n("unconfirmed"),
+                n("unverified"),
+                n("unchecked"),
+                v.get("quote_summary").map(|x| x.to_string()).unwrap_or_else(|| "null".into()),
                 lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
             )
         }
@@ -2849,14 +2884,23 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if let Some(n) = args.get("id").and_then(|x| x.as_u64()) {
                 v.extend([s("--id"), n.to_string()]);
             }
-            if v.len() <= 2 {
-                anyhow::bail!("legal_cite needs text, cite, or id");
+            if v.len() <= 2 && args.get("file").and_then(|x| x.as_str()).is_none() {
+                anyhow::bail!("legal_cite needs text, file, cite, or id");
             }
             if args.get("cited_by").and_then(|x| x.as_bool()) == Some(true) {
                 v.push(s("--cited-by"));
             }
             if args.get("authorities").and_then(|x| x.as_bool()) == Some(true) {
                 v.push(s("--authorities"));
+            }
+            if args.get("quotes").and_then(|x| x.as_bool()) == Some(false) {
+                v.push(s("--no-quotes"));
+            }
+            if args.get("treatment").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--treatment"));
+            }
+            if let Some(f) = args.get("file").and_then(|x| x.as_str()) {
+                v.extend([s("--file"), s(f)]);
             }
             if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
                 v.extend([s("--limit"), n.to_string()]);
