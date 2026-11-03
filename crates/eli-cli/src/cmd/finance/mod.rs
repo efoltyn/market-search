@@ -1,4 +1,4 @@
-async fn cmd_setup() -> Result<()> {
+async fn cmd_agent_setup() -> Result<()> {
     use std::io::Write;
     let paths = Paths::discover().context("discover paths")?;
     paths.ensure_dirs().context("ensure config dirs")?;

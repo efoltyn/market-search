@@ -6,18 +6,18 @@ through the steps below in order. Pause where this file says PAUSE —
 those are the spots that need a human action you can't do yourself.
 
 Tell the user up front: "There are two parts. Local tools for me (this
-Claude Code / Codex session) — that's a binary install plus one config
-line. And, if you want Market Search inside claude.ai web or ChatGPT, a
-public URL — that part needs the v0.3.0 binary and a terminal that stays
-open, because the link only lives while the process runs."
+Claude Code / Codex session) — that's a binary install plus one setup
+command. And, if you want Market Search in claude.ai on the web or your
+phone, a link — one command installs a background service on a Mac or
+Linux computer that stays on, and it keeps the link up across reboots."
 
 ---
 
 ## Step 1 — Verify prerequisites
 
-Only one thing is required: git. The prebuilt binary and the `npx` path
-need no Rust toolchain — `cargo` matters only if the user wants to
-compile from source (Step 2, option b).
+Only one thing is required: git. The prebuilt binary needs no Rust
+toolchain — `cargo` matters only if the user wants to compile from
+source (Step 2, option b).
 
 | Check | Command | Fix if missing |
 |---|---|---|
@@ -31,208 +31,224 @@ Don't stop the setup if `cargo` is missing — just take the prebuilt path below
 Try these in order. The first one that works is the one to use — only
 fall through if a step isn't available.
 
-**(a) Prebuilt binary (no Rust needed):**
+**(a) Prebuilt binary (no Rust needed).** macOS or Linux:
 
 ```bash
 curl -fsSL https://eliterminal.com/install.sh | sh
 ```
 
-Or grab the binary for your platform straight from the latest GitHub
-release: https://github.com/efoltyn/market-search/releases/latest —
-download, `chmod +x`, and move it onto your `PATH`.
+Windows (PowerShell):
+
+```powershell
+irm https://eliterminal.com/install.ps1 | iex
+```
+
+Both install to `~/.local/bin/market-search` (Windows:
+`%LOCALAPPDATA%\market-search\market-search.exe`) and then run
+`market-search setup --yes`, which already does Step 3. Read its output,
+then skip to the restart in Step 3. Or grab the binary for your platform
+from the latest GitHub release:
+https://github.com/efoltyn/market-search/releases/latest
+
+A person on a Mac who would rather not use a terminal can download
+https://github.com/efoltyn/market-search/releases/latest/download/MarketSearch.dmg
+and click Connect; it does Steps 2 to 4.
 
 **(b) From source, if they already have Rust:**
 
 ```bash
-cargo install market-search
+cargo install --git https://github.com/efoltyn/market-search market-search
 ```
 
 This compiles `market-search` into `~/.cargo/bin/`. First build takes a
 few minutes while Cargo pulls dependencies; watch for "Installed package
 `market-search`" at the end.
 
-**(c) Via npx (once published to npm):**
-
-```bash
-npx -y market-search mcp
-```
-
 Verify any path with: `market-search --version` — it should print a
-version string. For the claude.ai / phone URL in Step 4, that version
-must be **0.3.0 or newer** (see the note there).
+version string. For the claude.ai / phone link in Step 4, the binary also
+needs the `mcp service` command (Step 4 says how to check).
 
-## Step 3 — Wire local stdio MCP into the user's coding agent
+## Step 3 — Connect it to the user's AI apps
 
 This is the part that gives YOU (the agent) tool access. Without it,
 Market Search only works in the user's claude.ai web/ChatGPT — not in
 this Claude Code/Codex session.
 
-### For Claude Code
+One command finds the AI apps on this machine and adds Market Search to
+each: Claude Desktop, Claude Code, Cursor, VS Code, Windsurf (Devin
+Desktop), Codex, Gemini CLI, LM Studio and Zed.
 
-One line (current 2026 syntax) — `market-search` is on `PATH` from Step 2:
-
-```bash
-claude mcp add market-search -- market-search mcp
-```
-
-Add `--scope user` to make it available in every project, not just this
-directory:
+Show the user what will change first. This writes nothing:
 
 ```bash
-claude mcp add --scope user market-search -- market-search mcp
+market-search setup --dry-run
 ```
 
-If you'd rather edit config by hand, the equivalent entry in
-`~/.claude/settings.json` (or any `.mcp.json`) is:
+Then do it:
+
+```bash
+market-search setup --yes
+```
+
+Your shell has no terminal, so `setup` won't ask questions; `--yes`
+makes that explicit. To connect only some apps, add
+`--client claude-code,cursor`. `market-search setup --list` shows what is
+connected. `market-search setup --remove` takes it out again.
+
+What it does, so you can explain it:
+
+- It only adds or changes the entry named `market-search`. Other servers
+  and settings stay as they are.
+- Before it first changes a file, it saves a copy next to it as
+  `<file>.market-search.bak`.
+- It never rewrites a file it can't parse, such as a VS Code or Zed file
+  with comments. It prints the lines to paste instead.
+- If the binary runs from a temporary place (an npx cache, Downloads, a
+  disk image), it copies it to `~/.local/bin/market-search` first and
+  points the apps there.
+- Claude Code is connected with `claude mcp add --scope user`, so it
+  works in every project.
+
+Tell the user: "Market Search is connected. **Restart Claude Code** so it
+picks up the new server (and quit and reopen Claude Desktop if setup
+connected it), then come back here and we'll continue."
+
+PAUSE — wait for the user to confirm restart.
+
+After restart, verify in this session by listing tools — you should see
+`finance_timeseries`, `finance_odds`, etc. If you don't, run
+`market-search setup --list` and `claude mcp list` to confirm
+`market-search` is registered.
+
+### By hand, if setup can't
+
+If setup left an app alone, or you'd rather do it yourself, find the
+binary's absolute path with `which market-search`. Use that path, not
+the bare name: Claude Desktop and other apps don't see your shell's
+PATH.
+
+Claude Code:
+
+```bash
+claude mcp add --scope user market-search -- /absolute/path/to/market-search mcp
+```
+
+Claude Desktop, Cursor, Gemini CLI, LM Studio and Windsurf take this JSON
+in their MCP config file:
 
 ```json
 {
   "mcpServers": {
     "market-search": {
-      "command": "market-search",
+      "command": "/absolute/path/to/market-search",
       "args": ["mcp"]
     }
   }
 }
 ```
 
-Tell the user: "Market Search is in your Claude Code config now.
-**Restart Claude Code** so it picks up the new server, then come back
-here and we'll continue."
-
-PAUSE — wait for the user to confirm restart.
-
-After restart, verify in this session by listing tools — you should see
-`finance_timeseries`, `finance_odds`, etc. If you don't, the config
-didn't take: run `claude mcp list` to confirm `market-search` is
-registered, and if you edited JSON by hand, re-read it and check for a
-syntax error (stray comma, mismatched braces).
-
-### For Codex
-
-Edit Codex's MCP config (path depends on Codex version — search for
-`codex.toml` or `~/.config/codex/`). Add an equivalent entry pointing
-`command` at `market-search` and `args` at `["mcp"]`.
-
-### For Claude Desktop
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
+Claude Desktop's file is
+`~/Library/Application Support/Claude/claude_desktop_config.json`
 (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows).
-Same JSON shape as Claude Code above.
+Cursor's is `~/.cursor/mcp.json`.
 
-## Step 4 — Get a public URL for claude.ai web or ChatGPT custom apps
+Codex uses TOML in `~/.codex/config.toml`:
 
-This step is OPTIONAL. Skip if the user only uses Claude Code / Codex /
-Claude Desktop locally — Step 3 was sufficient.
-
-**Version gate — check this first.** The claude.ai connector handshake
-(OAuth and the `Mcp-Session-Id` header) was only fixed in **0.3.0**. An
-older binary — including one from an earlier `cargo install` — gets
-rejected by claude.ai. Run `market-search --version`; if it's below
-0.3.0, reinstall from Step 2 before going further.
-
-**Persistence reality — say this to the user before they pick.** There
-is no background keep-alive service yet. The public link is alive only
-while the `market-search mcp share` process is running. Close the
-terminal, log out, or reboot, and the link goes dead. For an always-on
-phone connector, run it on a machine that stays on (and keep the process
-up — e.g. `nohup market-search mcp share … &`). What ngrok adds is a
-permanent *address* you can reserve; it does not keep the *process*
-alive for you.
-
-If they want Market Search in claude.ai web or ChatGPT, ask:
-
-> "How do you want to connect this? Two options, and note neither runs
-> on its own — the link lives only while the share process is running:
-> 1. **Temporary URL (instant)** — good for trying it once. A fresh
->    random URL each time; gone when the terminal closes.
-> 2. **Reserved address (free ngrok account)** — same URL every run, so
->    you don't re-paste into the connector. Needs a one-time
->    Google/GitHub/email signup at ngrok.com. Still only live while the
->    process runs.
->
-> (Or self-host: the server is stateless, so on a machine you control
-> you can run `market-search mcp --http` behind your own TLS instead of
-> a tunnel. SELFHOST.md has the recipe.)"
-
-### If they pick option 1 (temporary):
-
-Run this in a terminal that the user will keep open:
-
-```bash
-market-search mcp share --provider cloudflare
+```toml
+[mcp_servers.market-search]
+command = "/absolute/path/to/market-search"
+args = ["mcp"]
 ```
 
-This needs the `cloudflared` binary. If missing:
-- macOS: `brew install cloudflared`
-- Linux: download from https://github.com/cloudflare/cloudflared/releases/latest
+## Step 4 — Use it from claude.ai on the web and the phone
 
-(Tunnelmole is also available via `--provider tunnelmole` but dies
-silently after a few hours; recommend cloudflared as the default temp.)
+This step is OPTIONAL. Skip it if the user only uses Claude Code, Codex,
+or Claude Desktop locally — Step 3 was enough.
 
-The command prints a block with a URL ending in `/mcp`. Copy that URL
-and tell the user:
+claude.ai reaches tools only through a public HTTPS link. One command on a
+Mac or Linux computer that stays on installs a background service that
+keeps that link up, across reboots, with no terminal left open.
 
-- For claude.ai: Settings → Connectors → Add custom connector → paste URL → Save → toggle on in any chat
-- For ChatGPT: Settings → Apps & Connectors → Create → paste URL → Save → toggle on
+**Version gate.** Run `market-search mcp service --help`. If it says
+`unrecognized subcommand`, the binary is too old: reinstall from Step 2.
 
-Tell them: "The URL stays alive while that terminal is open. If you
-close it or your machine reboots, you'll need to re-run `market-search mcp share`
-and paste the new URL into the connector dialog (it'll be different
-each time)."
+Ask the user:
 
-### If they pick option 2 (reserved ngrok address):
+> "Do you want Market Search in claude.ai on the web and your phone? I'll
+> install a small background service on this computer. It uses a free
+> ngrok account so the link stays the same. Keep this computer on and
+> plugged in. Or, to just try it, I can make a temporary link that lasts
+> while a terminal stays open."
 
-First check if ngrok is installed: `which ngrok`. If missing:
-- macOS: `brew install ngrok/ngrok/ngrok`
-- Linux: download from https://download.ngrok.com (pick your arch)
-- Windows: https://download.ngrok.com
-
-Now open ngrok signup in their default browser:
-- macOS: `open https://dashboard.ngrok.com/signup`
-- Linux: `xdg-open https://dashboard.ngrok.com/signup`
-- Windows: `start https://dashboard.ngrok.com/signup`
-
-Tell them:
-
-> "I opened ngrok signup. Sign up with Google, GitHub, or email (the
-> OAuth options are fastest — no email verification step). Once you're
-> in the dashboard, go to **Your Authtoken** in the left sidebar and
-> copy the token. Paste it back to me."
-
-PAUSE — wait for them to paste.
-
-When they paste the token (it'll look like
-`2abc...XYZ_ABCdef123ghi456jkl789mno`), reserve their static subdomain.
-
-Ngrok auto-assigns each free account ONE static subdomain on
-`*.ngrok-free.dev`. Find it on the dashboard's Domains page (or skip —
-the next command will show it). Ask them what they want it named, or
-just use the auto-assigned one.
+### The background service (recommended)
 
 Run:
 
 ```bash
-market-search mcp share --provider ngrok --authtoken <pasted-token> --domain mysub.ngrok-free.dev
+market-search mcp service install
 ```
 
-Use the reserved subdomain from their dashboard's Domains page in place
-of `mysub`. Without `--domain`, ngrok hands out a random URL that
-changes each run — defeating the point of signing up.
+It copies the binary somewhere stable if needed, creates a secret token,
+installs ngrok if it's missing (Homebrew, or the official download into
+`~/.local/bin`), writes a launchd job (macOS) or a `systemd --user` unit
+(Linux), starts it, waits for the tunnel, and prints the link.
 
-The command prints the same paste-ready block. The *address* stays the
-same across restarts as long as they keep the ngrok account and stay
-under the free-tier limits (1 GB/mo data, 20K requests/mo — typical
-Market Search use is well below this). But the connector only reaches a
-live process: when this command isn't running, the URL is dead. Tell
-them plainly: "Same URL every time, so you paste it into the connector
-once. It only answers while this `share` command is running, so keep it
-up on an always-on box (or `nohup … &`) if you want it on your phone
-later."
+If ngrok has no authtoken yet, the command opens
+https://dashboard.ngrok.com/get-started/your-authtoken in the browser and
+exits with code 3, because it can't prompt from your shell. Tell the user:
 
-Have them paste the URL into claude.ai or ChatGPT as described above.
+> "I opened the ngrok page. Sign in with Google, GitHub, or email, copy
+> **Your Authtoken**, and paste it here."
 
-### Self-host (their own server, no tunnel):
+PAUSE — wait for them to paste. Then run:
+
+```bash
+market-search mcp service install --authtoken <pasted-token>
+```
+
+The command ends by printing a link like
+`https://<name>.ngrok-free.dev/mcp/<token>`. The token in the link is the
+password, so show it only to the user. Tell them:
+
+> "Open https://claude.ai/settings/connectors, click **Add custom
+> connector**, paste this link, and click **Add**. It works in the Claude
+> app on your phone too."
+
+PAUSE — wait for them to confirm it's added.
+
+Say this about it, plainly:
+
+- It runs in the background and comes back after a reboot. On a Mac it
+  starts when they log in, and it keeps the Mac awake while it's on power.
+- On Linux it runs while they're logged in. To keep it running after they
+  log out, they run `sudo loginctl enable-linger $USER` once. Don't run
+  sudo for them.
+- `market-search mcp service status` checks it,
+  `market-search mcp service url` prints the link again, and
+  `market-search mcp service uninstall` stops it.
+
+If install stops because another ngrok agent is running on the machine,
+ask the user before you re-run with `--force`. A free ngrok account allows
+one agent at a time, so `--force` can knock their other tunnel offline.
+
+To preview everything without changing anything, add `--dry-run`.
+
+### A temporary link (quick try)
+
+Run this in a terminal the user keeps open:
+
+```bash
+market-search mcp share
+```
+
+It needs `cloudflared` (macOS: `brew install cloudflared`; Linux: download
+from https://github.com/cloudflare/cloudflared/releases/latest). It prints
+a link ending in `/mcp`. Paste it into claude.ai the same way. The link
+dies when the terminal closes, and it changes every time.
+
+For ChatGPT: Settings → Apps & Connectors → Create → paste the link → Save.
+
+### Self-host (their own server, no tunnel)
 
 If the user has a machine with a public hostname and wants no third-party
 tunnel, point them at SELFHOST.md. The short version: the MCP server is
@@ -242,29 +258,34 @@ stateless, so it is one command behind their own TLS/reverse proxy:
 MARKET_SEARCH_MCP_TOKEN=<secret> market-search mcp --http --host 127.0.0.1 --port 8484
 ```
 
-Run `market-search mcp --check` first; it names which optional env vars
-(`EIA_API_KEY`, `ELI_SEC_USER_AGENT`, `FRED_API_KEY`, `IBKR_*`) unlock
-which tools. Two caveats to say out loud: a token-protected server does
-not work with the claude.ai web connector (only with clients that can
-send an `Authorization` header), and the "sovereign" laptop-holds-the-
-TLS-key gateway in SELFHOST.md is a design, not built.
+Clients that send headers use `Authorization: Bearer <secret>`. The
+claude.ai connector uses `https://<host>/mcp/<secret>`. Run
+`market-search mcp --check` first; it names which optional env vars
+(`EIA_API_KEY`, `ELI_SEC_USER_AGENT`, `FRED_API_KEY`, `IBKR_*`) unlock which
+tools. The "sovereign" laptop-holds-the-TLS-key gateway in SELFHOST.md is a
+design, not built.
 
 ## Step 5 — Verify end-to-end
 
-Whichever option they picked, test it:
+For the background service, run:
 
-> "Open a new chat in claude.ai (or ChatGPT). Toggle Market Search on.
-> Ask: 'What's SPY trading at right now?'"
+```bash
+market-search mcp service status
+```
 
-Claude/ChatGPT should call the `finance_timeseries` tool and return a
-real quote with the current price. If you see "I don't have access to
-real-time data" or similar, the connector isn't working — check:
+It should say the service is running and the tunnel is up. Then:
 
-1. The `market-search mcp share` terminal is still running and showing connection
-   logs when claude.ai hits it
-2. The URL in the connector dialog matches exactly what `market-search mcp share`
-   printed (including `/mcp` at the end)
-3. For ngrok: `cat ~/.config/ngrok/ngrok.yml` shows your authtoken set
+> "Open a new chat in claude.ai (or the phone app). Turn Market Search on
+> from the tools menu. Ask: 'What's SPY trading at right now?'"
+
+Claude should call `finance_timeseries` and return a real quote. If it says
+it doesn't have real-time data, the connector isn't working. Check:
+
+1. `market-search mcp service status` shows the tunnel up. (For the
+   temporary link: the `share` terminal is still open.)
+2. The link in the connector matches `market-search mcp service url`
+   exactly, including the `/mcp/<token>` ending.
+3. The log that `status` names, for errors.
 
 ## Common failure modes
 
@@ -273,32 +294,34 @@ real-time data" or similar, the connector isn't working — check:
   install build-essential` or distro equivalent.
 - **MCP tools don't appear in Claude Code after Step 3**: They didn't
   restart Claude Code. If they restarted and it's still missing, run
-  `claude mcp list` to confirm `market-search` registered; if they wired
-  it via hand-edited JSON, the file likely has a syntax error (a stray
-  comma, mismatched braces) — read it back and parse to confirm.
-- **claude.ai rejects the connector / OAuth fails**: The binary is older
-  than 0.3.0. `market-search --version`, then reinstall from Step 2. A
-  binary from an earlier `cargo install` is the usual culprit.
-- **`market-search mcp share --provider tunnelmole` errors with "npx not found"**:
-  Node.js isn't installed. Just use the default `--provider cloudflare` instead
-  (no Node dependency, more reliable).
-- **`market-search mcp share --provider cloudflare` errors with "cloudflared not
-  found"**: Install cloudflared as in option 1 above.
-- **Public URL works in `curl` but not in claude.ai**: Most often the
-  user pasted the URL without `/mcp` at the end, or pasted with extra
-  whitespace. Re-copy from the terminal block and paste again.
+  `market-search setup --list` and `claude mcp list` to confirm
+  `market-search` registered; if they wired it via hand-edited JSON, the
+  file likely has a syntax error (a stray comma, mismatched braces) —
+  read it back and parse to confirm.
+- **`mcp service install` exits with code 3**: a person has to act. The
+  message says what: the ngrok authtoken (get it as above, then re-run with
+  `--authtoken`), or ngrok couldn't be installed (install it from
+  https://ngrok.com/download, then re-run).
+- **Status shows `ERR_NGROK_108`**: the user's ngrok account has another
+  agent online somewhere. They stop that one; the service retries by itself.
+- **Status shows `ERR_NGROK_4018`, `105` or `107`**: the ngrok authtoken is
+  missing or wrong. Re-run `install --authtoken <token>` with a fresh one.
+- **claude.ai rejects the connector**: the link is missing its
+  `/mcp/<token>` ending, has extra whitespace, or the binary is older than
+  0.3.0. Copy it again from `market-search mcp service url`.
+- **`market-search mcp share` says "cloudflared not found"**: install
+  cloudflared as above, or use the background service.
 
 ## What you (the agent) should NOT do
 
-- Do not run `market-search mcp share` yourself in a non-blocking shell — it runs
-  forever and you'll wedge the session. Tell the USER to run it in a
-  terminal they keep open.
-- Do not edit `~/.config/ngrok/ngrok.yml` directly. Use `ngrok config
-  add-authtoken` (which `market-search mcp share --provider ngrok --authtoken
-  <token>` does for you).
-- Do not promise that the temporary URL will keep working — it won't.
-  Be explicit about persistence in every option.
-- Do not imply the phone/claude.ai connector survives a reboot or a
-  closed terminal. There is no background keep-alive service yet — even
-  the reserved ngrok address only answers while the `share` process is
-  up. Don't sell turnkey phone persistence.
+- Do not run `market-search mcp share` yourself in a non-blocking shell — it
+  runs forever and you'll wedge the session. `mcp service install` is fine:
+  it returns once the link is up.
+- Do not edit ngrok's config file directly. Use `--authtoken`, which runs
+  `ngrok config add-authtoken` for you.
+- Do not paste the connector link anywhere but to the user: not in logs,
+  issues, or shared chats. The token in it is the password.
+- Do not pass `--force` without asking. It can knock the user's other ngrok
+  tunnel offline.
+- Do not promise the temporary `share` link keeps working. It dies with its
+  terminal.

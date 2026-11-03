@@ -27,50 +27,85 @@ This gives it market search: the live odds of recession on Kalshi and Polymarket
 
 ## Install
 
-**Cargo** (if you have Rust):
+**Mac:** download [Market Search](https://github.com/efoltyn/market-search/releases/latest/download/MarketSearch.dmg), open it, and click Connect. It finds the AI apps on your Mac and connects each one. No terminal.
 
-```bash
-cargo install market-search
-```
-
-**Prebuilt binary** (no toolchain, macOS / Linux). Download the binary for your platform from the [latest release](https://github.com/efoltyn/market-search/releases/latest) and put it on your PATH, or:
+**Mac or Linux, in a terminal:**
 
 ```bash
 curl -fsSL https://eliterminal.com/install.sh | sh
 ```
 
-**From source:**
+**Windows, in PowerShell:**
 
-```bash
-git clone https://github.com/efoltyn/market-search.git
-cd market-search && cargo build --release --bin market-search
+```powershell
+irm https://eliterminal.com/install.ps1 | iex
 ```
 
-**Or let your AI set it up.** Tell Claude Code (or any coding agent):
+Both install one binary and run `market-search setup`, which connects it to Claude Desktop, Claude Code, Cursor, VS Code, Windsurf, Codex, Gemini CLI, LM Studio and Zed. Restart the Claude app if it was open, then ask: "Plot the odds of a recession against the S&P 500 and oil this year."
 
-> Install market-search and add it as an MCP server.
+**Claude app only:** open [market-search.mcpb](https://github.com/efoltyn/market-search/releases/latest/download/market-search.mcpb) to install it as a Claude Desktop extension (Mac and Windows).
 
-It installs the binary and runs `claude mcp add market-search -- market-search mcp`. The source is open Rust, so an agent can also read it, change tools, and add providers.
+**Or let your AI set it up.** Paste this into Claude Code, Codex or another coding agent:
+
+> Set up market-search for me: follow https://eliterminal.com/setup
+
+**From source** (Rust):
+
+```bash
+cargo install --git https://github.com/efoltyn/market-search market-search
+```
+
+The source is open Rust, so an agent can also read it, change tools, and add providers.
 
 ---
 
 ## Connect it
 
-One line in Claude Code:
+`market-search setup` lists the AI apps it found, asks once, and adds a `market-search` entry to each. Nothing else in your configs changes, and each file gets a backup before its first edit. `--dry-run` shows the changes first, `--list` shows what is connected, and `--remove` takes it out again.
+
+Or do it by hand with the binary's full path (`which market-search`); apps like Claude Desktop don't see your shell's PATH. One line in Claude Code:
 
 ```bash
-claude mcp add market-search -- market-search mcp
+claude mcp add --scope user market-search -- /full/path/to/market-search mcp
 ```
 
-Or add it to your client config (`.mcp.json`, Claude Desktop, Codex, Cursor, Gemini CLI):
+Or add it to your client config (`.mcp.json`, Claude Desktop, Cursor, Gemini CLI):
 
 ```json
-{ "mcpServers": { "market-search": { "command": "market-search", "args": ["mcp"] } } }
+{ "mcpServers": { "market-search": { "command": "/full/path/to/market-search", "args": ["mcp"] } } }
 ```
 
-**From claude.ai or your phone** (optional): run `market-search mcp share` on a machine that stays on. It opens a tunnel and prints a URL to paste into a claude.ai custom connector. The link lives only while that process runs, so use a box that stays awake (there's no background service yet).
-
 **Self-host** (optional): the server is stateless, so serving it from your own machine is one command, `market-search mcp --http`, behind your own TLS. `market-search mcp --check` shows which tools your keys unlock. See [SELFHOST.md](SELFHOST.md).
+
+---
+
+## Use it from your phone
+
+claude.ai, on the web and in the phone app, reaches tools through a public HTTPS link. On a Mac, click **Set up phone access** in the Market Search app. Or run one command on a Mac or Linux computer that stays on:
+
+```bash
+market-search mcp service install
+```
+
+It runs market-search in the background behind a free ngrok tunnel, and starts it again after a reboot. The first time, it opens the ngrok page where you copy your free authtoken. Then it prints your link and copies it:
+
+```
+https://your-name.ngrok-free.dev/mcp/<token>
+```
+
+Add it to claude.ai once:
+
+1. Open [Settings → Connectors](https://claude.ai/settings/connectors).
+2. Click **Add custom connector**.
+3. Paste the link and click **Add**.
+
+It shows up in the Claude app on your phone too. The link has a secret token in it, so keep it private.
+
+- `market-search mcp service status` checks on it.
+- `market-search mcp service url` prints the link again.
+- `market-search mcp service uninstall` stops it.
+
+Just trying it? `market-search mcp share` prints a temporary link that works while that command runs.
 
 ---
 

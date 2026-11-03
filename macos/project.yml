@@ -1,0 +1,41 @@
+name: MarketSearch
+options:
+  bundleIdPrefix: com.eliterminal
+  deploymentTarget:
+    macOS: "13.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: 9UVCD3JA4V
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+    MARKETING_VERSION: "0.5.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  MarketSearch:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+      - Resources
+    settings:
+      base:
+        PRODUCT_NAME: Market Search
+        PRODUCT_BUNDLE_IDENTIFIER: com.eliterminal.market-search
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Market Search
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.finance
+        INFOPLIST_KEY_NSHumanReadableCopyright: "eliterminal.com"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ARCHS: "arm64 x86_64"
+        ONLY_ACTIVE_ARCH: NO
+        SWIFT_VERSION: "5.0"
+    postCompileScripts:
+      # Puts the universal market-search binary for this version in
+      # Contents/Helpers and signs it with the hardened runtime. Xcode signs
+      # the app after every build phase, so the app's signature covers it.
+      - name: Embed market-search
+        script: '"$SRCROOT/scripts/embed-market-search.sh"'
+        basedOnDependencyAnalysis: false
+        showEnvVarsInLog: false

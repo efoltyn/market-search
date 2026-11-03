@@ -2911,8 +2911,10 @@ async fn mcp_run_subprocess(args: Vec<String>) -> anyhow::Result<String> {
 }
 
 // ── MCP Streamable HTTP transport ────────────────────────────────────────────
-// POST /mcp  → JSON-RPC request/response (same handlers as stdio mode)
-// GET  /     → health check
+// POST /mcp          → JSON-RPC request/response (same handlers as stdio mode)
+// POST /mcp/<token>  → the same, when a token is configured (capability URL for
+//                      clients that cannot send headers, i.e. the claude.ai connector)
+// GET  /             → health check (always open, reveals nothing)
 
 /// Optional shared secret for the HTTP transport, read once at startup from
 /// MARKET_SEARCH_MCP_TOKEN (env, not a flag, so it never shows up in `ps`).
@@ -2931,6 +2933,11 @@ fn mcp_http_token() -> Option<&'static str> {
         .as_deref()
 }
 
+/// Constant-time byte comparison. Only the length can leak, and tokens are fixed-length.
+fn mcp_ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Constant-time comparison of the presented bearer token.
 fn mcp_bearer_matches(headers: &axum::http::HeaderMap, expected: &str) -> bool {
     let presented = headers
@@ -2940,20 +2947,173 @@ fn mcp_bearer_matches(headers: &axum::http::HeaderMap, expected: &str) -> bool {
         .unwrap_or("")
         .trim()
         .as_bytes();
-    let expected = expected.as_bytes();
-    presented.len() == expected.len()
-        && presented
-            .iter()
-            .zip(expected)
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
+    mcp_ct_eq(presented, expected.as_bytes())
+}
+
+/// Auth config for the HTTP transport, fixed for the life of the server.
+///
+/// With a token, MCP is served at `/mcp/<token>` (a capability URL: the secret is
+/// the path, because the claude.ai connector UI has no header field and the MCP
+/// spec bans tokens in query strings) and at `/mcp` with `Authorization: Bearer
+/// <token>`. Without one, `/mcp` is open, exactly as before.
+#[derive(Clone, Default)]
+struct McpHttpAuth {
+    token: Option<std::sync::Arc<str>>,
+}
+
+impl McpHttpAuth {
+    fn new(token: Option<String>) -> Self {
+        let token = token
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .map(std::sync::Arc::<str>::from);
+        Self { token }
+    }
+
+    fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
+    /// Does this decoded `/mcp/<segment>` match the configured token?
+    fn path_token_matches(&self, segment: &str) -> bool {
+        self.token()
+            .is_some_and(|expected| mcp_ct_eq(segment.as_bytes(), expected.as_bytes()))
+    }
+}
+
+/// Percent-decode one URL path segment (no '+' to space: that rule is query-only).
+fn mcp_path_decode(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(a), Some(b)) = (mcp_hex_val(bytes[i + 1]), mcp_hex_val(bytes[i + 2])) {
+                out.push(a * 16 + b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Percent-encode a token for a URL path segment. Generated tokens are base64url,
+/// which passes through unchanged; a hand-set MARKET_SEARCH_MCP_TOKEN may not.
+fn mcp_path_encode(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for b in segment.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The MCP endpoint URL for `base` ("https://host"): `/mcp`, or `/mcp/<token>`.
+fn mcp_endpoint_url(base: &str, token: Option<&str>) -> String {
+    let base = base.trim_end_matches('/');
+    match token {
+        Some(t) => format!("{base}/mcp/{}", mcp_path_encode(t)),
+        None => format!("{base}/mcp"),
+    }
+}
+
+/// Gate for the MCP routes. It wraps only the POST handlers, so GET /mcp and
+/// GET /mcp/<anything> keep answering 405 (the claude.ai add-connector probe needs
+/// that) whether or not the token is right.
+async fn mcp_http_auth(
+    axum::extract::State(auth): axum::extract::State<McpHttpAuth>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let Some(expected) = auth.token() else {
+        return next.run(request).await;
+    };
+    let (authorized, message) = match request.uri().path().strip_prefix("/mcp/") {
+        // Capability URL. Any Authorization header is ignored here: after the
+        // rubber-stamp OAuth below, claude.ai sends `Bearer eli-anon-token`.
+        Some(segment) => (
+            auth.path_token_matches(&mcp_path_decode(segment)),
+            "invalid token in the URL path",
+        ),
+        None => (
+            mcp_bearer_matches(request.headers(), expected),
+            "missing or invalid bearer token",
+        ),
+    };
+    if authorized {
+        return next.run(request).await;
+    }
+    (
+        axum::http::StatusCode::UNAUTHORIZED,
+        [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+        axum::Json(json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": { "code": -32001, "message": message }
+        })),
+    )
+        .into_response()
 }
 
 async fn cmd_mcp_http(host: &str, port: u16) -> Result<()> {
+    let auth = McpHttpAuth::new(mcp_http_token().map(str::to_string));
+    serve_mcp_http(host, port, auth, "MARKET_SEARCH_MCP_TOKEN").await
+}
+
+/// Bind `host:port` and serve MCP over streamable HTTP until the process ends.
+/// `token_source` only labels where the token came from in the startup report;
+/// the token itself is never printed.
+async fn serve_mcp_http(
+    host: &str,
+    port: u16,
+    auth: McpHttpAuth,
+    token_source: &str,
+) -> Result<()> {
+    let has_token = auth.token().is_some();
+    let app = mcp_http_router(auth);
+
+    let listener = tokio::net::TcpListener::bind((host, port))
+        .await
+        .with_context(|| format!("bind {host}:{port}"))?;
+    let bound = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| format!("{host}:{port}"));
+
+    eprintln!("eli mcp http → http://{bound}/mcp");
+    eprintln!("market-search {} mcp (streamable http)", env!("CARGO_PKG_VERSION"));
+    for line in mcp_capability_report() {
+        eprintln!("  {line}");
+    }
+    let loopback = listener.local_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
+    if has_token {
+        eprintln!(
+            "  auth  token required (from {token_source}): POST /mcp/<token>, or /mcp with Authorization: Bearer <token>"
+        );
+    } else if !loopback {
+        eprintln!(
+            "  WARN  no auth on a non-loopback address: anyone who can reach {bound} can call every tool. \
+             Bind --host 127.0.0.1 behind a tunnel/reverse proxy, or set MARKET_SEARCH_MCP_TOKEN."
+        );
+    }
+    eprintln!("Waiting for connections...");
+
+    axum::serve(listener, app).await.context("mcp http serve")?;
+    Ok(())
+}
+
+/// The whole HTTP surface: health, MCP, favicon, and the OAuth-discovery stubs.
+fn mcp_http_router(auth: McpHttpAuth) -> axum::Router {
     use axum::{
-        extract::Json as AxumJson,
-        http::{header, HeaderName, Method, StatusCode},
-        response::IntoResponse,
+        http::{header, HeaderName, Method},
         routing::{get, post},
         Router,
     };
@@ -2983,14 +3143,22 @@ async fn cmd_mcp_http(host: &str, port: u16) -> Result<()> {
             header::WWW_AUTHENTICATE,
         ]);
 
-    let app = Router::new()
+    // MCP Streamable HTTP: GET /mcp must open an SSE stream or return 405. We push no
+    // server-initiated messages, so registering POST only makes axum auto-return 405
+    // (with Allow: POST) on GET — the spec-correct "no stream here, POST only" answer.
+    // The old GET→health handler returned 200 JSON, which made claude.ai's connector
+    // probe reject the endpoint as "not a valid MCP server." Health stays on GET /.
+    // The token gate wraps only the POST handlers (MethodRouter::route_layer), so a
+    // GET never reaches it and keeps its 405. Router::route_layer would not do: it
+    // also wraps each route's 405 fallback and turns those into 401s.
+    let gate = axum::middleware::from_fn_with_state(auth.clone(), mcp_http_auth);
+    let mut app = Router::new()
         .route("/", get(mcp_http_health))
-        // MCP Streamable HTTP: GET /mcp must open an SSE stream or return 405. We push no
-        // server-initiated messages, so registering POST only makes axum auto-return 405
-        // (with Allow: POST) on GET — the spec-correct "no stream here, POST only" answer.
-        // The old GET→health handler returned 200 JSON, which made claude.ai's connector
-        // probe reject the endpoint as "not a valid MCP server." Health stays on GET /.
-        .route("/mcp", post(mcp_http_handle))
+        .route("/mcp", post(mcp_http_handle).route_layer(gate.clone()));
+    if auth.token().is_some() {
+        app = app.route("/mcp/{token}", post(mcp_http_handle).route_layer(gate));
+    }
+    let mut app = app
         .route("/favicon.ico", get(mcp_favicon))
         .route("/favicon.png", get(mcp_favicon))
         // ── OAuth-discovery stub (added 2026-06-25) ──────────────────────────────
@@ -3001,11 +3169,14 @@ async fn cmd_mcp_http(host: &str, port: u16) -> Result<()> {
         // rejected as "not a valid MCP server" (GitHub claude-ai-mcp #402/#172/#143).
         // Claude Code + Desktop still tolerate authless, which is why only the web/
         // phone connector broke. We rubber-stamp the whole flow so the preflight
-        // completes while the server stays effectively open: any/no bearer is
-        // accepted on /mcp, and /authorize auto-approves. POST /mcp stays 200 (NO
-        // 401) so the existing authless runtime path is unbroken (and we dodge the
-        // HTTP/2 WWW-Authenticate case-sensitivity bug #219). Discovery URLs are
-        // derived per-request from X-Forwarded-Host/Proto, so this is tunnel-agnostic.
+        // completes: /authorize auto-approves and /token mints a fixed bearer. With
+        // no token configured that bearer (or none) is accepted on /mcp, and POST
+        // /mcp stays 200 (NO 401) so the authless runtime path is unbroken (and we
+        // dodge the HTTP/2 WWW-Authenticate case-sensitivity bug #219). With a token
+        // configured the rubber stamp grants nothing: access comes only from the
+        // /mcp/<token> path or a real bearer, checked by mcp_http_auth. Discovery URLs
+        // are derived per-request from X-Forwarded-Host/Proto, so this is
+        // tunnel-agnostic.
         .route(
             "/.well-known/oauth-protected-resource",
             get(oauth_protected_resource),
@@ -3024,35 +3195,23 @@ async fn cmd_mcp_http(host: &str, port: u16) -> Result<()> {
         )
         .route("/register", post(oauth_register))
         .route("/authorize", get(oauth_authorize))
-        .route("/token", post(oauth_token))
-        .layer(cors);
-
-    let listener = tokio::net::TcpListener::bind((host, port))
-        .await
-        .with_context(|| format!("bind {host}:{port}"))?;
-    let bound = listener
-        .local_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| format!("{host}:{port}"));
-
-    eprintln!("eli mcp http → http://{bound}/mcp");
-    eprintln!("market-search {} mcp (streamable http)", env!("CARGO_PKG_VERSION"));
-    for line in mcp_capability_report() {
-        eprintln!("  {line}");
+        .route("/token", post(oauth_token));
+    if auth.token().is_some() {
+        // RFC 9728 path-inserted discovery for the capability URL. A client that
+        // asks for these already holds the token (it is in the path it requests),
+        // so echoing it in `resource` reveals nothing; a wrong token gets 404.
+        // The root documents above never contain the token.
+        app = app
+            .route(
+                "/.well-known/oauth-protected-resource/mcp/{token}",
+                get(oauth_protected_resource_token),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server/mcp/{token}",
+                get(oauth_authorization_server_token),
+            );
     }
-    let loopback = listener.local_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
-    if mcp_http_token().is_some() {
-        eprintln!("  auth  MARKET_SEARCH_MCP_TOKEN set: /mcp requires Authorization: Bearer <token>");
-    } else if !loopback {
-        eprintln!(
-            "  WARN  no auth on a non-loopback address: anyone who can reach {bound} can call every tool. \
-             Bind --host 127.0.0.1 behind a tunnel/reverse proxy, or set MARKET_SEARCH_MCP_TOKEN."
-        );
-    }
-    eprintln!("Waiting for connections...");
-
-    axum::serve(listener, app).await.context("mcp http serve")?;
-    Ok(())
+    app.with_state(auth).layer(cors)
 }
 
 /// Serve the embedded eli wordmark at /favicon.ico and /favicon.png. A connector UI that
@@ -3176,6 +3335,41 @@ async fn oauth_authorization_server(
     }))
 }
 
+/// RFC 9728 metadata for the capability URL `/mcp/<token>`: `resource` must equal the
+/// URL the connector was given, so it carries the token. 404 unless the token matches.
+async fn oauth_protected_resource_token(
+    axum::extract::State(auth): axum::extract::State<McpHttpAuth>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !auth.path_token_matches(&token) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    let base = mcp_public_base(&headers);
+    axum::Json(serde_json::json!({
+        "resource": mcp_endpoint_url(&base, auth.token()),
+        "authorization_servers": [base],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": []
+    }))
+    .into_response()
+}
+
+/// Path-aware AS metadata lookup some clients try for `/mcp/<token>`. Same document
+/// as the root one (it holds no secret); 404 unless the token matches.
+async fn oauth_authorization_server_token(
+    axum::extract::State(auth): axum::extract::State<McpHttpAuth>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !auth.path_token_matches(&token) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    oauth_authorization_server(headers).await.into_response()
+}
+
 /// RFC 7591 Dynamic Client Registration. Accept anyone; echo back the redirect_uris
 /// the client sent (claude.ai expects its own callback echoed) and return a fixed
 /// public client_id.
@@ -3280,21 +3474,8 @@ async fn mcp_http_handle(
         .and_then(|m| m.as_str())
         .map(|s| s.to_string());
 
-    if let Some(expected) = mcp_http_token() {
-        if !mcp_bearer_matches(&headers, expected) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
-                axum::Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
-                    "error": { "code": -32001, "message": "missing or invalid bearer token" }
-                })),
-            )
-                .into_response();
-        }
-    }
-
+    // Auth (path token or bearer) already ran in mcp_http_auth, before the body
+    // was parsed.
     let mut response = match method.as_deref() {
         None => (
             StatusCode::BAD_REQUEST,
@@ -3795,5 +3976,178 @@ mod mcp_tool_tests {
         assert!(!mcp_bearer_matches(&with("Bearer s3cretX"), "s3cret"));
         assert!(!mcp_bearer_matches(&with("s3cret"), "s3cret"));
         assert!(!mcp_bearer_matches(&axum::http::HeaderMap::new(), "s3cret"));
+    }
+}
+
+#[cfg(test)]
+mod mcp_http_auth_tests {
+    use super::*;
+
+    /// Serve the real router on an ephemeral loopback port.
+    async fn spawn_server(token: Option<&str>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = mcp_http_router(McpHttpAuth::new(token.map(str::to_string)));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+    }
+
+    fn initialize() -> serde_json::Value {
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": { "name": "Anthropic/ClaudeAI", "version": "1.0" }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn token_gates_mcp_and_keeps_the_claude_ai_preflight_working() {
+        let token = "s3cret_Token-123";
+        let base = spawn_server(Some(token)).await;
+        let c = client();
+
+        // /mcp without a token, or with a wrong one: 401 with a Bearer challenge.
+        // The rubber-stamp OAuth token grants nothing once a token is configured.
+        let r = c.post(format!("{base}/mcp")).json(&initialize()).send().await.unwrap();
+        assert_eq!(r.status(), 401);
+        assert_eq!(r.headers()["www-authenticate"], "Bearer");
+        for bad in ["nope", "eli-anon-token"] {
+            let r = c.post(format!("{base}/mcp")).bearer_auth(bad).json(&initialize()).send().await.unwrap();
+            assert_eq!(r.status(), 401, "bearer {bad}");
+        }
+        // The real token as a bearer on /mcp works.
+        let r = c.post(format!("{base}/mcp")).bearer_auth(token).json(&initialize()).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+
+        // Capability URL: works with no header, and with claude.ai's rubber-stamp bearer.
+        let r = c.post(format!("{base}/mcp/{token}")).json(&initialize()).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["mcp-session-id"], "eli-mcp-session");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["result"]["serverInfo"]["name"], "market-search");
+        let r = c
+            .post(format!("{base}/mcp/{token}"))
+            .bearer_auth("eli-anon-token")
+            .header("mcp-session-id", "eli-mcp-session")
+            .json(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["mcp-session-id"], "eli-mcp-session");
+        let r = c
+            .post(format!("{base}/mcp/{token}"))
+            .json(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 202);
+        // A wrong path token: 401.
+        let r = c.post(format!("{base}/mcp/wrong")).json(&initialize()).send().await.unwrap();
+        assert_eq!(r.status(), 401);
+
+        // GET answers 405 (the add-connector probe), whatever the token.
+        for path in [format!("/mcp/{token}"), "/mcp/wrong".to_string(), "/mcp".to_string()] {
+            let r = c.get(format!("{base}{path}")).header("accept", "text/event-stream").send().await.unwrap();
+            assert_eq!(r.status(), 405, "GET {path}");
+        }
+
+        // RFC 9728 discovery for the capability URL echoes it exactly.
+        let r = c
+            .get(format!("{base}/.well-known/oauth-protected-resource/mcp/{token}"))
+            .header("x-forwarded-host", "quiet-otter.ngrok-free.dev")
+            .header("x-forwarded-proto", "https")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let prm: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(prm["resource"], format!("https://quiet-otter.ngrok-free.dev/mcp/{token}"));
+        assert_eq!(prm["authorization_servers"][0], "https://quiet-otter.ngrok-free.dev");
+        let r = c.get(format!("{base}/.well-known/oauth-protected-resource/mcp/wrong")).send().await.unwrap();
+        assert_eq!(r.status(), 404);
+        let r = c.get(format!("{base}/.well-known/oauth-authorization-server/mcp/{token}")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        // Open documents never carry the token.
+        for path in [
+            "/",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-authorization-server",
+        ] {
+            let r = c.get(format!("{base}{path}")).send().await.unwrap();
+            assert_eq!(r.status(), 200, "GET {path}");
+            assert!(!r.text().await.unwrap().contains(token), "{path} leaks the token");
+        }
+        // The rest of the rubber-stamp flow still completes.
+        let r = c
+            .post(format!("{base}/register"))
+            .json(&json!({"redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201);
+        let r = c
+            .get(format!("{base}/authorize?redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=xyz"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 302);
+        assert_eq!(c.post(format!("{base}/token")).send().await.unwrap().status(), 200);
+    }
+
+    #[tokio::test]
+    async fn hand_set_tokens_with_url_specials_work_percent_encoded() {
+        let token = "a+b/c=";
+        let base = spawn_server(Some(token)).await;
+        let c = client();
+        let url = mcp_endpoint_url(&base, Some(token));
+        assert!(url.ends_with("/mcp/a%2Bb%2Fc%3D"));
+        let r = c.post(&url).json(&initialize()).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = c.post(format!("{base}/mcp/a+b")).json(&initialize()).send().await.unwrap();
+        assert_eq!(r.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn without_a_token_nothing_changes() {
+        let base = spawn_server(None).await;
+        let c = client();
+        let r = c.post(format!("{base}/mcp")).json(&initialize()).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["mcp-session-id"], "eli-mcp-session");
+        let r = c.post(format!("{base}/mcp")).bearer_auth("eli-anon-token").json(&initialize()).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(c.get(format!("{base}/mcp")).send().await.unwrap().status(), 405);
+        assert_eq!(c.post(format!("{base}/mcp/whatever")).json(&initialize()).send().await.unwrap().status(), 404);
+        let r = c.get(format!("{base}/.well-known/oauth-protected-resource/mcp/whatever")).send().await.unwrap();
+        assert_eq!(r.status(), 404);
+        let r = c.get(format!("{base}/.well-known/oauth-protected-resource")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+    }
+
+    #[test]
+    fn path_token_helpers() {
+        assert_eq!(mcp_path_encode("a+b/c="), "a%2Bb%2Fc%3D");
+        assert_eq!(mcp_path_decode("a%2Bb%2Fc%3D"), "a+b/c=");
+        assert_eq!(mcp_path_decode("a+b%"), "a+b%");
+        assert_eq!(mcp_endpoint_url("https://h.dev/", Some("t0k")), "https://h.dev/mcp/t0k");
+        assert_eq!(mcp_endpoint_url("https://h.dev", None), "https://h.dev/mcp");
+        let auth = McpHttpAuth::new(Some("  t0k \n".to_string()));
+        assert!(auth.path_token_matches("t0k"));
+        assert!(!auth.path_token_matches("t0k "));
+        assert!(McpHttpAuth::new(Some("   ".to_string())).token().is_none());
     }
 }

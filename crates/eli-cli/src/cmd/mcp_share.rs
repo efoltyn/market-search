@@ -7,13 +7,23 @@
 //
 // `--provider self-host` prints how to run the stateless HTTP server behind
 // your own TLS instead (see SELFHOST.md); the sovereign SNI gateway is not built.
+//
+// `--service` is the long-lived mode `mcp service install` runs under launchd /
+// systemd (see mcp_service.rs). Plain `share` stays the quick, temporary try.
 
 fn share_pid_file() -> std::path::PathBuf {
     std::env::temp_dir().join("market-search-share-children.pid")
 }
 
 async fn cmd_mcp_share(args: ShareArgs) -> Result<()> {
-    let provider = args.provider.to_ascii_lowercase();
+    if args.service {
+        return run_share_service(args).await;
+    }
+    let provider = args
+        .provider
+        .as_deref()
+        .unwrap_or("cloudflare")
+        .to_ascii_lowercase();
     let port = args.port;
 
     // Self-host needs no tunnel — print the direct-serve recipe BEFORE booting
@@ -129,11 +139,12 @@ async fn provider_cloudflare(port: u16) -> Result<()> {
         );
     }
 
+    // Dial IPv4 explicitly: `localhost` can resolve to ::1 first.
     let mut child = tokio::process::Command::new("cloudflared")
         .args([
             "tunnel",
             "--url",
-            &format!("http://localhost:{}", port),
+            &format!("http://127.0.0.1:{}", port),
             "--no-autoupdate",
         ])
         .stdout(std::process::Stdio::piped())
@@ -188,7 +199,9 @@ async fn provider_ngrok(args: ShareArgs) -> Result<()> {
         }
     });
 
-    let mut cmd_args: Vec<String> = vec!["http".into(), args.port.to_string()];
+    // `ngrok http <port>` dials localhost, which can resolve to ::1 first; the
+    // server listens on IPv4. Name the IPv4 loopback explicitly.
+    let mut cmd_args: Vec<String> = vec!["http".into(), format!("127.0.0.1:{}", args.port)];
     if let Some(d) = &domain {
         cmd_args.push(format!("--url={}", d));
     }
@@ -294,7 +307,10 @@ async fn read_url_from_child(
 }
 
 fn print_share_block(label: &str, base_url: &str, note: &str) {
-    let mcp_url = format!("{}/mcp", base_url);
+    // With MARKET_SEARCH_MCP_TOKEN set the server only answers the token URL, so
+    // that is the one to paste (the connector UI has no header field).
+    let token = mcp_http_token();
+    let mcp_url = mcp_endpoint_url(base_url, token);
     println!();
     println!("┌─ Market Search public URL ──────────────────────────────────");
     println!("│");
@@ -306,6 +322,10 @@ fn print_share_block(label: &str, base_url: &str, note: &str) {
     println!("│  {}", mcp_url);
     println!("│");
     println!("│  {}", note);
+    if token.is_some() {
+        println!("│  Keep this URL private: the token in it is the password.");
+    }
+    println!("│  To keep a URL up in the background: market-search mcp service install");
     println!("└──────────────────────────────────────────────────────────────");
     println!();
 }

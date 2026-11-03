@@ -9,6 +9,13 @@ pub async fn run() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // A double-click on Market Search.app runs this binary with no arguments
+    // (older macOS adds a -psn_* serial number clap would reject). That's a
+    // person, not a terminal: run setup through dialogs.
+    if setup_launched_as_app() {
+        return cmd_setup_gui(SetupArgs::default()).await;
+    }
+
     // Let clap handle --help/--version/parse errors itself: help exits 0
     // (agents script `cmd --help && next`), parse errors exit 2 with clap's
     // formatting. Routing these through anyhow printed help behind an
@@ -34,9 +41,11 @@ pub async fn run() -> Result<()> {
             use clap::CommandFactory as _;
             Cli::command().print_help()?;
             println!();
+            println!("New here? Run: market-search setup  (connects Claude, Cursor, VS Code and more)");
             Ok(())
         }
-        Some(Command::Setup) => cmd_setup().await,
+        Some(Command::Setup(args)) => cmd_setup(args).await,
+        Some(Command::AgentSetup) => cmd_agent_setup().await,
         Some(Command::Init) => cmd_init().await,
         Some(Command::Config { set, value }) => cmd_config(set, value).await,
         Some(Command::ToolInfo { path }) => cmd_tool_info(path),
@@ -45,6 +54,8 @@ pub async fn run() -> Result<()> {
         Some(Command::Mcp(args)) => {
             if let Some(McpSubcommand::Share(share_args)) = args.cmd {
                 cmd_mcp_share(share_args).await
+            } else if let Some(McpSubcommand::Service(service_args)) = args.cmd {
+                cmd_mcp_service(service_args).await
             } else if args.check {
                 println!("market-search {} mcp --check", env!("CARGO_PKG_VERSION"));
                 for line in mcp_capability_report() {

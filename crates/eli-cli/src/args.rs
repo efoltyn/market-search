@@ -15,8 +15,12 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Interactive setup - configure provider, model, and API key
-    Setup,
+    /// Connect market-search to the AI apps on this machine (Claude, Cursor, VS Code, and more)
+    Setup(SetupArgs),
+
+    /// Legacy chat-agent wizard (provider, model, API key)
+    #[command(hide = true)]
+    AgentSetup,
 
     /// Create a default config file (if missing)
     Init,
@@ -83,6 +87,45 @@ struct PicksLogArgs {
     market: Vec<String>,
 }
 
+#[derive(clap::Args, Debug, Default)]
+struct SetupArgs {
+    /// Show every supported app, whether it's installed, and whether market-search is connected (and to which binary). Writes nothing.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["remove", "dry_run", "gui", "sec_contact"])]
+    list: bool,
+
+    /// Only these apps, comma-separated or repeated: claude-desktop, claude-code, cursor, vscode, vscode-insiders, windsurf, codex, gemini-cli, lm-studio, zed.
+    #[arg(long, value_delimiter = ',', value_name = "NAMES")]
+    client: Vec<String>,
+
+    /// Remove the market-search entry instead. Other servers and settings stay as they are.
+    #[arg(long, default_value_t = false)]
+    remove: bool,
+
+    /// Print exactly what would change (file, entry before and after). Writes nothing.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["gui", "sec_contact"])]
+    dry_run: bool,
+
+    /// Don't ask; connect every app found. Implied when stdin is not a terminal.
+    #[arg(short = 'y', long, default_value_t = false)]
+    yes: bool,
+
+    /// Binary to write into configs (default: this one, copied to ~/.local/bin first when it runs from a temporary place).
+    #[arg(long, value_name = "PATH")]
+    binary: Option<PathBuf>,
+
+    /// Print one JSON object on stdout and nothing else (with --list, --dry-run, or --yes). For apps and scripts.
+    #[arg(long, default_value_t = false, conflicts_with = "gui")]
+    json: bool,
+
+    /// SEC EDGAR contact for the filings and insider tools, e.g. "Jane Doe jane@example.com". A bare email is saved as "Market Search <email>".
+    #[arg(long, value_name = "CONTACT")]
+    sec_contact: Option<String>,
+
+    /// Use macOS dialogs (what double-clicking Market Search.app does).
+    #[arg(long, default_value_t = false, conflicts_with_all = ["remove", "dry_run", "list"])]
+    gui: bool,
+}
+
 #[derive(clap::Args, Debug)]
 struct McpArgs {
     #[command(subcommand)]
@@ -97,7 +140,7 @@ struct McpArgs {
     port: u16,
 
     /// Bind address for HTTP mode. Use 127.0.0.1 behind a tunnel or reverse proxy.
-    /// Set MARKET_SEARCH_MCP_TOKEN to require `Authorization: Bearer <token>` on /mcp.
+    /// Set MARKET_SEARCH_MCP_TOKEN to require it: POST /mcp/<token>, or /mcp with `Authorization: Bearer <token>`.
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
 
@@ -110,13 +153,102 @@ struct McpArgs {
 enum McpSubcommand {
     /// Get a public HTTPS /mcp URL (boots local HTTP MCP + spawns a tunnel).
     Share(ShareArgs),
+    /// Keep a claude.ai connector URL up in the background, across reboots (for claude.ai on the web and your phone).
+    Service(McpServiceArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct McpServiceArgs {
+    #[command(subcommand)]
+    cmd: McpServiceCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum McpServiceCommand {
+    /// Install and start the background service, then print your connector URL.
+    Install(McpServiceInstallArgs),
+    /// Stop and remove the background service. Keeps the token and the binary.
+    Uninstall(McpServiceUninstallArgs),
+    /// Show whether the service, the local server, and the tunnel are up.
+    Status(McpServiceQueryArgs),
+    /// Print the connector URL (https://<domain>/mcp/<token>).
+    Url(McpServiceQueryArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct McpServiceInstallArgs {
+    /// Tunnel provider: ngrok (default; the URL stays the same) or cloudflare (new URL on every restart).
+    #[arg(long, default_value = "ngrok")]
+    provider: String,
+
+    /// Local port for the service's HTTP server (bound to 127.0.0.1).
+    #[arg(long, default_value_t = 8485)]
+    port: u16,
+
+    /// ngrok: serve on this domain instead of your account's free dev domain.
+    #[arg(long)]
+    domain: Option<String>,
+
+    /// ngrok: authtoken to save if ngrok has none (from https://dashboard.ngrok.com/get-started/your-authtoken).
+    #[arg(long)]
+    authtoken: Option<String>,
+
+    /// Path of the binary the service runs. The running binary is copied there if it is a different file.
+    #[arg(long)]
+    binary: Option<PathBuf>,
+
+    /// Make a new connector token. The old URL stops working.
+    #[arg(long, default_value_t = false)]
+    new_token: bool,
+
+    /// Install even if another ngrok agent is running on this machine (a free ngrok account allows one).
+    #[arg(long, default_value_t = false)]
+    force: bool,
+
+    /// Never prompt, read the terminal, or open a browser. Exit 3 if a person has to act.
+    #[arg(long, short = 'y', default_value_t = false)]
+    yes: bool,
+
+    /// Print exactly one JSON object on stdout (progress goes to stderr). Implies --yes.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+
+    /// Show the service file and every command, change nothing.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+
+    /// Preview another platform's service file with --dry-run: macos | linux.
+    #[arg(long, hide = true)]
+    platform: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct McpServiceUninstallArgs {
+    /// Print exactly one JSON object on stdout.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+
+    /// Show the commands, change nothing.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+
+    /// Preview another platform's commands with --dry-run: macos | linux.
+    #[arg(long, hide = true)]
+    platform: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct McpServiceQueryArgs {
+    /// Print exactly one JSON object on stdout.
+    #[arg(long, default_value_t = false)]
+    json: bool,
 }
 
 #[derive(clap::Args, Debug)]
 struct ShareArgs {
-    /// Tunnel provider: cloudflare | ngrok | tunnelmole | self-host
-    #[arg(long, default_value = "cloudflare")]
-    provider: String,
+    /// Tunnel provider: cloudflare (default) | ngrok | tunnelmole | self-host. With --service: ngrok (default) | cloudflare.
+    #[arg(long)]
+    provider: Option<String>,
 
     /// Local port the MCP HTTP server is bound to.
     #[arg(long, default_value = "8484")]
@@ -129,6 +261,11 @@ struct ShareArgs {
     /// For ngrok: authtoken if not already configured globally.
     #[arg(long)]
     authtoken: Option<String>,
+
+    /// Run as the background service (what `mcp service install` sets up): binds 127.0.0.1,
+    /// requires the token, restarts the tunnel when it drops, keeps the Mac awake on power.
+    #[arg(long, default_value_t = false)]
+    service: bool,
 }
 
 
