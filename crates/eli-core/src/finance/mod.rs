@@ -80,6 +80,14 @@ pub use timeseries::build_snapshot_analytics;
 pub use timeseries::build_timeseries_analytics;
 pub use timeseries::fetch_timeseries;
 pub use timeseries::is_binance_ticker;
+pub use timeseries::is_govt_ticker;
+pub use timeseries::{finra_bond_lookup_id, finra_bond_search, is_finra_bond_ticker, BondRef};
+pub use timeseries::{is_buyback_ticker, is_nyfed_ticker, is_ofr_ticker};
+pub use timeseries::is_etf_flow_ticker;
+pub use timeseries::is_cboe_ticker;
+pub use timeseries::is_hyperliquid_ticker;
+pub use timeseries::is_deribit_ticker;
+pub use timeseries::is_secnav_ticker;
 pub use timeseries::is_pyth_ticker;
 pub use timeseries::resample_candles;
 

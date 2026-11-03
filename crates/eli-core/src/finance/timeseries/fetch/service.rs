@@ -94,6 +94,30 @@ pub async fn fetch_timeseries(
         ProviderKind::Ibkr => crate::finance::fetch_ibkr_timeseries(&req).await?,
         ProviderKind::Pyth => fetch_pyth_series(&tickers, start, end, req.granularity).await?,
         ProviderKind::Binance => fetch_binance_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::Govt => fetch_govt_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::Secnav => {
+            // Same User-Agent resolution as finance_filings: config `sec_user_agent`
+            // first, then ELI_SEC_USER_AGENT (handled inside the fetcher).
+            let ua = secnav_config_user_agent();
+            fetch_secnav_series_with_ua(&tickers, start, end, req.granularity, ua.as_deref())
+                .await?
+        }
+        ProviderKind::FinraBonds => {
+            fetch_finra_bond_series(&tickers, start, end, req.granularity).await?
+        }
+        ProviderKind::Buyback => fetch_buyback_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::Nyfed => fetch_nyfed_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::Ofr => fetch_ofr_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::EtfFlows => {
+            fetch_etf_flow_series(&tickers, start, end, req.granularity).await?
+        }
+        ProviderKind::Cboe => fetch_cboe_series(&tickers, start, end, req.granularity).await?,
+        ProviderKind::Hyperliquid => {
+            fetch_hyperliquid_series(&tickers, start, end, req.granularity).await?
+        }
+        ProviderKind::Deribit => {
+            fetch_deribit_series(&tickers, start, end, req.granularity).await?
+        }
         ProviderKind::Eia | ProviderKind::Ecb => {
             return Err(Error::InvalidInput(
                 "EIA/ECB timeseries providers are not yet integrated into the core fetch path; use the dedicated CLI tools".to_string(),
@@ -212,16 +236,18 @@ pub async fn fetch_timeseries(
 }
 
 /// Floor a timestamp to the nearest granularity bucket boundary.
-/// Caps bucket size at 1 hour so daily/weekly/monthly granularity still hits
-/// the cache within the hour while never excluding the current partial day.
+/// Caps bucket size at 5 minutes so a repeat call never serves a live tape
+/// more than 5 minutes old, at any granularity.
 fn floor_to_bucket(dt: DateTime<Utc>, granularity: Span) -> DateTime<Utc> {
     let raw_secs = granularity.approx_duration().num_seconds();
     // Cap the bucket at 1 HOUR (not 1 day): flooring a daily request's end
     // to midnight UTC cut the CURRENT day's bar out of every daily pull for
     // the whole session — a +6.7% TSLA day was invisible to `--range 5d
     // --granularity 1d` until midnight. Hourly buckets keep the cache warm
-    // within the hour while always including today.
-    let bucket_secs = raw_secs.clamp(60, 3600);
+    // within the hour while always including today. Tightened to 5 MINUTES
+    // (2026-10-21): an hour-old cached daily/hourly tape hid the French 10Y's
+    // 14:30-14:50 UTC break through 5% from a same-hour repeat call.
+    let bucket_secs = raw_secs.clamp(60, 300);
     let ts = dt.timestamp();
     let floored = (ts / bucket_secs) * bucket_secs;
     DateTime::from_timestamp(floored, 0).unwrap_or(dt)
@@ -270,4 +296,15 @@ fn cache_key(
     let mut hasher = Sha256::new();
     hasher.update(raw);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// SEC User-Agent from the `sec_user_agent` config key (what `finance filings`
+/// falls back to after `--user-agent`). None → the fetcher reads ELI_SEC_USER_AGENT.
+fn secnav_config_user_agent() -> Option<String> {
+    let paths = crate::config::Paths::discover().ok()?;
+    crate::config::load_or_default(&paths)
+        .ok()?
+        .chat
+        .sec_user_agent
+        .filter(|s| !s.trim().is_empty())
 }

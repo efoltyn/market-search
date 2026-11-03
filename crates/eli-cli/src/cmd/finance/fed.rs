@@ -300,3 +300,49 @@ async fn cmd_finance_boe(args: FinanceBoeArgs) -> Result<()> {
     emit_tool_payload(&resp)?;
     Ok(())
 }
+
+async fn cmd_finance_bonds(args: FinanceBondsArgs) -> Result<()> {
+    if args.format.trim().to_ascii_lowercase() != "json" {
+        anyhow::bail!("unsupported --format (only 'json' is implemented)");
+    }
+    let (query, bonds) = if let Some(id) = args.cusip.as_deref() {
+        let b = eli_core::finance::finra_bond_lookup_id(id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("FINRA bond lookup")?;
+        (serde_json::json!({ "cusip": id.trim().to_ascii_uppercase() }), b)
+    } else {
+        let issuer = args.issuer.as_deref().unwrap_or_default();
+        let b = eli_core::finance::finra_bond_search(issuer)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("FINRA bond search")?;
+        (serde_json::json!({ "issuer": issuer.trim().to_ascii_uppercase() }), b)
+    };
+    let mut resp = serde_json::json!({
+        "source": "finra_trace",
+        "query": query,
+        "count": bonds.len(),
+        "bonds": bonds,
+        "usage": "timeseries ticker BOND:<cusip>:YLD (yield %) or BOND:<cusip>:PX (price, % of par)",
+    });
+    if bonds.is_empty() {
+        resp["hint"] = serde_json::json!(
+            "No match. FINRA needs the EXACT issuer name as TRACE lists it (e.g. ORACLE CORP, COREWEAVE INC, APPLE INC); matured bonds are excluded from issuer searches."
+        );
+    }
+
+    if let Some(out_path) = args.out {
+        let wr = write_json_out_with_meta(out_path, &resp, "finance.bonds", &[])?;
+        println!(
+            "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
+            serde_json::to_string(&wr.out_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+            serde_json::to_string(&wr.meta_path.display().to_string())
+                .unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        return Ok(());
+    }
+    emit_tool_payload(&resp)?;
+    Ok(())
+}

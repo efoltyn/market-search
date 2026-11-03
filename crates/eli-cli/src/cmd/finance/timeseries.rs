@@ -381,6 +381,11 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     let mut pyth_tickers = Vec::new();
     let mut fred_tickers = Vec::new();
     let mut binance_tickers = Vec::new();
+    let mut govt_tickers = Vec::new();
+    // NAV:/PNAV:, BOND:, BUYBACK:, NYFED:, OFR:, ETF:, CBOE:, HL:, DERIBIT: — one
+    // bucket per provider, fetched concurrently as side merges (or as the main
+    // bucket when nothing else is present).
+    let mut extra_buckets: Vec<(ExtraProvider, Vec<String>)> = Vec::new();
     let mut ibkr_tickers = Vec::new();
     let mut cleveland_tickers = Vec::new();
     let mut ratepath_tickers = Vec::new();
@@ -390,6 +395,8 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             TimeseriesTickerBucket::Pyth => pyth_tickers.push(t.clone()),
             TimeseriesTickerBucket::Fred => fred_tickers.push(t.clone()),
             TimeseriesTickerBucket::Binance => binance_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Govt => govt_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Extra(p) => push_extra_ticker(&mut extra_buckets, p, t),
             TimeseriesTickerBucket::Ibkr => ibkr_tickers.push(t.clone()),
             TimeseriesTickerBucket::ClevelandFed => cleveland_tickers.push(t.clone()),
             TimeseriesTickerBucket::RatePath => ratepath_tickers.push(t.clone()),
@@ -401,6 +408,8 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             TimeseriesTickerBucket::Pyth => pyth_tickers.push(t.clone()),
             TimeseriesTickerBucket::Fred => fred_tickers.push(t.clone()),
             TimeseriesTickerBucket::Binance => binance_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Govt => govt_tickers.push(t.clone()),
+            TimeseriesTickerBucket::Extra(p) => push_extra_ticker(&mut extra_buckets, p, t),
             TimeseriesTickerBucket::Ibkr => ibkr_tickers.push(t.clone()),
             TimeseriesTickerBucket::ClevelandFed => cleveland_tickers.push(t.clone()),
             TimeseriesTickerBucket::RatePath => ratepath_tickers.push(t.clone()),
@@ -410,6 +419,8 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     let has_pyth = !pyth_tickers.is_empty();
     let has_fred = !fred_tickers.is_empty();
     let has_binance = !binance_tickers.is_empty();
+    let has_govt = !govt_tickers.is_empty();
+    let has_extra = !extra_buckets.is_empty();
     let has_ibkr = !ibkr_tickers.is_empty();
     let has_cleveland = !cleveland_tickers.is_empty();
     let has_ratepath = !ratepath_tickers.is_empty();
@@ -421,11 +432,13 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         "ibkr" => eli_core::finance::ProviderKind::Ibkr,
         "pyth" => eli_core::finance::ProviderKind::Pyth,
         "binance" => eli_core::finance::ProviderKind::Binance,
-        other => {
-            anyhow::bail!(
-                "unsupported --provider '{other}' (supported: auto, yahoo, fred, ibkr, pyth, binance)"
-            )
-        }
+        "govt" => eli_core::finance::ProviderKind::Govt,
+        other => match ExtraProvider::from_provider_str(other) {
+            Some(p) => p.kind(),
+            None => anyhow::bail!(
+                "unsupported --provider '{other}' (supported: auto, yahoo, fred, ibkr, pyth, binance, govt, secnav, bond, buyback, nyfed, ofr, etf, cboe, hyperliquid, deribit)"
+            ),
+        },
     };
     let use_ibkr_explicit = matches!(provider, eli_core::finance::ProviderKind::Ibkr);
 
@@ -443,6 +456,8 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         && fred_tickers.is_empty()
         && pyth_tickers.is_empty()
         && binance_tickers.is_empty()
+        && govt_tickers.is_empty()
+        && !has_extra
         && ibkr_tickers.is_empty()
         && !has_ratepath;
     if only_cleveland {
@@ -517,6 +532,8 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         && fred_tickers.is_empty()
         && pyth_tickers.is_empty()
         && binance_tickers.is_empty()
+        && govt_tickers.is_empty()
+        && !has_extra
         && ibkr_tickers.is_empty()
         && !has_cleveland;
     if only_ratepath {
@@ -606,6 +623,14 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     } else if has_pyth && yahoo_tickers.is_empty() && !has_binance && !has_ibkr {
         // All Pyth
         (pyth_tickers.clone(), eli_core::finance::ProviderKind::Pyth)
+    } else if has_govt && yahoo_tickers.is_empty() && !has_pyth && !has_binance && !has_ibkr {
+        // All sovereign yields (CNBC)
+        (govt_tickers.clone(), eli_core::finance::ProviderKind::Govt)
+    } else if has_extra && yahoo_tickers.is_empty() && !has_pyth && !has_binance && !has_ibkr {
+        // Only new-prefix providers (± CLEV/RATEPATH/odds): first bucket is main,
+        // the rest merge in as side fetches below.
+        let (p, ts) = &extra_buckets[0];
+        (ts.clone(), p.kind())
     } else {
         // Yahoo (default) — other providers merge in separately
         (yahoo_tickers.clone(), provider.clone())
@@ -807,6 +832,51 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             None
         }
     };
+    let govt_fut = async {
+        if has_govt && !govt_tickers.iter().all(|t| main_tickers.contains(t)) {
+            Some(
+                eli_core::finance::fetch_timeseries(
+                    eli_core::finance::TimeseriesRequest {
+                        tickers: govt_tickers.clone(),
+                        range,
+                        granularity,
+                        as_of,
+                        provider: eli_core::finance::ProviderKind::Govt,
+                        max_points_per_ticker: max_points,
+                        ibkr: None,
+                    },
+                    &cache_dir,
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    };
+    let extra_fut = join_all(
+        extra_buckets
+            .iter()
+            .filter(|(_, ts)| !ts.iter().all(|t| main_tickers.contains(t)))
+            .map(|(p, ts)| {
+                let cache_dir = &cache_dir;
+                async move {
+                    let r = eli_core::finance::fetch_timeseries(
+                        eli_core::finance::TimeseriesRequest {
+                            tickers: ts.clone(),
+                            range,
+                            granularity,
+                            as_of,
+                            provider: p.kind(),
+                            max_points_per_ticker: max_points,
+                            ibkr: None,
+                        },
+                        cache_dir,
+                    )
+                    .await;
+                    (*p, ts.clone(), r)
+                }
+            }),
+    );
     let ibkr_fut = async {
         if has_ibkr && !use_ibkr {
             let stripped: Vec<String> = ibkr_tickers
@@ -881,10 +951,12 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
     };
 
-    let (yahoo_extra_res, pyth_res, binance_res, ibkr_res, clev_res, pm_res, rp_res) = tokio::join!(
+    let (yahoo_extra_res, pyth_res, binance_res, govt_res, extra_res, ibkr_res, clev_res, pm_res, rp_res) = tokio::join!(
         yahoo_extra_fut,
         pyth_fut,
         binance_fut,
+        govt_fut,
+        extra_fut,
         ibkr_fut,
         clev_fut,
         pm_fut,
@@ -1041,6 +1113,52 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                         stage: Some("binance".to_string()),
                         message: format!("Binance provider failed: {e}"),
                     });
+            }
+        }
+    }
+    if let Some(result) = govt_res {
+        match result {
+            Ok(govt_resp) => {
+                resp.series.extend(govt_resp.series);
+                resp.tickers.extend(govt_tickers.clone());
+                if let Some(ref govt_errors) = govt_resp.errors {
+                    resp.errors
+                        .get_or_insert_with(Vec::new)
+                        .extend(govt_errors.clone());
+                }
+            }
+            Err(e) => {
+                eprintln!("warning: sovereign-yield (GOVT) fetch failed: {e}");
+                resp.errors
+                    .get_or_insert_with(Vec::new)
+                    .push(eli_core::finance::TimeseriesError {
+                        ticker: govt_tickers.join(","),
+                        stage: Some("govt".to_string()),
+                        message: format!("GOVT provider failed: {e}"),
+                    });
+            }
+        }
+    }
+    for (p, ts, result) in extra_res {
+        match result {
+            Ok(r) => {
+                resp.series.extend(r.series);
+                resp.tickers.extend(ts);
+                if let Some(errs) = r.errors {
+                    resp.errors.get_or_insert_with(Vec::new).extend(errs);
+                }
+            }
+            Err(e) => {
+                eprintln!("warning: {} fetch failed: {e}", p.label());
+                // One error per ticker: errors[].ticker is a single-identifier contract.
+                let errs = resp.errors.get_or_insert_with(Vec::new);
+                for t in ts {
+                    errs.push(eli_core::finance::TimeseriesError {
+                        ticker: t,
+                        stage: Some(p.label().to_string()),
+                        message: format!("{} provider failed: {e}", p.label()),
+                    });
+                }
             }
         }
     }
@@ -1280,6 +1398,8 @@ enum TimeseriesTickerBucket {
     Pyth,
     Fred,
     Binance,
+    Govt,
+    Extra(ExtraProvider),
     Ibkr,
     ClevelandFed,
     RatePath,
@@ -1300,6 +1420,15 @@ fn classify_timeseries_ticker(
     if ticker.starts_with("CLEV:") || ticker.starts_with("clev:") {
         return TimeseriesTickerBucket::ClevelandFed;
     }
+    // Explicit-prefix providers win over --provider and every heuristic below
+    // (FRED's all-caps rule would otherwise grab nothing here since ':' is
+    // excluded, but IBKR/pyth/binance provider overrides would).
+    if let Some(p) = ExtraProvider::classify(ticker) {
+        return TimeseriesTickerBucket::Extra(p);
+    }
+    if let Some(p) = ExtraProvider::from_provider_str(provider_str) {
+        return TimeseriesTickerBucket::Extra(p);
+    }
     if ticker.starts_with("IBKR:") || ticker.starts_with("ibkr:") || provider_str == "ibkr" {
         return TimeseriesTickerBucket::Ibkr;
     }
@@ -1309,10 +1438,106 @@ fn classify_timeseries_ticker(
     if eli_core::finance::is_binance_ticker(ticker) || provider_str == "binance" {
         return TimeseriesTickerBucket::Binance;
     }
+    if eli_core::finance::is_govt_ticker(ticker) || provider_str == "govt" {
+        return TimeseriesTickerBucket::Govt;
+    }
     if provider_str == "fred" || (provider_str == "auto" && (auto_prefers_fred || is_fred_ticker(ticker))) {
         return TimeseriesTickerBucket::Fred;
     }
     TimeseriesTickerBucket::Main
+}
+
+/// Prefix-routed providers added after GOVT: (all share the core fetch path and
+/// are merged generically).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExtraProvider {
+    Secnav,
+    FinraBonds,
+    Buyback,
+    Nyfed,
+    Ofr,
+    EtfFlows,
+    Cboe,
+    Hyperliquid,
+    Deribit,
+}
+
+impl ExtraProvider {
+    fn classify(ticker: &str) -> Option<Self> {
+        use eli_core::finance as f;
+        if f::is_secnav_ticker(ticker) {
+            Some(Self::Secnav)
+        } else if f::is_finra_bond_ticker(ticker) {
+            Some(Self::FinraBonds)
+        } else if f::is_buyback_ticker(ticker) {
+            Some(Self::Buyback)
+        } else if f::is_nyfed_ticker(ticker) {
+            Some(Self::Nyfed)
+        } else if f::is_ofr_ticker(ticker) {
+            Some(Self::Ofr)
+        } else if f::is_etf_flow_ticker(ticker) {
+            Some(Self::EtfFlows)
+        } else if f::is_cboe_ticker(ticker) {
+            Some(Self::Cboe)
+        } else if f::is_hyperliquid_ticker(ticker) {
+            Some(Self::Hyperliquid)
+        } else if f::is_deribit_ticker(ticker) {
+            Some(Self::Deribit)
+        } else {
+            None
+        }
+    }
+
+    fn from_provider_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "secnav" | "nav" | "sec_nav" => Self::Secnav,
+            "bond" | "bonds" | "finra" | "finra_bonds" | "trace" => Self::FinraBonds,
+            "buyback" | "buybacks" => Self::Buyback,
+            "nyfed" => Self::Nyfed,
+            "ofr" => Self::Ofr,
+            "etf" | "etf_flows" => Self::EtfFlows,
+            "cboe" => Self::Cboe,
+            "hl" | "hyperliquid" => Self::Hyperliquid,
+            "deribit" => Self::Deribit,
+            _ => return None,
+        })
+    }
+
+    fn kind(self) -> eli_core::finance::ProviderKind {
+        use eli_core::finance::ProviderKind as K;
+        match self {
+            Self::Secnav => K::Secnav,
+            Self::FinraBonds => K::FinraBonds,
+            Self::Buyback => K::Buyback,
+            Self::Nyfed => K::Nyfed,
+            Self::Ofr => K::Ofr,
+            Self::EtfFlows => K::EtfFlows,
+            Self::Cboe => K::Cboe,
+            Self::Hyperliquid => K::Hyperliquid,
+            Self::Deribit => K::Deribit,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Secnav => "secnav",
+            Self::FinraBonds => "finra_bonds",
+            Self::Buyback => "buyback",
+            Self::Nyfed => "nyfed",
+            Self::Ofr => "ofr",
+            Self::EtfFlows => "etf_flows",
+            Self::Cboe => "cboe",
+            Self::Hyperliquid => "hyperliquid",
+            Self::Deribit => "deribit",
+        }
+    }
+}
+
+fn push_extra_ticker(buckets: &mut Vec<(ExtraProvider, Vec<String>)>, p: ExtraProvider, t: &str) {
+    match buckets.iter_mut().find(|(bp, _)| *bp == p) {
+        Some((_, ts)) => ts.push(t.to_string()),
+        None => buckets.push((p, vec![t.to_string()])),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2494,6 +2719,35 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
         "crypto" => vec![
             "PYTH:BTC", "PYTH:ETH", "PYTH:SOL",
         ],
+        // Global sovereign yields via CNBC (GOVT: prefix): the 10Y anchors of every
+        // curve that feeds the US Treasury term premium, plus the 2s/30s that show
+        // whether a selloff is policy (front end) or fiscal/term premium (long end).
+        "sovereigns" | "govt" | "global_yields" => vec![
+            "GOVT:US2Y", "GOVT:US10Y", "GOVT:US30Y",
+            "GOVT:DE2Y", "GOVT:DE10Y", "GOVT:DE30Y",
+            "GOVT:FR2Y", "GOVT:FR10Y", "GOVT:FR30Y",
+            "GOVT:IT10Y", "GOVT:ES10Y",
+            "GOVT:GB10Y", "GOVT:GB30Y",
+            "GOVT:JP10Y", "GOVT:JP30Y",
+            "GOVT:CA10Y", "GOVT:AU10Y", "GOVT:CH10Y", "GOVT:CN10Y",
+        ],
+        // Funding / credit plumbing stress across the newer no-key providers:
+        // private marks vs public price (PNAV), single-name AI-capex credit
+        // (FINRA TRACE yields), Treasury buyback demand, repo tails, OFR stress,
+        // HY + SPY creations/redemptions, VIX curve, equity put/call, crypto
+        // leverage + vol, and CCC OAS as the anchor.
+        "stress_plumbing" | "plumbing" => vec![
+            "PNAV:OBDC", "PNAV:FSK", "PNAV:BXSL", "PNAV:ARCC",
+            "BOND:21873SAG3:YLD",   // CoreWeave 9.75% 2031
+            "BOND:68389XEC5:YLD",   // Oracle 6.85% 2066
+            "BUYBACK:10-20Y:COVER", "BUYBACK:20-30Y:COVER",
+            "NYFED:SRF", "NYFED:SOFR_P99",
+            "OFR:FSI", "OFR:REPO-DVP_OV_TOT-P",
+            "ETF:JNK:FLOW", "ETF:SPY:FLOW",
+            "CBOE:VXCONTANGO", "CBOE:PCR_EQUITY",
+            "HL:BTC:FUNDING_APR", "DERIBIT:DVOL:BTC",
+            "FRED:BAMLH0A3HYC",
+        ],
         // Credit spreads: ICE BofA OAS indices (daily, free, no API key)
         "credit" | "credit_spreads" | "spreads" => vec![
             "BAMLC0A0CM",     // IG Corporate OAS
@@ -2639,7 +2893,7 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
             "IBKR:FUT:VIX:CFE",     // VIX Futures
         ],
         other => anyhow::bail!(
-            "unknown --preset '{other}' (run with preset=list to see all presets + their contents). Supported: macro, forex_majors, yield_curve, liquidity, crypto, credit, financial_conditions, recession, fed_balance_sheet, housing, labor, inflation, real_rates, consumer_credit, energy, commodities, treasuries. For futures curves, pass the root symbol directly as a ticker (e.g. --tickers CL,GC,ZN) and the tool auto-expands to the curve."
+            "unknown --preset '{other}' (run with preset=list to see all presets + their contents). Supported: macro, forex_majors, yield_curve, liquidity, crypto, sovereigns, stress_plumbing, credit, financial_conditions, recession, fed_balance_sheet, housing, labor, inflation, real_rates, consumer_credit, energy, commodities, treasuries. For futures curves, pass the root symbol directly as a ticker (e.g. --tickers CL,GC,ZN) and the tool auto-expands to the curve."
         ),
     };
     Ok(tickers.into_iter().map(String::from).collect())
@@ -2667,6 +2921,8 @@ fn list_timeseries_presets() -> serde_json::Value {
         ("liquidity", "", "Net-liquidity inputs: Fed total assets, Treasury General Account, ON RRP"),
         ("forex_majors", "", "Nine USD majors: EUR, GBP, JPY, CHF, CAD, AUD, NZD, SEK, NOK"),
         ("crypto", "", "BTC, ETH, SOL via Pyth (24/7)"),
+        ("sovereigns", "govt,global_yields", "Global sovereign yields (GOVT:, CNBC): US/DE/FR 2-10-30Y, IT/ES 10Y, UK & Japan 10/30Y, CA/AU/CH/CN 10Y — values are yields in %"),
+        ("stress_plumbing", "plumbing", "Funding/credit plumbing (daily): BDC price/NAV (OBDC/FSK/BXSL/ARCC), CoreWeave + Oracle bond yields (TRACE), Treasury buyback cover 10-20Y/20-30Y, SRF usage + SOFR 99th pct, OFR FSI + DVP repo volume, JNK/SPY ETF flows, VIX contango, equity put/call, BTC perp funding + DVOL, CCC OAS"),
         ("energy", "oil", "Energy futures front-month via IBKR: WTI, Brent, heating oil, RBOB, natgas, gasoil (falls back to Yahoo =F when IBKR is down)"),
         ("commodities", "cmdty", "Broad commodity futures via IBKR: WTI, gold, silver, copper, corn, wheat, soybeans, coffee, cotton, sugar (Yahoo fallback)"),
         ("treasuries", "treasury_futures", "Treasury futures + VIX via IBKR: ZT, ZF, ZN, ZB, VIX (Yahoo fallback)"),
@@ -3319,6 +3575,42 @@ async fn fetch_constituent_history(
 mod timeseries_tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn new_prefix_providers_route_to_their_own_bucket() {
+        let cases = [
+            ("PNAV:OBDC", ExtraProvider::Secnav),
+            ("nav:fsk", ExtraProvider::Secnav),
+            ("BOND:21873SAG3:YLD", ExtraProvider::FinraBonds),
+            ("BUYBACK:10-20Y:COVER", ExtraProvider::Buyback),
+            ("NYFED:SOFR_P99", ExtraProvider::Nyfed),
+            ("OFR:FSI", ExtraProvider::Ofr),
+            ("OFR:REPO-DVP_OV_TOT-P", ExtraProvider::Ofr),
+            ("ETF:JNK:FLOW", ExtraProvider::EtfFlows),
+            ("CBOE:VXCONTANGO", ExtraProvider::Cboe),
+            ("CBOE:GEX:SPX", ExtraProvider::Cboe),
+            ("HL:BTC:FUNDING_APR", ExtraProvider::Hyperliquid),
+            ("DERIBIT:DVOL:BTC", ExtraProvider::Deribit),
+        ];
+        for (t, want) in cases {
+            assert!(parse_prediction_market_ticker(t).is_none(), "{t} swallowed as odds");
+            for provider in ["auto", "yahoo", "fred", "ibkr", "pyth", "binance", "govt"] {
+                assert_eq!(
+                    classify_timeseries_ticker(t, provider, true),
+                    TimeseriesTickerBucket::Extra(want),
+                    "{t} with --provider {provider}"
+                );
+            }
+        }
+        assert_eq!(
+            classify_timeseries_ticker("SPY", "auto", false),
+            TimeseriesTickerBucket::Main
+        );
+        assert_eq!(
+            classify_timeseries_ticker("SPY", "cboe", false),
+            TimeseriesTickerBucket::Extra(ExtraProvider::Cboe)
+        );
+    }
 
     #[test]
     fn explicit_prediction_market_requires_provider_and_market_together() {

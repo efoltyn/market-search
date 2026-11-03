@@ -92,5 +92,6 @@ async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
         FinanceCommand::Bis(args) => cmd_finance_bis(args).await,
         FinanceCommand::Boj(args) => cmd_finance_boj(args).await,
         FinanceCommand::Boe(args) => cmd_finance_boe(args).await,
+        FinanceCommand::Bonds(args) => cmd_finance_bonds(args).await,
     }
 }

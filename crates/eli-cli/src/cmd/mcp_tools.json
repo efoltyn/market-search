@@ -1,17 +1,17 @@
 [
   {
     "name": "finance_timeseries",
-    "description": "Universal data spine: OHLCV time series for every asset class on ONE shared time axis (stocks, FRED macro, futures, crypto, and prediction-market odds), with per-series return and annualized-volatility stats. PRESETS ARE THE POWER FEATURE — the `preset` arg pulls a whole curated domain in ONE call (17 available) and composes with ad-hoc `tickers` in the same call (e.g. preset=macro + tickers=NVDA,SMH gives the macro backdrop plus your names). Key presets: `macro` (34 series — CPI/PCE/jobs/GDP/rates/debt/M2 + live oil/gold/BTC), `recession` (Sahm rule, 10Y-2Y & 10Y-3M, claims, Chicago Fed), `credit` (full ICE BofA OAS stack IG→BBB→HY→BB→B→CCC→EM), `financial_conditions` (NFCI/STLFSI/VIX), `inflation`, `labor`, `housing`, `yield_curve` (1mo–30Y), `real_rates` (TIPS+breakevens), `consumer_credit`, `fed_balance_sheet` (QE/QT plumbing), `liquidity`, `forex_majors`, `crypto`, plus IBKR futures baskets `energy`/`commodities`/`treasuries` (full list + aliases in the `preset` arg). Reach for a preset before hand-listing tickers. For ad-hoc tickers, 8 providers auto-detect by pattern: stocks/ETFs/futures→Yahoo, FRED→FRED (or FRED: prefix), IBKR:→Interactive Brokers 15-min-delayed futures/FX/equities (e.g. IBKR:FUT:CL:NYMEX, IBKR:CASH:EUR:IDEALPRO), CLEV:→Cleveland Fed inflation nowcast, KX*→Kalshi, numeric 6+digit→Polymarket, PYTH:→24/7 oracle, BN:→Binance. `sources` lists providers returned; every candle has a 't' timestamp — check it for freshness. OUTPUT NOTES: candles omit o/h/l when o==h==l==c AND no volume printed — for macro point series, carried-forward buckets in thin prediction markets, and the zero-volume bucket at a session boundary (a {t,c,v:0} candle at 20:00Z means the equity session ENDED there, not that price was flat). US equity INTRADAY series include pre/post-market bars; analytics.stats carries last + last_at — compare last_at to generated_at to judge staleness, and omit v when the whole series has zero volume (indices). `sources` lists every provider actually present; top-level `provider` is only the dispatch bucket. status: absent=all ok, partial=some tickers failed (see errors[]), error=nothing returned. Prediction-market ids come from finance_odds markets[].ticker (event tickers and Polymarket slugs do not resolve).",
+    "description": "Universal data spine: OHLCV time series for every asset class on ONE shared time axis (stocks, FRED macro, futures, crypto, and prediction-market odds), with per-series return and annualized-volatility stats. PRESETS ARE THE POWER FEATURE — the `preset` arg pulls a whole curated domain in ONE call (18 available) and composes with ad-hoc `tickers` in the same call (e.g. preset=macro + tickers=NVDA,SMH gives the macro backdrop plus your names). Key presets: `macro` (34 series — CPI/PCE/jobs/GDP/rates/debt/M2 + live oil/gold/BTC), `recession` (Sahm rule, 10Y-2Y & 10Y-3M, claims, Chicago Fed), `credit` (full ICE BofA OAS stack IG→BBB→HY→BB→B→CCC→EM), `financial_conditions` (NFCI/STLFSI/VIX), `inflation`, `labor`, `housing`, `yield_curve` (1mo–30Y), `real_rates` (TIPS+breakevens), `consumer_credit`, `fed_balance_sheet` (QE/QT plumbing), `liquidity`, `forex_majors`, `crypto`, `sovereigns` (global 2/10/30Y yields: US, Bund, OAT, BTP, Gilt, JGB…), plus IBKR futures baskets `energy`/`commodities`/`treasuries` (full list + aliases in the `preset` arg). Reach for a preset before hand-listing tickers. For ad-hoc tickers, 18 providers auto-detect by pattern: stocks/ETFs/futures→Yahoo, FRED→FRED (or FRED: prefix), IBKR:→Interactive Brokers 15-min-delayed futures/FX/equities (e.g. IBKR:FUT:CL:NYMEX, IBKR:CASH:EUR:IDEALPRO), CLEV:→Cleveland Fed inflation nowcast, KX*→Kalshi, numeric 6+digit→Polymarket, PYTH:→24/7 oracle, BN:→Binance, GOVT:→global sovereign bond YIELDS in % (CNBC; e.g. GOVT:US10Y, GOVT:FR10Y, GOVT:DE2Y, GOVT:JP30Y, GOVT:GB10Y, GOVT:IT10Y; country code + tenor; daily back to 2000, intraday 1m/5m/30m/1h ~1y; the cross-country spread and curve shape behind US Treasury term premium). PLUMBING/CREDIT/LEVERAGE prefixes (no key): NAV:/PNAV:<TICKER>→SEC XBRL fund NAV/share and price÷NAV (PNAV:OBDC; NAV stamped at FILED date, never period end); BOND:<CUSIP|FINRA symbol>[:PX|:YLD]→FINRA TRACE single-bond price (% par) or yield % (BOND:21873SAG3:YLD; ≥1d = end-of-day print, <1d = trade candles ~1y; find CUSIPs with finance_bonds); BUYBACK:<bucket>[:OFFERED|ACCEPTED|MAX|COVER|FILL|ISSUES]→Treasury buyback ops (BUYBACK:20-30Y:COVER; one point per operation, stamped at op close); NYFED:<series>→SRF/RRP ops + SOFR/EFFR/BGCR/TGCR, _P1.._P99 percentiles, _VOL (NYFED:SRF, NYFED:SOFR_P99; rates stamped at next-day PUBLICATION, so FRED dates differ by a day); OFR:<mnemonic>→OFR repo/hedge-fund monitors + Financial Stress Index (OFR:FSI, OFR:REPO-DVP_OV_TOT-P; stamped at OBSERVATION date though released T+1 or later: no same-day causality); ETF:<TICKER>[:SO|NAV|AUM|FLOW|FLOW5|FLOW20]→shares outstanding / creations-redemptions in $mn (ETF:JNK:FLOW, ETF:SPY:FLOW; SSGA+ProShares full history, iShares/Direxion snapshot only); CBOE:→VX futures (CBOE:VX1, CBOE:VX2-VX1, CBOE:VXCONTANGO), daily put/call (CBOE:PCR_EQUITY, CBOE:PCR_SPX), chain snapshots CBOE:<GEX|ZEROGAMMA|PCR_OI|0DTE_SHARE|IV30|SPOT>:<ROOT> (CBOE:GEX:SPX); HL:<COIN>[:PX|FUNDING|FUNDING_APR|PREMIUM|OI|OI_USD]→Hyperliquid perps (HL:BTC:FUNDING_APR); DERIBIT:<DVOL|FUNDING|FUNDING_APR|SKEW25>:<ARG>→Deribit (DERIBIT:DVOL:BTC, DERIBIT:SKEW25:BTC:30D). ETF: and CBOE: are DAILY whatever the granularity (flows summed, never resampled). LIVE-ONLY single point at fetch time, no history (errors when as_of is >1h in the past; build history by polling): CBOE chain snapshots, HL OI/OI_USD, DERIBIT SKEW25. `sources` lists providers returned; every candle has a 't' timestamp — check it for freshness. OUTPUT NOTES: candles omit o/h/l when o==h==l==c AND no volume printed — for macro point series, carried-forward buckets in thin prediction markets, and the zero-volume bucket at a session boundary (a {t,c,v:0} candle at 20:00Z means the equity session ENDED there, not that price was flat). US equity INTRADAY series include pre/post-market bars; analytics.stats carries last + last_at — compare last_at to generated_at to judge staleness, and omit v when the whole series has zero volume (indices). `sources` lists every provider actually present; top-level `provider` is only the dispatch bucket. status: absent=all ok, partial=some tickers failed (see errors[]), error=nothing returned. Prediction-market ids come from finance_odds markets[].ticker (event tickers and Polymarket slugs do not resolve).",
     "inputSchema": {
       "type": "object",
       "properties": {
         "preset": {
           "type": "string",
-          "description": "Pass preset=list to get the full catalog with each preset's exact tickers; preset=<name> pulls the basket and composes with `tickers` in the same call (e.g. preset=macro + tickers=NVDA,SMH). 17 presets: macro, yield_curve, liquidity, credit (ICE BofA OAS), financial_conditions (NFCI/STLFSI4/VIX), recession (Sahm/spreads/claims), fed_balance_sheet (QE/QT), housing (Case-Shiller/starts/mortgage), labor (NFP/JOLTS/wages), inflation (CPI/PCE/sticky/median), real_rates (TIPS), consumer_credit (delinquency/SLOOS), forex_majors, crypto, energy (WTI/Brent/NG/RBOB/HO/Gasoil via IBKR), commodities (CL/GC/SI/HG/grains/softs via IBKR), treasuries (ZT/ZF/ZN/ZB/VIX futures via IBKR). IBKR-backed baskets auto-fall-back to Yahoo front-month when IB Gateway is down."
+          "description": "Pass preset=list to get the full catalog with each preset's exact tickers; preset=<name> pulls the basket and composes with `tickers` in the same call (e.g. preset=macro + tickers=NVDA,SMH). 20 presets: macro, yield_curve, sovereigns (US/DE/FR 2-10-30Y, IT/ES/UK/JP/CA/AU/CH/CN via GOVT:), stress_plumbing (BDC PNAV, CoreWeave/Oracle bond yields, buyback cover, SRF, SOFR p99, OFR FSI + repo, JNK/SPY flows, VIX contango, put/call, BTC funding + DVOL, CCC OAS), private_credit (BDCs + CLO ETFs), liquidity, credit (ICE BofA OAS), financial_conditions (NFCI/STLFSI4/VIX), recession (Sahm/spreads/claims), fed_balance_sheet (QE/QT), housing (Case-Shiller/starts/mortgage), labor (NFP/JOLTS/wages), inflation (CPI/PCE/sticky/median), real_rates (TIPS), consumer_credit (delinquency/SLOOS), forex_majors, crypto, energy (WTI/Brent/NG/RBOB/HO/Gasoil via IBKR), commodities (CL/GC/SI/HG/grains/softs via IBKR), treasuries (ZT/ZF/ZN/ZB/VIX futures via IBKR). IBKR-backed baskets auto-fall-back to Yahoo front-month when IB Gateway is down."
         },
         "tickers": {
           "type": "string",
-          "description": "Comma-separated. Stocks: AAPL,SPY,CL=F. FRED: UNRATE,T10Y2Y. IBKR futures: IBKR:FUT:CL:NYMEX, IBKR:FUT:GC:COMEX. IBKR FX: IBKR:CASH:EUR:IDEALPRO. IBKR equities: IBKR:STK:2222:TADAWUL. Cleveland Fed: CLEV:CPI,CLEV:COREPCE. Pyth: PYTH:OIL,PYTH:BTC. Kalshi: KXNBERRECESSQ-Q1-2026. Polymarket: 609655. Binance: BN:BTCUSDT. Mix freely in one call."
+          "description": "Comma-separated. Stocks: AAPL,SPY,CL=F. FRED: UNRATE,T10Y2Y. IBKR futures: IBKR:FUT:CL:NYMEX, IBKR:FUT:GC:COMEX. IBKR FX: IBKR:CASH:EUR:IDEALPRO. IBKR equities: IBKR:STK:2222:TADAWUL. Cleveland Fed: CLEV:CPI,CLEV:COREPCE. Pyth: PYTH:OIL,PYTH:BTC. Kalshi: KXNBERRECESSQ-Q1-2026. Polymarket: 609655. Binance: BN:BTCUSDT. Sovereign yields: GOVT:US10Y,GOVT:FR10Y,GOVT:DE10Y,GOVT:JP30Y (any CC+tenor, e.g. GOVT:IT2Y). Fund NAV: NAV:OBDC, PNAV:FSK. Bonds: BOND:21873SAG3:YLD, BOND:68389XEC5:PX. Buybacks: BUYBACK:10-20Y:COVER. NY Fed: NYFED:SRF, NYFED:SOFR_P99. OFR: OFR:FSI, OFR:REPO-DVP_OV_TOT-P. ETF flows: ETF:JNK:FLOW, ETF:HYG:AUM. CBOE: CBOE:VXCONTANGO, CBOE:PCR_EQUITY, CBOE:GEX:SPX. Hyperliquid: HL:BTC:FUNDING_APR. Deribit: DERIBIT:DVOL:BTC. Mix freely in one call."
         },
         "range": {
           "type": "string",
@@ -35,7 +35,7 @@
         },
         "provider": {
           "type": "string",
-          "description": "Force a specific provider (auto|yahoo|fred|ibkr|pyth|binance). Default auto routes by ticker prefix."
+          "description": "Force a specific provider (auto|yahoo|fred|ibkr|pyth|binance|govt|secnav|bond|buyback|nyfed|ofr|etf|cboe|hyperliquid|deribit). Default auto routes by ticker prefix."
         },
         "max_points_per_ticker": {
           "type": "integer",
@@ -430,7 +430,7 @@
   },
   {
     "name": "finance_filings",
-    "description": "Download recent SEC filings by ticker. Returns SEC metadata, filing URLs, local primary-document paths, saved filing index JSON, optionally all filing attachments, and optionally inline raw primary-document text with raw_text=true. ALSO: pass search_text (no ticker) for market-wide full-text search — 'which companies filed 8-Ks mentioning X this week'.",
+    "description": "SEC filings by ticker (10-K, 10-Q, 8-K, 20-F, ...). READ A FILING PRECISELY IN TWO CALLS, no max_chars guessing: (1) toc=true (with forms, e.g. forms='10-Q', or accession=...) returns the latest filing's table of contents: every section's id, title and exact size in characters — 10-K/10-Q items (risk factors, MD&A, controls, legal proceedings, ...), each primary financial statement (income_statement, comprehensive_income, balance_sheet, cash_flow, equity), the notes and every numbered note under its own title (note:5 = 'Note 5. Inventories'), the auditor's report, 8-K items, and exhibits such as ex99.1 (the earnings press release). (2) section=<ids> returns exactly that clean text and nothing else (tables as aligned plain-text rows with | between columns, page numbers and TOC noise removed); comma-separate several: section='cash_flow,note:inventories,mda'. Aliases: mda, risk_factors, business, legal_proceedings, notes (all notes, where the unusual items hide), note:<number or words>, press_release, document (everything). NUMBERS AS DATA: xbrl=true returns the filing's XBRL facts as JSON (concept, label, value, unit, period, and the section id the number sits in, so you can pull the prose behind it) with prior-quarter (qoq), year-ago (yoy) and prior fiscal-year-end (vs_fye) values and % changes; default = every line of the primary statements plus facts elsewhere that moved >= 25% (~30-50k chars); xbrl_concepts='Inventory,Revenue' returns just those concepts, every period. toc/section/xbrl read one filing (limit 1) unless limit is set. Without these flags: metadata and SEC URLs (over this connector also raw_text, the first 50k chars of the document). search_text (no ticker) = market-wide full-text search: 'which companies filed 8-Ks mentioning X this week'.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -444,7 +444,31 @@
         },
         "limit": {
           "type": "integer",
-          "description": "Max filings (default: 5)"
+          "description": "Max filings (default 5; 1 when toc/section/xbrl is set)"
+        },
+        "accession": {
+          "type": "string",
+          "description": "Read one specific filing by accession number (e.g. 0000320193-26-000024, dashes optional). Overrides forms/limit."
+        },
+        "toc": {
+          "type": "boolean",
+          "description": "Table of contents of the filing: every section's id, title, kind (item/statement/notes/note/report/exhibit), level and size in chars (what section=<id> will return). Cheap first call, a few thousand chars."
+        },
+        "section": {
+          "type": "string",
+          "description": "Comma-separated TOC ids or aliases; returns exactly those sections' clean text, whole (no cap unless max_chars). Examples: 'cash_flow', 'balance_sheet,income_statement', 'note:inventories', 'note:7', 'notes', 'mda', 'risk_factors', 'part2_item1a', 'item7', 'item2.02', 'ex99.1', 'press_release', 'document'."
+        },
+        "xbrl": {
+          "type": "boolean",
+          "description": "Return the filing's inline-XBRL facts with comparisons: each row has concept, label (the filing's own row label), section (TOC id where it appears), dims (segment etc.), period ('3M ended 2026-09-30', 'at 2026-09-30'), unit ('USD millions'), value as printed, and qoq / yoy / vs_fye {period, value, change, pct, from}. Default selection: primary statement line items + facts elsewhere that moved >= xbrl_min_change %."
+        },
+        "xbrl_concepts": {
+          "type": "string",
+          "description": "Comma-separated, case-insensitive substrings of XBRL concept names or row labels (e.g. 'Inventory', 'RevenueFromContract,Goodwill'); returns every matching fact in the filing, all periods/dimensions, with comparisons. '*' = every current-period fact (large). Implies xbrl=true."
+        },
+        "xbrl_min_change": {
+          "type": "number",
+          "description": "Percent change that flags a fact outside the primary statements as a mover (default 25)."
         },
         "download": {
           "type": "boolean",
@@ -468,11 +492,11 @@
         },
         "raw_text": {
           "type": "boolean",
-          "description": "Include the primary filing document's raw decoded text inline. Use max_chars to cap response size."
+          "description": "Include the whole primary document as clean text inline (tables aligned, page furniture removed). Prefer toc + section to get exactly the part you need; use max_chars to cap this."
         },
         "max_chars": {
           "type": "integer",
-          "description": "Maximum characters of inline raw_text to return when raw_text=true."
+          "description": "Cap for raw_text / press_release_text, and for each section when given. Sections come back whole by default: read their sizes from toc instead of guessing a cap."
         },
         "user_agent": {
           "type": "string",
@@ -629,6 +653,23 @@
         "range": {
           "type": "integer",
           "description": "Days of history (default: 30)"
+        }
+      }
+    }
+  },
+  {
+    "name": "finance_bonds",
+    "description": "FINRA TRACE corporate/agency bond lookup: an issuer's outstanding bonds (CUSIP, FINRA symbol, coupon %, maturity, last sale price + yield, last trade date), sorted by maturity. FINRA matches the EXACT issuer name only (e.g. \"ORACLE CORP\", \"COREWEAVE INC\", \"META PLATFORMS INC\"; \"META\" returns nothing). Not a timeseries: feed a returned cusip into finance_timeseries as BOND:<CUSIP>:YLD (yield %) or BOND:<CUSIP>:PX (price, % of par).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "description": "Exact FINRA issuer name, case-insensitive (e.g. ORACLE CORP)."
+        },
+        "cusip": {
+          "type": "string",
+          "description": "Look up one bond by 9-char CUSIP or FINRA issue symbol (e.g. 21873SAG3, CRWV6364372). Overrides issuer."
         }
       }
     }

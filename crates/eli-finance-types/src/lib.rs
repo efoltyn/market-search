@@ -31,10 +31,32 @@ pub enum ProviderKind {
     Polymarket,
     /// Binance — crypto OHLCV with depth back to 2017/2019.
     Binance,
+    /// Sovereign bond yields (CNBC public bars) — GOVT: prefix, global 2Y/10Y/30Y curves.
+    Govt,
     /// EIA — U.S. Energy Information Administration (petroleum inventories, nat gas storage).
     Eia,
     /// ECB — European Central Bank SDMX (EUR rates, balance sheet, M3, EURIBOR).
     Ecb,
+    /// SEC EDGAR XBRL fund NAV per share + price-to-NAV — NAV: / PNAV: prefixes.
+    Secnav,
+    /// FINRA TRACE corporate/agency bond price + yield — BOND: prefix.
+    #[serde(rename = "finra_bonds")]
+    FinraBonds,
+    /// US Treasury buyback operations (Fiscal Data) — BUYBACK: prefix.
+    Buyback,
+    /// NY Fed Markets API ops + reference rates as series — NYFED: prefix.
+    Nyfed,
+    /// Office of Financial Research (repo monitor, HF monitor, FSI) — OFR: prefix.
+    Ofr,
+    /// ETF shares outstanding / NAV / AUM / creations-redemptions — ETF: prefix.
+    #[serde(rename = "etf_flows")]
+    EtfFlows,
+    /// CBOE free data (VIX futures, put/call ratios, chain snapshots) — CBOE: prefix.
+    Cboe,
+    /// Hyperliquid perps (funding, premium, price, OI) — HL: prefix.
+    Hyperliquid,
+    /// Deribit public data (DVOL, funding, 25d skew) — DERIBIT: prefix.
+    Deribit,
 }
 
 impl Default for ProviderKind {
@@ -678,13 +700,42 @@ pub struct FilingsRequest {
     #[serde(default)]
     pub include_text: bool,
 
-    /// Deprecated compatibility option. Filings are downloaded raw; no inline excerpt is generated.
+    /// Cap for inline text (raw_text, press_release_text, and sections when set explicitly).
     #[serde(default)]
     pub max_chars: Option<usize>,
 
     /// Optional SEC User-Agent override (e.g. "eli-cli (mailto:...)").
     #[serde(default)]
     pub user_agent: Option<String>,
+
+    /// Pick one filing by accession number (dashes optional). Overrides forms/limit.
+    #[serde(default)]
+    pub accession: Option<String>,
+
+    /// Return the filing's table of contents: every section's id, title and
+    /// character size (items, statements, notes, exhibits).
+    #[serde(default)]
+    pub toc: bool,
+
+    /// Return exactly these sections' clean text, by TOC id or alias
+    /// (cash_flow, balance_sheet, income_statement, mda, risk_factors, notes,
+    /// note:inventories, ex99.1, ...).
+    #[serde(default)]
+    pub sections: Vec<String>,
+
+    /// Return the filing's inline-XBRL facts with prior-period comparisons.
+    #[serde(default)]
+    pub xbrl: bool,
+
+    /// XBRL concept filter: case-insensitive substrings of the concept name or
+    /// label ("Inventory", "Revenue"); "*" returns every current-period fact.
+    #[serde(default)]
+    pub xbrl_concepts: Vec<String>,
+
+    /// Percent change that counts as "moved a lot" for facts outside the
+    /// primary statements (default 25).
+    #[serde(default)]
+    pub xbrl_min_change_pct: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -769,6 +820,118 @@ pub struct FilingDoc {
     /// Deprecated. No filing text is parsed into an excerpt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_excerpt: Option<String>,
+
+    /// Table of contents (with --toc): sections in document order with sizes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toc: Option<Vec<FilingTocEntry>>,
+
+    /// Requested sections' clean text (with --section).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<FilingSectionText>>,
+
+    /// XBRL facts with prior-period comparisons (with --xbrl).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xbrl: Option<FilingXbrl>,
+
+    /// How the structure was read, and what to call next.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure_note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FilingTocEntry {
+    /// Pass this to `section` to get exactly this text.
+    pub id: String,
+    pub title: String,
+    /// cover | item | statement | notes | note | report | subsection | signatures | exhibit | document
+    pub kind: String,
+    /// 1 = item, 2 = statement/notes/report inside an item, 3 = a single note.
+    pub level: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Characters of clean text `section=<id>` returns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chars: Option<usize>,
+    /// Raw file size, for exhibits not fetched for the TOC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FilingSectionText {
+    /// What was asked for.
+    pub requested: String,
+    /// The TOC id it resolved to (absent when nothing matched).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub chars: usize,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FilingXbrl {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fiscal_year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fiscal_period: Option<String>,
+    /// Numeric facts tagged in the document (all periods, all dimensions).
+    pub facts_in_filing: usize,
+    /// What was selected and why.
+    pub selection: String,
+    pub returned: usize,
+    pub facts: Vec<XbrlFactRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct XbrlFactRow {
+    pub concept: String,
+    /// The filing's own row label where the number sits, else the taxonomy label.
+    pub label: String,
+    /// TOC id of the section the number appears in (statement, note, item).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    /// Dimensional qualifiers (axis -> member), e.g. a segment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dims: BTreeMap<String, String>,
+    /// "3M ended 2026-09-30", "9M ended 2026-09-30", "at 2026-09-30".
+    pub period: String,
+    /// Unit and scale the values are shown in ("USD millions", "USD per share", "%").
+    pub unit: String,
+    pub value: f64,
+    /// vs the prior quarter (3-month periods and balances).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qoq: Option<XbrlChange>,
+    /// vs the same period a year earlier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yoy: Option<XbrlChange>,
+    /// Balances in a 10-Q: vs the prior fiscal year-end balance sheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vs_fye: Option<XbrlChange>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct XbrlChange {
+    pub period: String,
+    pub value: f64,
+    pub change: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pct: Option<f64>,
+    /// Where the comparison value came from when not this filing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -30,8 +30,15 @@ async fn cmd_mcp() -> Result<()> {
             .cloned()
             .unwrap_or(serde_json::Value::Null);
 
-        let response = match method.as_str() {
+        let modern = mcp_modern_version(&request);
+        if let Some(err) = modern.and_then(|v| mcp_unsupported_version(&id, v)) {
+            mcp_write_response(&mut out, &err)?;
+            continue;
+        }
+
+        let mut response = match method.as_str() {
             "initialize" => mcp_initialize(id, &request),
+            "server/discover" => mcp_server_discover(id),
             "tools/list" => mcp_tools_list(id),
             "tools/call" => mcp_tools_call(id, &request).await,
             _ => json!({
@@ -40,6 +47,9 @@ async fn cmd_mcp() -> Result<()> {
                 "error": { "code": -32601, "message": "Method not found" }
             }),
         };
+        if modern.is_some() {
+            mcp_mark_modern_result(&method, &mut response);
+        }
 
         mcp_write_response(&mut out, &response)?;
     }
@@ -201,6 +211,131 @@ fn mcp_initialize(id: serde_json::Value, request: &serde_json::Value) -> serde_j
     })
 }
 
+// ── MCP 2026-07-28 (stateless) alongside the legacy initialize handshake ─────
+// Dual-era server per the spec's versioning page: a request whose params._meta
+// carries `io.modelcontextprotocol/protocolVersion` is served statelessly under
+// the modern revision; an `initialize` request selects legacy semantics. Both
+// eras share the same handlers because this server never held session state.
+
+const MCP_MODERN_VERSION: &str = "2026-07-28";
+const MCP_SUPPORTED_VERSIONS: &[&str] =
+    &[MCP_MODERN_VERSION, "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+/// tools/list and server/discover only change when the binary does.
+const MCP_LIST_TTL_MS: u64 = 3_600_000;
+
+/// The modern per-request protocol version, if the request declares one.
+fn mcp_modern_version(request: &serde_json::Value) -> Option<&str> {
+    request
+        .get("params")
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(|v| v.as_str())
+}
+
+/// UnsupportedProtocolVersionError (-32022) when the declared version is unknown.
+fn mcp_unsupported_version(id: &serde_json::Value, requested: &str) -> Option<serde_json::Value> {
+    if MCP_SUPPORTED_VERSIONS.contains(&requested) {
+        return None;
+    }
+    Some(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32022,
+            "message": "Unsupported protocol version",
+            "data": { "supported": MCP_SUPPORTED_VERSIONS, "requested": requested }
+        }
+    }))
+}
+
+/// Modern results carry `resultType`; list-style results also carry cache hints.
+fn mcp_mark_modern_result(method: &str, response: &mut serde_json::Value) {
+    if let Some(result) = response.get_mut("result").and_then(|r| r.as_object_mut()) {
+        result.entry("resultType").or_insert(json!("complete"));
+        if method == "tools/list" {
+            result.insert("ttlMs".into(), json!(MCP_LIST_TTL_MS));
+            result.insert("cacheScope".into(), json!("public"));
+        }
+    }
+}
+
+fn mcp_server_discover(id: serde_json::Value) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "resultType": "complete",
+            "supportedVersions": MCP_SUPPORTED_VERSIONS,
+            "capabilities": { "tools": {} },
+            "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                    "name": "market-search",
+                    "title": "eli terminal",
+                    "version": env!("CARGO_PKG_VERSION"),
+                }
+            },
+            "instructions": "Free market data for agents. finance_timeseries is the spine: stocks, FX, futures, sovereign yields (GOVT:), FRED, funding plumbing (NYFED:/OFR:/BUYBACK:), credit (BOND:/PNAV:), flows and vol (ETF:/CBOE:), crypto leverage (HL:/DERIBIT:), Polymarket and Kalshi odds on one UTC axis in one call.",
+            "ttlMs": MCP_LIST_TTL_MS,
+            "cacheScope": "public"
+        }
+    })
+}
+
+/// Decode the spec's `=?base64?...?=` header sentinel; plain values pass through.
+fn mcp_decode_header_value(raw: &str) -> Option<String> {
+    use base64::Engine as _;
+    match raw.strip_prefix("=?base64?").and_then(|r| r.strip_suffix("?=")) {
+        Some(b64) => base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok()),
+        None => Some(raw.to_string()),
+    }
+}
+
+/// Streamable HTTP server validation for modern requests: the mirrored headers
+/// must be present and match the body, else 400 + HeaderMismatch (-32020).
+fn mcp_validate_modern_headers(
+    headers: &axum::http::HeaderMap,
+    request: &serde_json::Value,
+    body_version: &str,
+    method: &str,
+) -> Result<(), String> {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    match header("mcp-protocol-version") {
+        None => return Err("missing MCP-Protocol-Version header".into()),
+        Some(v) if v != body_version => {
+            return Err(format!(
+                "MCP-Protocol-Version header '{v}' does not match body value '{body_version}'"
+            ))
+        }
+        _ => {}
+    }
+    match header("mcp-method") {
+        None => return Err("missing Mcp-Method header".into()),
+        Some(v) if v != method => {
+            return Err(format!("Mcp-Method header '{v}' does not match body value '{method}'"))
+        }
+        _ => {}
+    }
+    if matches!(method, "tools/call" | "resources/read" | "prompts/get") {
+        let params = request.get("params");
+        let body_name = params
+            .and_then(|p| p.get("name").or_else(|| p.get("uri")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let presented = header("mcp-name").ok_or("missing Mcp-Name header")?;
+        let decoded = mcp_decode_header_value(presented)
+            .ok_or("Mcp-Name header has an invalid base64 sentinel")?;
+        if decoded != body_name {
+            return Err(format!(
+                "Mcp-Name header value '{decoded}' does not match body value '{body_name}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
     let tools: serde_json::Value =
         serde_json::from_str(include_str!("mcp_tools.json")).expect("valid MCP tools catalog");
@@ -263,17 +398,34 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
     // didn't already ask for text, auto-return the cleaned filing TEXT inline (and skip the
     // pointless server-side download). Stdio (Claude Code, file access) is untouched: it keeps
     // the download + local paths to explore the raw file directly.
+    //
+    // The structured modes (toc / section / xbrl) already return exactly the text or
+    // numbers asked for, so they skip the raw-text default; a plain call keeps it and
+    // gets a `_hint` pointing at the TOC-then-section workflow.
+    let mut filings_auto_raw_text = false;
     if full_output && tool_name == "finance_filings" {
         if let Some(obj) = args.as_object_mut() {
-            let has_text = obj.get("raw_text").and_then(|v| v.as_bool()).unwrap_or(false)
-                || obj
-                    .get("press_release_text")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-            if !has_text {
+            let flag = |o: &serde_json::Map<String, serde_json::Value>, k: &str| {
+                o.get(k).and_then(|v| v.as_bool()).unwrap_or(false)
+            };
+            let nonempty = |o: &serde_json::Map<String, serde_json::Value>, k: &str| match o.get(k) {
+                Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
+                Some(serde_json::Value::Array(a)) => !a.is_empty(),
+                _ => false,
+            };
+            let structured = flag(obj, "toc")
+                || flag(obj, "xbrl")
+                || nonempty(obj, "section")
+                || nonempty(obj, "sections")
+                || nonempty(obj, "xbrl_concepts");
+            let has_text = flag(obj, "raw_text") || flag(obj, "press_release_text");
+            if structured {
+                obj.entry("download").or_insert(serde_json::Value::Bool(false));
+            } else if !has_text && !nonempty(obj, "search_text") {
                 obj.insert("raw_text".to_string(), serde_json::Value::Bool(true));
                 obj.entry("max_chars").or_insert(serde_json::json!(50_000));
                 obj.entry("download").or_insert(serde_json::Value::Bool(false));
+                filings_auto_raw_text = true;
             }
         }
     }
@@ -337,9 +489,18 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
                                             "index_json_path",
                                             "downloaded_files",
                                             "text_path",
+                                            "press_release_path",
                                         ] {
                                             o.remove(k);
                                         }
+                                    }
+                                }
+                                if filings_auto_raw_text {
+                                    if let Some(obj) = v.as_object_mut() {
+                                        obj.insert(
+                                            "_hint".to_string(),
+                                            json!("raw_text is capped at 50,000 characters (raw_text_truncated says whether it was cut). To read precisely instead: call again with toc=true (every section with its size), then section=<id> for exactly that text, e.g. section=\"cash_flow,note:inventories,mda\". xbrl=true returns the numbers with qoq/yoy changes."),
+                                        );
                                     }
                                 }
                                 serde_json::to_string(&v).unwrap_or(output)
@@ -1541,11 +1702,103 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
             )
         }
+        "finance_filings" => mcp_filings_summary(&v),
         _ => {
             // No custom summary for this tool — data is in the file, read it.
             format!("\"_note\":\"no compact summary for {tool}; the full structured result is in this response\"")
         }
     }
+}
+
+/// Stdio summary for finance_filings: the TOC inline (it is small and is what the
+/// caller acts on next), section sizes with a preview, and the XBRL headline rows.
+fn mcp_filings_summary(v: &serde_json::Value) -> String {
+    let mut out = serde_json::Map::new();
+    let mut filings = Vec::new();
+    for f in v.get("filings").and_then(|f| f.as_array()).into_iter().flatten() {
+        let mut o = serde_json::Map::new();
+        for k in ["form", "filing_date", "accession_number", "items", "url"] {
+            if let Some(x) = f.get(k) {
+                o.insert(k.to_string(), x.clone());
+            }
+        }
+        if let Some(toc) = f.get("toc").and_then(|t| t.as_array()) {
+            let lines: Vec<serde_json::Value> = toc
+                .iter()
+                .map(|e| {
+                    let id = e.get("id").and_then(|x| x.as_str()).unwrap_or("?");
+                    let title = e.get("title").and_then(|x| x.as_str()).unwrap_or("");
+                    let size = e
+                        .get("chars")
+                        .and_then(|x| x.as_u64())
+                        .map(|c| format!("{c} chars"))
+                        .or_else(|| e.get("bytes").and_then(|x| x.as_u64()).map(|b| format!("{b} bytes raw")))
+                        .unwrap_or_default();
+                    let indent = "  ".repeat(e.get("level").and_then(|l| l.as_u64()).unwrap_or(1).saturating_sub(1) as usize);
+                    json!(format!("{indent}{id} ({size}) {}", title.chars().take(90).collect::<String>()))
+                })
+                .collect();
+            o.insert("toc".to_string(), json!(lines));
+        }
+        if let Some(secs) = f.get("sections").and_then(|t| t.as_array()) {
+            let rows: Vec<serde_json::Value> = secs
+                .iter()
+                .map(|sct| {
+                    let text = sct.get("text").and_then(|x| x.as_str()).unwrap_or("");
+                    json!({
+                        "requested": sct.get("requested"),
+                        "id": sct.get("id"),
+                        "chars": sct.get("chars"),
+                        "error": sct.get("error"),
+                        "preview": text.chars().take(300).collect::<String>(),
+                    })
+                })
+                .collect();
+            o.insert("sections".to_string(), json!(rows));
+        }
+        if let Some(x) = f.get("xbrl") {
+            let head: Vec<serde_json::Value> = x
+                .get("facts")
+                .and_then(|r| r.as_array())
+                .into_iter()
+                .flatten()
+                .take(12)
+                .map(|r| {
+                    let pct = |k: &str| r.get(k).and_then(|c| c.get("pct")).and_then(|p| p.as_f64());
+                    json!(format!(
+                        "{} {} = {} {}{}{}",
+                        r.get("label").and_then(|l| l.as_str()).unwrap_or("?"),
+                        r.get("period").and_then(|l| l.as_str()).unwrap_or(""),
+                        r.get("value").map(|v| v.to_string()).unwrap_or_default(),
+                        r.get("unit").and_then(|l| l.as_str()).unwrap_or(""),
+                        pct("qoq").map(|p| format!(", qoq {p:+}%")).unwrap_or_default(),
+                        pct("yoy").map(|p| format!(", yoy {p:+}%")).unwrap_or_default(),
+                    ))
+                })
+                .collect();
+            o.insert(
+                "xbrl".to_string(),
+                json!({
+                    "period_end": x.get("period_end"),
+                    "returned": x.get("returned"),
+                    "selection": x.get("selection"),
+                    "first_rows": head,
+                }),
+            );
+        }
+        if let Some(n) = f.get("structure_note") {
+            o.insert("structure_note".to_string(), n.clone());
+        }
+        filings.push(serde_json::Value::Object(o));
+    }
+    out.insert("filings".to_string(), json!(filings));
+    out.insert(
+        "_schema".to_string(),
+        json!(".filings[].{toc[].{id,title,kind,level,parent,chars}, sections[].{requested,id,title,chars,text}, xbrl.facts[].{concept,label,section,dims,period,unit,value,qoq,yoy,vs_fye}, raw_text}"),
+    );
+    let obj = serde_json::Value::Object(out).to_string();
+    // Fragment form: the caller wraps it in its own braces.
+    obj[1..obj.len() - 1].to_string()
 }
 
 fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Vec<String>> {
@@ -2315,7 +2568,52 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             if raw_text {
                 v.push(s("--raw-text"));
             }
-            if include_text || raw_text {
+            // section / xbrl_concepts accept a comma-separated string or an array.
+            let list_arg = |key: &str| -> Option<String> {
+                match args.get(key) {
+                    Some(serde_json::Value::String(t)) if !t.trim().is_empty() => Some(t.trim().to_string()),
+                    Some(serde_json::Value::Array(a)) => {
+                        let joined = a
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .map(str::trim)
+                            .filter(|x| !x.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        (!joined.is_empty()).then_some(joined)
+                    }
+                    _ => None,
+                }
+            };
+            let sections = list_arg("section").or_else(|| list_arg("sections"));
+            if search_text.is_none() {
+                if let Some(acc) = args.get("accession").and_then(|a| a.as_str()) {
+                    if !acc.trim().is_empty() {
+                        v.extend([s("--accession"), s(acc.trim())]);
+                    }
+                }
+                if args.get("toc").and_then(|b| b.as_bool()).unwrap_or(false) {
+                    v.push(s("--toc"));
+                }
+                if let Some(sec) = sections.as_deref() {
+                    v.extend([s("--section"), s(sec)]);
+                }
+                let concepts = list_arg("xbrl_concepts");
+                if args.get("xbrl").and_then(|b| b.as_bool()).unwrap_or(false) || concepts.is_some() {
+                    v.push(s("--xbrl"));
+                }
+                if let Some(c) = concepts {
+                    v.extend([s("--xbrl-concepts"), c]);
+                }
+                if let Some(pct) = args.get("xbrl_min_change").and_then(|n| n.as_f64()) {
+                    v.extend([s("--xbrl-min-change"), pct.to_string()]);
+                }
+            }
+            let press_release = args
+                .get("press_release_text")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            if include_text || raw_text || press_release || sections.is_some() {
                 if let Some(mc) = args.get("max_chars").and_then(|n| n.as_u64()) {
                     v.extend([s("--max-chars"), mc.to_string()]);
                 }
@@ -2428,6 +2726,17 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             let mut v = vec![s("finance"), s("stress")];
             if let Some(range) = args.get("range").and_then(|n| n.as_u64()) {
                 v.extend([s("--range"), range.to_string()]);
+            }
+            Ok(v)
+        }
+        "finance_bonds" => {
+            let mut v = vec![s("finance"), s("bonds")];
+            if let Some(cusip) = args.get("cusip").and_then(|c| c.as_str()) {
+                v.extend([s("--cusip"), s(cusip)]);
+            } else if let Some(issuer) = args.get("issuer").and_then(|i| i.as_str()) {
+                v.extend([s("--issuer"), s(issuer)]);
+            } else {
+                anyhow::bail!("finance_bonds requires `issuer` or `cusip`");
             }
             Ok(v)
         }
@@ -2659,6 +2968,10 @@ async fn cmd_mcp_http(host: &str, port: u16) -> Result<()> {
             header::AUTHORIZATION,
             HeaderName::from_static("mcp-session-id"),
             HeaderName::from_static("mcp-protocol-version"),
+            // 2026-07-28 mirrored request headers; a browser client's preflight
+            // fails without them.
+            HeaderName::from_static("mcp-method"),
+            HeaderName::from_static("mcp-name"),
         ])
         // The claude.ai web client runs in-browser; CORS hides response headers from
         // JS unless they are explicitly exposed, so the connector cannot read the
@@ -2995,22 +3308,58 @@ async fn mcp_http_handle(
         Some(m) if m.starts_with("notifications/") => StatusCode::ACCEPTED.into_response(),
         Some(m) => {
             let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
-            let body = match m {
-                "initialize" => mcp_initialize(id, &request),
-                "tools/list" => mcp_tools_list(id),
-                "tools/call" => mcp_tools_call_full(id, &request).await,
-                _ => json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "error": { "code": -32601, "message": "Method not found" }
-                }),
-            };
-            (StatusCode::OK, axum::Json(body)).into_response()
+            let modern = mcp_modern_version(&request);
+            // Modern (2026-07-28) gate: unknown version → 400 + -32022; mirrored
+            // headers missing or disagreeing with the body → 400 + -32020.
+            let rejected = modern.and_then(|v| {
+                mcp_unsupported_version(&id, v).or_else(|| {
+                    mcp_validate_modern_headers(&headers, &request, v, m).err().map(|msg| {
+                        json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "error": { "code": -32020, "message": format!("Header mismatch: {msg}") }
+                        })
+                    })
+                })
+            });
+            if let Some(err) = rejected {
+                (StatusCode::BAD_REQUEST, axum::Json(err)).into_response()
+            } else {
+                let mut body = match m {
+                    "initialize" => mcp_initialize(id, &request),
+                    "server/discover" => mcp_server_discover(id),
+                    "tools/list" => mcp_tools_list(id),
+                    "tools/call" => mcp_tools_call_full(id, &request).await,
+                    _ => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "error": { "code": -32601, "message": "Method not found" }
+                    }),
+                };
+                let unknown_method = body.pointer("/error/code") == Some(&json!(-32601));
+                if modern.is_some() {
+                    mcp_mark_modern_result(m, &mut body);
+                }
+                // Modern spec: an unimplemented method is 404 + -32601 so dual-era
+                // clients can tell us apart from a legacy server's bare 404.
+                let status = if modern.is_some() && unknown_method {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::OK
+                };
+                (status, axum::Json(body)).into_response()
+            }
         }
     };
 
-    // Attach the session headers to EVERY /mcp response (initialize + follow-ups) so
-    // claude.ai can establish and carry the session.
     let h = response.headers_mut();
+    if let Some(v) = mcp_modern_version(&request) {
+        // Stateless revision: never mint or echo a session id.
+        if let Ok(v) = HeaderValue::from_str(v) {
+            h.insert("mcp-protocol-version", v);
+        }
+        return response;
+    }
+    // Legacy clients: attach the session headers to EVERY /mcp response (initialize +
+    // follow-ups) so claude.ai can establish and carry the session.
     if let Ok(v) = HeaderValue::from_str(&session_id) {
         h.insert("mcp-session-id", v);
     }
@@ -3023,6 +3372,64 @@ async fn mcp_http_handle(
 #[cfg(test)]
 mod mcp_tool_tests {
     use super::*;
+
+    fn modern_call(name: &str) -> serde_json::Value {
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": name, "arguments": {},
+                "_meta": { "io.modelcontextprotocol/protocolVersion": MCP_MODERN_VERSION }
+            }
+        })
+    }
+
+    fn modern_headers(method: &str, name: Option<&str>) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("mcp-protocol-version", MCP_MODERN_VERSION.parse().unwrap());
+        h.insert("mcp-method", method.parse().unwrap());
+        if let Some(n) = name {
+            h.insert("mcp-name", n.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn mcp_modern_version_gate() {
+        let req = modern_call("finance_odds");
+        assert_eq!(mcp_modern_version(&req), Some(MCP_MODERN_VERSION));
+        assert!(mcp_unsupported_version(&json!(1), MCP_MODERN_VERSION).is_none());
+        let err = mcp_unsupported_version(&json!(1), "1900-01-01").expect("rejects unknown");
+        assert_eq!(err["error"]["code"], -32022);
+        assert_eq!(err["error"]["data"]["requested"], "1900-01-01");
+        // A legacy initialize carries no _meta version.
+        let legacy = json!({"method": "initialize", "params": {"protocolVersion": "2025-11-25"}});
+        assert_eq!(mcp_modern_version(&legacy), None);
+    }
+
+    #[test]
+    fn mcp_modern_header_validation() {
+        let req = modern_call("finance_odds");
+        let v = MCP_MODERN_VERSION;
+        assert!(mcp_validate_modern_headers(&modern_headers("tools/call", Some("finance_odds")), &req, v, "tools/call").is_ok());
+        // Base64 sentinel form of "finance_odds".
+        let b64 = "=?base64?ZmluYW5jZV9vZGRz?=";
+        assert!(mcp_validate_modern_headers(&modern_headers("tools/call", Some(b64)), &req, v, "tools/call").is_ok());
+        assert!(mcp_validate_modern_headers(&modern_headers("tools/call", Some("finance_cot")), &req, v, "tools/call").is_err());
+        assert!(mcp_validate_modern_headers(&modern_headers("tools/call", None), &req, v, "tools/call").is_err());
+        assert!(mcp_validate_modern_headers(&modern_headers("tools/list", Some("finance_odds")), &req, v, "tools/call").is_err());
+        assert!(mcp_validate_modern_headers(&axum::http::HeaderMap::new(), &req, v, "tools/call").is_err());
+    }
+
+    #[test]
+    fn mcp_discover_and_modern_results() {
+        let d = mcp_server_discover(json!("d1"));
+        assert_eq!(d["result"]["supportedVersions"][0], MCP_MODERN_VERSION);
+        assert_eq!(d["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "market-search");
+        let mut list = mcp_tools_list(json!(2));
+        mcp_mark_modern_result("tools/list", &mut list);
+        assert_eq!(list["result"]["resultType"], "complete");
+        assert_eq!(list["result"]["ttlMs"], MCP_LIST_TTL_MS);
+    }
 
     #[test]
     fn mcp_build_cli_args_maps_finance_paper() {
@@ -3125,6 +3532,54 @@ mod mcp_tool_tests {
         assert!(built.contains(&"--raw-text".to_string()));
         assert!(built.contains(&"--max-chars".to_string()));
         assert!(built.contains(&"500".to_string()));
+    }
+
+    #[test]
+    fn mcp_build_cli_args_maps_finance_filings_structured_modes() {
+        let args = serde_json::json!({
+            "ticker": "AMZN",
+            "forms": "10-Q",
+            "toc": true,
+            "section": ["cash_flow", "note:inventories"],
+            "xbrl": true,
+            "xbrl_concepts": "Inventory,Revenue",
+            "xbrl_min_change": 40,
+            "accession": "0001018724-26-000040",
+            "max_chars": 9000
+        });
+        let built = mcp_build_cli_args("finance_filings", &args).expect("build args");
+        let pos = |flag: &str| built.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag} missing: {built:?}"));
+        assert_eq!(built[pos("--section") + 1], "cash_flow,note:inventories");
+        assert_eq!(built[pos("--xbrl-concepts") + 1], "Inventory,Revenue");
+        assert_eq!(built[pos("--xbrl-min-change") + 1], "40");
+        assert_eq!(built[pos("--accession") + 1], "0001018724-26-000040");
+        assert_eq!(built[pos("--max-chars") + 1], "9000");
+        pos("--toc");
+        pos("--xbrl");
+        // A concept filter alone implies xbrl.
+        let only_concepts = mcp_build_cli_args(
+            "finance_filings",
+            &serde_json::json!({"ticker": "INTC", "xbrl_concepts": ["InventoryNet"]}),
+        )
+        .expect("build args");
+        assert!(only_concepts.contains(&"--xbrl".to_string()));
+    }
+
+    #[test]
+    fn mcp_filings_summary_lists_toc_inline() {
+        let v = serde_json::json!({
+            "filings": [{
+                "form": "10-Q", "filing_date": "2026-10-30", "accession_number": "0001018724-26-000040",
+                "toc": [
+                    {"id": "part1_item1", "title": "Part I, Item 1. Financial Statements", "kind": "item", "level": 1, "chars": 95453},
+                    {"id": "cash_flow", "title": "CONSOLIDATED STATEMENTS OF CASH FLOWS", "kind": "statement", "level": 2, "chars": 4513}
+                ]
+            }]
+        });
+        let frag = mcp_filings_summary(&v);
+        let parsed: serde_json::Value = serde_json::from_str(&format!("{{{frag}}}")).expect("valid fragment");
+        let toc = parsed["filings"][0]["toc"].as_array().unwrap();
+        assert_eq!(toc[1].as_str().unwrap(), "  cash_flow (4513 chars) CONSOLIDATED STATEMENTS OF CASH FLOWS");
     }
 
     #[test]

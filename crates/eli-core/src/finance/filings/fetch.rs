@@ -20,10 +20,16 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
     }
     let forms_set: std::collections::HashSet<String> = forms.into_iter().collect();
 
-    let limit = if req.single_file {
+    // Structured modes read one filing closely; default to the latest one.
+    let structured = req.toc || req.xbrl || req.sections.iter().any(|s| !s.trim().is_empty());
+    let accession = match req.accession.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => Some(normalize_accession(raw)?),
+        None => None,
+    };
+    let limit = if req.single_file || accession.is_some() {
         1
     } else {
-        req.limit.unwrap_or(5).clamp(1, 25)
+        req.limit.unwrap_or(if structured { 1 } else { 5 }).clamp(1, 25)
     };
     let should_download = req.download
         || req.download_all
@@ -37,8 +43,30 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
 
     let (cik_str, company_name) =
         sec_lookup_cik(&ticker, &sec_dir, req.user_agent.as_deref()).await?;
-    let submissions =
+    let mut submissions =
         sec_fetch_submissions(&cik_str, &company_name, &sec_dir, req.user_agent.as_deref()).await?;
+    if let Some(acc) = accession.as_deref() {
+        // The submissions cache can be up to a day old; a just-filed accession
+        // may be missing from it. Refetch once before falling back.
+        let listed = submissions
+            .filings
+            .as_ref()
+            .and_then(|f| f.recent.as_ref())
+            .is_some_and(|r| r.accession_number.iter().any(|a| a == acc));
+        if !listed {
+            let cached = sec_dir
+                .join("submissions")
+                .join(format!("CIK{cik_str}.json"));
+            let _ = std::fs::remove_file(&cached);
+            submissions = sec_fetch_submissions(
+                &cik_str,
+                &company_name,
+                &sec_dir,
+                req.user_agent.as_deref(),
+            )
+            .await?;
+        }
+    }
 
     let recent = submissions
         .filings
@@ -72,15 +100,23 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
             .collect::<Vec<_>>()
     };
 
-    let mut selected_indexes = matching_indexes(&forms_set);
-    if selected_indexes.is_empty() && used_default_forms {
-        let foreign_forms = ["6-K", "20-F", "40-F"]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<std::collections::HashSet<_>>();
-        selected_indexes = matching_indexes(&foreign_forms);
-    }
+    let selected_indexes = if let Some(acc) = accession.as_deref() {
+        (0..n)
+            .filter(|&i| recent.accession_number.get(i).is_some_and(|a| a == acc))
+            .collect::<Vec<_>>()
+    } else {
+        let mut selected = matching_indexes(&forms_set);
+        if selected.is_empty() && used_default_forms {
+            let foreign_forms = ["6-K", "20-F", "40-F"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<std::collections::HashSet<_>>();
+            selected = matching_indexes(&foreign_forms);
+        }
+        selected
+    };
 
+    let mut metas: Vec<FilingDoc> = Vec::new();
     for i in selected_indexes {
         let form = recent.form.get(i).cloned().unwrap_or_default();
         let accession = recent.accession_number.get(i).cloned().unwrap_or_default();
@@ -105,41 +141,53 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
             .as_ref()
             .and_then(|v| v.get(i).cloned());
 
-        let accession_nodash = accession.replace('-', "");
-        let base = format!(
-            "https://www.sec.gov/Archives/edgar/data/{}/{}/",
-            cik_num, accession_nodash
-        );
-        let filing_index_url = format!("{base}index.json");
-        let url = primary_document
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .map(|doc| format!("{base}{}", doc.trim_start_matches('/')));
-
-        let mut doc = FilingDoc {
+        metas.push(new_filing_doc(
+            cik_num,
             form,
             filing_date,
             report_date,
-            accession_number: accession,
+            accession,
             acceptance_datetime,
             items,
             primary_document,
             primary_doc_description,
             size,
-            url: url.clone(),
-            filing_index_url: Some(filing_index_url),
-            download_dir: None,
-            primary_doc_path: None,
-            index_json_path: None,
-            downloaded_files: Vec::new(),
-            text_path: None,
-            raw_text: None,
-            raw_text_bytes: None,
-            raw_text_truncated: None,
-            press_release_path: None,
-            press_release_text: None,
-            text_excerpt: None,
-        };
+        ));
+        if metas.len() >= limit {
+            break;
+        }
+    }
+    if metas.is_empty() {
+        if let Some(acc) = accession.as_deref() {
+            // Older than the submissions "recent" window: read the filing's own header.
+            metas.push(filing_doc_from_index_headers(&client, cache_dir, &ticker, cik_num, acc).await?);
+        }
+    }
+
+    let history: Vec<PeriodicRef> = (0..n)
+        .filter_map(|i| {
+            let form = recent.form.get(i)?.to_ascii_uppercase();
+            if !matches!(form.as_str(), "10-Q" | "10-K" | "20-F" | "40-F") {
+                return None;
+            }
+            Some(PeriodicRef {
+                form,
+                accession: recent.accession_number.get(i)?.clone(),
+                primary_document: recent.primary_document.as_ref()?.get(i)?.clone(),
+                report_date: recent.report_date.as_ref()?.get(i)?.clone(),
+                filing_date: recent.filing_date.get(i)?.clone(),
+            })
+        })
+        .filter(|h| !h.primary_document.trim().is_empty() && !h.report_date.trim().is_empty())
+        .collect();
+
+    let mut company_facts: Option<(Option<super::xbrl::CompanyFacts>, Option<String>)> = None;
+    for mut doc in metas {
+        let accession_nodash = doc.accession_number.replace('-', "");
+        let base = format!(
+            "https://www.sec.gov/Archives/edgar/data/{}/{}/",
+            cik_num, accession_nodash
+        );
 
         if should_download {
             let download = download_filing_files(
@@ -169,6 +217,21 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
             attach_press_release_text(&mut doc, req.max_chars);
         }
 
+        if structured {
+            let ctx = StructureCtx {
+                client: &client,
+                cache_dir,
+                sec_dir: &sec_dir,
+                ticker: &ticker,
+                cik_str: &cik_str,
+                cik_num,
+                accession_nodash: &accession_nodash,
+                base: &base,
+                history: &history,
+            };
+            attach_structure(&ctx, &mut doc, &req, &mut company_facts).await?;
+        }
+
         out.push(doc);
         if out.len() >= limit {
             break;
@@ -182,6 +245,782 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
         generated_at: Utc::now(),
         filings: out,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn new_filing_doc(
+    cik_num: u64,
+    form: String,
+    filing_date: String,
+    report_date: Option<String>,
+    accession: String,
+    acceptance_datetime: Option<String>,
+    items: Option<String>,
+    primary_document: Option<String>,
+    primary_doc_description: Option<String>,
+    size: Option<u64>,
+) -> FilingDoc {
+    let accession_nodash = accession.replace('-', "");
+    let base = format!(
+        "https://www.sec.gov/Archives/edgar/data/{}/{}/",
+        cik_num, accession_nodash
+    );
+    let filing_index_url = format!("{base}index.json");
+    let url = primary_document
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|doc| format!("{base}{}", doc.trim_start_matches('/')));
+    FilingDoc {
+        form,
+        filing_date,
+        report_date,
+        accession_number: accession,
+        acceptance_datetime,
+        items,
+        primary_document,
+        primary_doc_description,
+        size,
+        url,
+        filing_index_url: Some(filing_index_url),
+        download_dir: None,
+        primary_doc_path: None,
+        index_json_path: None,
+        downloaded_files: Vec::new(),
+        text_path: None,
+        raw_text: None,
+        raw_text_bytes: None,
+        raw_text_truncated: None,
+        press_release_path: None,
+        press_release_text: None,
+        text_excerpt: None,
+        toc: None,
+        sections: None,
+        xbrl: None,
+        structure_note: None,
+    }
+}
+
+/// "0000320193-26-000024", "000032019326000024" -> "0000320193-26-000024".
+fn normalize_accession(raw: &str) -> Result<String> {
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() != 18 {
+        return Err(Error::InvalidInput(format!(
+            "accession '{raw}' must be 18 digits, e.g. 0000320193-26-000024"
+        )));
+    }
+    Ok(format!("{}-{}-{}", &digits[..10], &digits[10..12], &digits[12..]))
+}
+
+// ───────────────────── structured reading: TOC / sections / XBRL ─────────────────────
+
+struct StructureCtx<'a> {
+    client: &'a reqwest::Client,
+    cache_dir: &'a Path,
+    sec_dir: &'a Path,
+    ticker: &'a str,
+    cik_str: &'a str,
+    cik_num: u64,
+    accession_nodash: &'a str,
+    base: &'a str,
+    /// The company's recent 10-Q / 10-K filings (for the prior period's XBRL).
+    history: &'a [PeriodicRef],
+}
+
+#[derive(Clone, Debug)]
+struct PeriodicRef {
+    form: String,
+    accession: String,
+    primary_document: String,
+    report_date: String,
+    filing_date: String,
+}
+
+impl StructureCtx<'_> {
+    fn filing_dir(&self) -> PathBuf {
+        self.cache_dir
+            .join("finance")
+            .join("filings")
+            .join(self.ticker)
+            .join(self.accession_nodash)
+    }
+}
+
+/// A file from the filing's EDGAR folder, from the local cache when present
+/// (filings are immutable once accepted), else downloaded and cached.
+async fn cached_archive_file(
+    client: &reqwest::Client,
+    base_url: &str,
+    filing_dir: &Path,
+    filename: &str,
+) -> Result<Vec<u8>> {
+    let Some(name) = sec_archive_filename(filename) else {
+        return Err(Error::InvalidInput(format!("bad filing file name '{filename}'")));
+    };
+    let path = filing_dir.join(&name);
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 0 {
+            return Ok(std::fs::read(&path)?);
+        }
+    }
+    let bytes = sec_get_bytes(client, &archive_file_url(base_url, &name)).await?;
+    std::fs::create_dir_all(filing_dir)?;
+    std::fs::write(&path, &bytes)?;
+    Ok(bytes)
+}
+
+fn parse_document(bytes: &[u8]) -> super::html::ParsedDoc {
+    let raw = String::from_utf8_lossy(bytes);
+    if super::html::looks_like_html(&raw) {
+        super::html::parse_filing_html(&raw)
+    } else {
+        super::html::parse_plain_text(&raw)
+    }
+}
+
+/// Clean readable text of a whole document (tables aligned, page furniture out).
+fn clean_document_text(bytes: &[u8]) -> String {
+    let parsed = parse_document(bytes);
+    let text = parsed.text_range(0, parsed.blocks.len());
+    if text.trim().is_empty() {
+        strip_html_to_text(&String::from_utf8_lossy(bytes))
+    } else {
+        text
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ExhibitDoc {
+    /// "EX-99.1"
+    ex_type: String,
+    filename: String,
+    description: Option<String>,
+    bytes: Option<u64>,
+}
+
+impl ExhibitDoc {
+    /// "99.1"
+    fn number(&self) -> String {
+        self.ex_type
+            .trim()
+            .to_ascii_uppercase()
+            .trim_start_matches("EX-")
+            .trim_start_matches("EX")
+            .to_string()
+            .to_ascii_lowercase()
+    }
+
+    /// "ex99.1"
+    fn id(&self) -> String {
+        format!("ex{}", self.number())
+    }
+}
+
+#[derive(Default)]
+struct IndexHeader {
+    documents: Vec<(String, String, Option<String>)>,
+    form: Option<String>,
+    filed: Option<String>,
+    period: Option<String>,
+    acceptance: Option<String>,
+}
+
+/// Parse `{accession}-index-headers.html`: the SGML header of every document
+/// in the filing (TYPE / FILENAME / DESCRIPTION) plus filing-level dates.
+fn parse_index_headers(raw: &str) -> IndexHeader {
+    let decoded = super::html::decode_entities(raw);
+    let mut h = IndexHeader::default();
+    let mut cur_type: Option<String> = None;
+    let mut cur_file: Option<String> = None;
+    let mut cur_desc: Option<String> = None;
+    let flush = |t: &mut Option<String>, f: &mut Option<String>, d: &mut Option<String>, h: &mut IndexHeader| {
+        if let (Some(ty), Some(fi)) = (t.take(), f.take()) {
+            h.documents.push((ty, fi, d.take()));
+        }
+        *d = None;
+    };
+    for line in decoded.lines() {
+        let l = line.trim();
+        let tag_value = |tag: &str| -> Option<String> {
+            l.strip_prefix(tag)
+                .map(super::html::collapse_ws)
+                .filter(|v| !v.is_empty())
+        };
+        if l.starts_with("<DOCUMENT>") {
+            flush(&mut cur_type, &mut cur_file, &mut cur_desc, &mut h);
+        } else if let Some(v) = tag_value("<TYPE>") {
+            cur_type = Some(v);
+        } else if let Some(v) = tag_value("<FILENAME>") {
+            cur_file = Some(v);
+        } else if let Some(v) = tag_value("<DESCRIPTION>") {
+            cur_desc = Some(v);
+        } else if let Some(v) = tag_value("CONFORMED SUBMISSION TYPE:") {
+            h.form.get_or_insert(v);
+        } else if let Some(v) = tag_value("FILED AS OF DATE:") {
+            h.filed.get_or_insert(v);
+        } else if let Some(v) = tag_value("CONFORMED PERIOD OF REPORT:") {
+            h.period.get_or_insert(v);
+        } else if let Some(v) = tag_value("<ACCEPTANCE-DATETIME>") {
+            h.acceptance.get_or_insert(v);
+        }
+    }
+    flush(&mut cur_type, &mut cur_file, &mut cur_desc, &mut h);
+    h
+}
+
+fn yyyymmdd_to_iso(s: &str) -> String {
+    let d: String = s.chars().filter(|c| c.is_ascii_digit()).take(8).collect();
+    if d.len() == 8 {
+        format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..8])
+    } else {
+        s.to_string()
+    }
+}
+
+async fn fetch_index_header(
+    client: &reqwest::Client,
+    base: &str,
+    filing_dir: &Path,
+    accession: &str,
+) -> Result<IndexHeader> {
+    let name = format!("{accession}-index-headers.html");
+    match cached_archive_file(client, base, filing_dir, &name).await {
+        Ok(bytes) => {
+            let h = parse_index_headers(&String::from_utf8_lossy(&bytes));
+            if !h.documents.is_empty() {
+                return Ok(h);
+            }
+        }
+        Err(e) => {
+            // Older filings don't serve the SGML header page; the human index
+            // page lists the same documents.
+            let page = format!("{accession}-index.htm");
+            let bytes = cached_archive_file(client, base, filing_dir, &page)
+                .await
+                .map_err(|_| e)?;
+            return Ok(parse_index_page(&String::from_utf8_lossy(&bytes)));
+        }
+    }
+    let page = format!("{accession}-index.htm");
+    let bytes = cached_archive_file(client, base, filing_dir, &page).await?;
+    Ok(parse_index_page(&String::from_utf8_lossy(&bytes)))
+}
+
+/// EDGAR's `{accession}-index.htm`: the document table (Seq | Description |
+/// Document | Type | Size) and the filing / period / acceptance dates.
+fn parse_index_page(raw: &str) -> IndexHeader {
+    let doc = super::html::parse_filing_html(raw);
+    let mut h = IndexHeader::default();
+    let looks_like_file = |c: &str| {
+        let l = c.to_ascii_lowercase();
+        !l.contains(' ')
+            && [".htm", ".html", ".txt", ".xml", ".pdf", ".jpg", ".gif", ".png", ".xsd", ".zip", ".xls", ".xlsx", ".json"]
+                .iter()
+                .any(|ext| l.ends_with(ext))
+    };
+    for b in doc.blocks.iter().filter(|b| b.kind == super::html::BlockKind::Row) {
+        // Cells: seq, [description], document (maybe "name.htm iXBRL"), type, [size].
+        let cells: Vec<String> = b
+            .cells
+            .iter()
+            .map(|c| c.trim_end_matches(" iXBRL").trim().to_string())
+            .collect();
+        let Some(di) = cells.iter().position(|c| looks_like_file(c)) else {
+            continue;
+        };
+        let Some(ty) = cells.get(di + 1).filter(|t| {
+            !t.is_empty() && t.len() <= 20 && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '/' | ' '))
+        }) else {
+            continue;
+        };
+        let desc = if di >= 2 { Some(cells[1..di].join(" ")) } else { None };
+        h.documents.push((ty.to_ascii_uppercase(), cells[di].clone(), desc.filter(|d| !d.is_empty())));
+    }
+    let after = |label: &str| -> Option<String> {
+        let i = doc.blocks.iter().position(|b| b.text.trim().eq_ignore_ascii_case(label))?;
+        doc.blocks.get(i + 1).map(|b| b.text.trim().to_string())
+    };
+    h.form = h.documents.first().map(|d| d.0.clone());
+    h.filed = after("Filing Date");
+    h.period = after("Period of Report");
+    h.acceptance = after("Accepted");
+    h
+}
+
+/// Filing metadata for an accession outside the submissions "recent" window.
+async fn filing_doc_from_index_headers(
+    client: &reqwest::Client,
+    cache_dir: &Path,
+    ticker: &str,
+    cik_num: u64,
+    accession: &str,
+) -> Result<FilingDoc> {
+    let nodash = accession.replace('-', "");
+    let base = format!("https://www.sec.gov/Archives/edgar/data/{cik_num}/{nodash}/");
+    let dir = cache_dir.join("finance").join("filings").join(ticker).join(&nodash);
+    let h = fetch_index_header(client, &base, &dir, accession)
+        .await
+        .map_err(|e| {
+            Error::InvalidInput(format!(
+                "accession {accession} not found for {ticker} (CIK {cik_num}): {e}"
+            ))
+        })?;
+    let form = h.form.clone().unwrap_or_default();
+    let primary = h
+        .documents
+        .iter()
+        .find(|(t, _, _)| t.eq_ignore_ascii_case(&form))
+        .or_else(|| h.documents.first())
+        .map(|(_, f, _)| f.clone());
+    Ok(new_filing_doc(
+        cik_num,
+        form,
+        h.filed.as_deref().map(yyyymmdd_to_iso).unwrap_or_default(),
+        h.period.as_deref().map(yyyymmdd_to_iso),
+        accession.to_string(),
+        h.acceptance.clone(),
+        None,
+        primary,
+        None,
+        None,
+    ))
+}
+
+async fn filing_exhibits(ctx: &StructureCtx<'_>, doc: &FilingDoc) -> Vec<ExhibitDoc> {
+    let dir = ctx.filing_dir();
+    let Ok(h) = fetch_index_header(ctx.client, ctx.base, &dir, &doc.accession_number).await else {
+        return Vec::new();
+    };
+    // Raw sizes from index.json (cached by the regular download path too).
+    let mut sizes: HashMap<String, u64> = HashMap::new();
+    if let Ok(bytes) = cached_archive_file(ctx.client, ctx.base, &dir, "index.json").await {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(items) = v.pointer("/directory/item").and_then(|i| i.as_array()) {
+                for it in items {
+                    let name = it.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let size = it
+                        .get("size")
+                        .and_then(|s| s.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| s.as_u64()));
+                    if let Some(sz) = size {
+                        sizes.insert(name.to_string(), sz);
+                    }
+                }
+            }
+        }
+    }
+    h.documents
+        .into_iter()
+        .filter(|(t, f, _)| {
+            let t = t.to_ascii_uppercase();
+            let f = f.to_ascii_lowercase();
+            t.starts_with("EX-")
+                && !t.starts_with("EX-101")
+                && !t.starts_with("EX-104")
+                && (f.ends_with(".htm") || f.ends_with(".html") || f.ends_with(".txt"))
+        })
+        .map(|(t, f, d)| ExhibitDoc {
+            bytes: sizes.get(&f).copied(),
+            ex_type: t.to_ascii_uppercase(),
+            filename: f,
+            description: d,
+        })
+        .collect()
+}
+
+/// "EX-99.1 Press release issued by Apple Inc. on November 2, 2026." — the
+/// description from the filing's own exhibit index when it lists one.
+fn exhibit_title(ex: &ExhibitDoc, primary: &super::html::ParsedDoc) -> String {
+    let num = ex.number();
+    let from_index = primary.blocks.iter().find_map(|b| {
+        if b.kind != super::html::BlockKind::Row || b.cells.len() < 2 {
+            return None;
+        }
+        let first = b.cells[0].trim().trim_end_matches('*').trim().to_ascii_lowercase();
+        if first == num || first == format!("ex-{num}") || first == format!("exhibit {num}") {
+            let d = b.cells[1..].join(" ");
+            let d = d.trim();
+            if d.chars().any(|c| c.is_alphabetic()) && d.len() <= 300 {
+                return Some(d.to_string());
+            }
+        }
+        None
+    });
+    let desc = from_index.or_else(|| {
+        ex.description
+            .clone()
+            .filter(|d| !d.eq_ignore_ascii_case(&ex.ex_type))
+    });
+    match desc {
+        Some(d) => format!("{} {}", ex.ex_type, d),
+        None => ex.ex_type.clone(),
+    }
+}
+
+/// Requested exhibit, for queries like "ex99.1", "EX-99.1", "exhibit:99.1",
+/// "exhibit 99", "press_release". Bare numbers ("99.1") only when `bare_ok`.
+fn match_exhibit<'a>(exhibits: &'a [ExhibitDoc], q: &str, bare_ok: bool) -> Option<&'a ExhibitDoc> {
+    let ql = q.trim().to_ascii_lowercase();
+    if matches!(
+        ql.as_str(),
+        "press_release" | "press release" | "pressrelease" | "earnings_release" | "release"
+    ) {
+        return exhibits.iter().find(|e| e.number().starts_with("99"));
+    }
+    let (prefixed, rest) = if let Some(r) = ql.strip_prefix("exhibit") {
+        (true, r)
+    } else if let Some(r) = ql.strip_prefix("ex") {
+        (true, r)
+    } else {
+        (false, ql.as_str())
+    };
+    if !prefixed && !bare_ok {
+        return None;
+    }
+    let num = rest.trim_start_matches([':', '-', '_', ' ', '.']).trim();
+    if num.is_empty() || !num.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    exhibits
+        .iter()
+        .find(|e| e.number() == num)
+        .or_else(|| {
+            if num.contains('.') {
+                None
+            } else {
+                exhibits.iter().find(|e| e.number().starts_with(&format!("{num}.")))
+            }
+        })
+}
+
+fn file_mtime_fresh(path: &Path, max_age_secs: u64) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() <= max_age_secs)
+}
+
+const COMPANYFACTS_TTL_SECS: u64 = 60 * 60 * 12;
+
+/// SEC companyfacts for prior-period comparisons; cached, refreshed when the
+/// cache predates the filing being read.
+async fn load_company_facts(
+    client: &reqwest::Client,
+    sec_dir: &Path,
+    cik_str: &str,
+    accession: &str,
+) -> (Option<super::xbrl::CompanyFacts>, Option<String>) {
+    let dir = sec_dir.join("companyfacts");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("CIK{cik_str}.json"));
+    let cached = if file_mtime_fresh(&path, COMPANYFACTS_TTL_SECS) {
+        std::fs::read(&path).ok()
+    } else {
+        None
+    };
+    let has_accession = |b: &[u8]| {
+        let needle = accession.as_bytes();
+        b.windows(needle.len()).any(|w| w == needle)
+    };
+    let mut note = None;
+    let bytes = match cached {
+        Some(b) if has_accession(&b) => Some(b),
+        stale => {
+            let url = format!("https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_str}.json");
+            match sec_get_bytes(client, &url).await {
+                Ok(b) => {
+                    let _ = std::fs::write(&path, &b);
+                    Some(b)
+                }
+                Err(e) => {
+                    note = Some(format!(
+                        "SEC companyfacts unavailable ({e}); comparisons limited to this filing's own columns."
+                    ));
+                    stale.or_else(|| std::fs::read(&path).ok())
+                }
+            }
+        }
+    };
+    let parsed = bytes.as_deref().and_then(super::xbrl::CompanyFacts::parse);
+    if parsed.is_none() && note.is_none() {
+        note = Some("SEC companyfacts unreadable; comparisons limited to this filing's own columns.".to_string());
+    }
+    (parsed, note)
+}
+
+fn split_section_queries(sections: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in sections {
+        for part in s.split(',') {
+            let p = part.trim();
+            if !p.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(p)) {
+                out.push(p.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn cap_text(text: String, max_chars: Option<usize>) -> (String, Option<bool>) {
+    match max_chars {
+        Some(limit) if text.chars().count() > limit => (text.chars().take(limit).collect(), Some(true)),
+        _ => (text, None),
+    }
+}
+
+async fn attach_structure(
+    ctx: &StructureCtx<'_>,
+    doc: &mut FilingDoc,
+    req: &FilingsRequest,
+    company_facts: &mut Option<(Option<super::xbrl::CompanyFacts>, Option<String>)>,
+) -> Result<()> {
+    use super::sections::{detect_structure, form_family, resolve_by_subheading, resolve_section, FormFamily};
+
+    let primary_name = doc
+        .primary_document
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .ok_or_else(|| {
+            Error::Provider(format!(
+                "filing {} has no primary document to read",
+                doc.accession_number
+            ))
+        })?;
+    let dir = ctx.filing_dir();
+    let bytes = cached_archive_file(ctx.client, ctx.base, &dir, &primary_name).await?;
+    let parsed = parse_document(&bytes);
+    let structure = detect_structure(&parsed, &doc.form);
+    let family = form_family(&doc.form);
+    let queries = split_section_queries(&req.sections);
+
+    // Exhibits: listed for every form; read (for sizes) on 8-Ks / 6-Ks.
+    let want_exhibits = req.toc
+        || queries.iter().any(|q| {
+            let l = q.to_ascii_lowercase();
+            l.starts_with("ex") || l.contains("press") || l.contains("release") || l.chars().next().is_some_and(|c| c.is_ascii_digit())
+        });
+    let exhibits = if want_exhibits {
+        filing_exhibits(ctx, doc).await
+    } else {
+        Vec::new()
+    };
+
+    if req.toc {
+        let mut toc: Vec<FilingTocEntry> = structure
+            .sections
+            .iter()
+            .map(|s| FilingTocEntry {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                kind: s.kind.as_str().to_string(),
+                level: s.kind.level(),
+                parent: s.parent.clone(),
+                chars: Some(
+                    structure
+                        .chars
+                        .get(&s.id)
+                        .copied()
+                        .unwrap_or_else(|| parsed.chars_range(s.start, s.end)),
+                ),
+                bytes: None,
+            })
+            .collect();
+        let read_exhibits = family == FormFamily::EightK;
+        for ex in exhibits.iter().take(12) {
+            let chars = if read_exhibits {
+                cached_archive_file(ctx.client, ctx.base, &dir, &ex.filename)
+                    .await
+                    .ok()
+                    .map(|b| clean_document_text(&b).chars().count())
+            } else {
+                None
+            };
+            toc.push(FilingTocEntry {
+                id: ex.id(),
+                title: exhibit_title(ex, &parsed),
+                kind: "exhibit".to_string(),
+                level: 1,
+                parent: None,
+                bytes: if chars.is_none() { ex.bytes } else { None },
+                chars,
+            });
+        }
+        let how = match structure.method {
+            "item_headings" | "item_headings+toc" => "Sections come from the filing's Item headings.",
+            "toc_titles" => "This filer drops 'Item N.' headings; sections were matched from its own table of contents and mapped to the standard items.",
+            "title_match" => "No Item headings or usable table of contents; sections were matched by standard item titles.",
+            _ => "No section headings recognized; section=document returns the full clean text.",
+        };
+        doc.structure_note = Some(format!(
+            "{how} Get exact text with section=<id> (comma-separate several; chars is the size you will get back), passing accession={} to stay on this filing. Aliases: mda, risk_factors, business, income_statement, balance_sheet, cash_flow, equity, notes (all notes), note:<number or name>, auditor_report, exhibits, ex99.1, document (everything). xbrl=true returns the numbers with qoq/yoy changes.",
+            doc.accession_number
+        ));
+        doc.toc = Some(toc);
+    }
+
+    if !queries.is_empty() {
+        let mut outs: Vec<FilingSectionText> = Vec::new();
+        for q in &queries {
+            let ql = q.to_ascii_lowercase();
+            let whole = matches!(ql.as_str(), "document" | "full" | "all" | "full_text" | "everything");
+            let exhibit = if ql.starts_with("ex") || ql.contains("press") || ql.contains("release") {
+                match_exhibit(&exhibits, q, false)
+            } else {
+                None
+            };
+            let section = if whole || exhibit.is_some() {
+                None
+            } else {
+                resolve_section(&structure, q).or_else(|| resolve_by_subheading(&structure, &parsed, q))
+            };
+            let exhibit = exhibit.or_else(|| {
+                if !whole && section.is_none() {
+                    match_exhibit(&exhibits, q, true)
+                } else {
+                    None
+                }
+            });
+            let (id, title, text) = if whole {
+                (
+                    Some("document".to_string()),
+                    Some("Full document".to_string()),
+                    parsed.text_range(0, parsed.blocks.len()),
+                )
+            } else if let Some(s) = section {
+                (Some(s.id.clone()), Some(s.title.clone()), parsed.text_range(s.start, s.end))
+            } else if let Some(ex) = exhibit {
+                match cached_archive_file(ctx.client, ctx.base, &dir, &ex.filename).await {
+                    Ok(b) => (Some(ex.id()), Some(exhibit_title(ex, &parsed)), clean_document_text(&b)),
+                    Err(e) => {
+                        outs.push(FilingSectionText {
+                            requested: q.clone(),
+                            id: Some(ex.id()),
+                            title: None,
+                            chars: 0,
+                            text: String::new(),
+                            truncated: None,
+                            error: Some(format!("could not fetch exhibit {}: {e}", ex.filename)),
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                let mut available: Vec<String> = structure.sections.iter().map(|s| s.id.clone()).collect();
+                available.extend(exhibits.iter().map(|e| e.id()));
+                outs.push(FilingSectionText {
+                    requested: q.clone(),
+                    id: None,
+                    title: None,
+                    chars: 0,
+                    text: String::new(),
+                    truncated: None,
+                    error: Some(format!(
+                        "no section matches '{q}'. Available ids: {}",
+                        available.join(", ")
+                    )),
+                });
+                continue;
+            };
+            let full_chars = text.chars().count();
+            let (text, truncated) = cap_text(text, req.max_chars);
+            outs.push(FilingSectionText {
+                requested: q.clone(),
+                id,
+                title,
+                chars: full_chars,
+                text,
+                truncated,
+                error: None,
+            });
+        }
+        doc.sections = Some(outs);
+    }
+
+    if req.xbrl {
+        let mut facts = super::xbrl::extract_facts(&parsed);
+        let periodic = matches!(family, FormFamily::TenK | FormFamily::TenQ | FormFamily::TwentyF);
+        let mut extra_note: Option<String> = None;
+        if (!facts.is_empty() || periodic) && company_facts.is_none() {
+            *company_facts = Some(load_company_facts(ctx.client, ctx.sec_dir, ctx.cik_str, &doc.accession_number).await);
+        }
+        if facts.is_empty() && periodic && !parsed.is_inline_xbrl {
+            // Pre-inline-XBRL filing: fall back to what SEC extracted for this accession.
+            if let Some((Some(cf), _)) = company_facts.as_ref() {
+                facts = cf.facts_for_accession(&doc.accession_number);
+                if !facts.is_empty() {
+                    extra_note = Some("This document carries no inline XBRL; facts are SEC companyfacts entries for this accession (non-dimensional, no statement placement).".to_string());
+                }
+            }
+        }
+        let mut period = super::xbrl::period_info(&parsed, &facts);
+        if let Some(p) = period.as_mut() {
+            if p.document_type.is_none() {
+                p.document_type = Some(doc.form.clone());
+            }
+        }
+        let (cf, cf_note) = match company_facts.as_ref() {
+            Some((cf, note)) => (cf.as_ref(), note.clone().or(extra_note)),
+            None => (None, extra_note),
+        };
+        // The previous 10-Q / 10-K: quarter-ago values for every concept,
+        // including company extensions and segment dimensions.
+        let mut prior_facts: Vec<super::xbrl::Fact> = Vec::new();
+        let mut prior_label = String::new();
+        if periodic && parsed.is_inline_xbrl {
+            let current_report = doc.report_date.clone().unwrap_or_default();
+            let prior = ctx
+                .history
+                .iter()
+                .filter(|h| h.accession != doc.accession_number)
+                .filter(|h| h.filing_date.as_str() <= doc.filing_date.as_str())
+                .filter(|h| current_report.is_empty() || h.report_date.as_str() < current_report.as_str())
+                .max_by(|a, b| a.report_date.cmp(&b.report_date).then(a.filing_date.cmp(&b.filing_date)));
+            if let Some(h) = prior {
+                let nodash = h.accession.replace('-', "");
+                let pbase = format!("https://www.sec.gov/Archives/edgar/data/{}/{}/", ctx.cik_num, nodash);
+                let pdir = ctx
+                    .cache_dir
+                    .join("finance")
+                    .join("filings")
+                    .join(ctx.ticker)
+                    .join(&nodash);
+                if let Ok(b) = cached_archive_file(ctx.client, &pbase, &pdir, &h.primary_document).await {
+                    let pdoc = parse_document(&b);
+                    prior_facts = super::xbrl::extract_facts(&pdoc);
+                    prior_label = format!("{} {}", h.form, h.filing_date);
+                }
+            }
+        }
+        let prior = if prior_facts.is_empty() {
+            None
+        } else {
+            Some(super::xbrl::PriorFiling {
+                facts: &prior_facts,
+                label: prior_label,
+            })
+        };
+        let opts = super::xbrl::XbrlOptions {
+            concepts: req
+                .xbrl_concepts
+                .iter()
+                .flat_map(|c| c.split(','))
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect(),
+            min_change_pct: req.xbrl_min_change_pct.unwrap_or(25.0).max(0.0),
+        };
+        doc.xbrl = Some(super::xbrl::build_xbrl(
+            &parsed,
+            &structure,
+            &facts,
+            period.as_ref(),
+            prior.as_ref(),
+            cf,
+            &doc.filing_date,
+            &opts,
+            cf_note,
+        ));
+    }
+    Ok(())
 }
 
 struct FilingDownloadResult {
@@ -220,8 +1059,10 @@ async fn attach_primary_raw_text(
         || head_lower.contains("<html")
         || head_lower.contains("<!doctype")
         || (head.contains("<?xml") && head_lower.contains("<body"));
+    // Readable text: paragraphs on their own lines, tables as aligned rows,
+    // page numbers / running headers / TOC back-links dropped.
     let cleaned = if looks_html {
-        strip_html_to_text(&raw)
+        clean_document_text(&bytes)
     } else {
         raw.into_owned()
     };
@@ -270,8 +1111,8 @@ fn attach_press_release_text(doc: &mut FilingDoc, max_chars: Option<usize>) {
     );
     if is_periodic {
         if let Some(primary_path) = doc.primary_doc_path.as_deref() {
-            if let Ok(html) = std::fs::read_to_string(primary_path) {
-                let parsed = strip_html_to_text(&html);
+            if let Ok(html) = std::fs::read(primary_path) {
+                let parsed = clean_document_text(&html);
                 let text = match max_chars {
                     Some(limit) if parsed.chars().count() > limit => {
                         parsed.chars().take(limit).collect()
@@ -377,11 +1218,11 @@ fn attach_press_release_text(doc: &mut FilingDoc, max_chars: Option<usize>) {
         Some(t) => t,
         None => return,
     };
-    let html = match std::fs::read_to_string(&path) {
+    let html = match std::fs::read(&path) {
         Ok(s) => s,
         Err(_) => return,
     };
-    let parsed = strip_html_to_text(&html);
+    let parsed = clean_document_text(&html);
     let (text, _truncated) = if let Some(limit) = max_chars {
         if parsed.chars().count() > limit {
             (parsed.chars().take(limit).collect::<String>(), true)

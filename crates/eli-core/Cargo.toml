@@ -1,6 +1,6 @@
 [package]
 name = "eli-core"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -41,3 +41,4 @@ eli-finance-types.workspace = true
 evalexpr.workspace = true
 ibapi = "2.9.2"
 rusqlite.workspace = true
+calamine = { version = "0.37", default-features = false }

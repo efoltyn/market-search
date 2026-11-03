@@ -264,6 +264,8 @@ enum FinanceCommand {
     Boj(FinanceBojArgs),
     /// BOE: Bank of England Bank Rate, SONIA, gilt yields, M4, GBP FX rates.
     Boe(FinanceBoeArgs),
+    /// FINRA TRACE bond lookup: an issuer's outstanding bonds (CUSIP, coupon, maturity, last price/yield). Feed a CUSIP into timeseries as BOND:<CUSIP>:YLD.
+    Bonds(FinanceBondsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -1198,6 +1200,20 @@ pub struct FinanceStressArgs {
 }
 
 #[derive(clap::Args, Debug)]
+pub struct FinanceBondsArgs {
+    /// Exact FINRA issuer name, e.g. "ORACLE CORP", "COREWEAVE INC", "META PLATFORMS INC" (case-insensitive, no fuzzy match).
+    #[arg(long, conflicts_with = "cusip", required_unless_present = "cusip")]
+    pub issuer: Option<String>,
+    /// One bond by 9-char CUSIP or FINRA issue symbol (e.g. 21873SAG3, CRWV6364372).
+    #[arg(long)]
+    pub cusip: Option<String>,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
 pub struct FinanceFiscalArgs {
     /// Endpoint: debt | statement | interest
     #[arg(long, default_value = "debt")]
@@ -1841,9 +1857,45 @@ struct FinanceFilingsArgs {
     #[arg(long, value_delimiter = ',')]
     forms: Vec<String>,
 
-    /// Max number of filings to return.
-    #[arg(long, default_value_t = 5)]
-    limit: usize,
+    /// Max number of filings to return (default 5; 1 with --toc / --section / --xbrl).
+    #[arg(long)]
+    limit: Option<usize>,
+
+    /// Read one specific filing by accession number (e.g. 0000320193-26-000024,
+    /// dashes optional). Overrides --forms and --limit.
+    #[arg(long)]
+    accession: Option<String>,
+
+    /// Table of contents for the filing: every section's id, title and size in
+    /// characters (10-K/10-Q items, each financial statement, each numbered
+    /// note, auditor's report; 8-K items and exhibits like EX-99.1). Cheap
+    /// first call; then fetch exact text with --section.
+    #[arg(long)]
+    toc: bool,
+
+    /// Return exactly these sections' clean text, no cap needed
+    /// (comma-separated TOC ids or aliases): cash_flow, balance_sheet,
+    /// income_statement, comprehensive_income, equity, mda, risk_factors,
+    /// business, notes (all notes), note:5, note:inventories, auditor_report,
+    /// part2_item1a, item7, ex99.1, press_release, document.
+    #[arg(long, visible_alias = "sections", value_delimiter = ',')]
+    section: Vec<String>,
+
+    /// The filing's XBRL facts as JSON (concept, label, value, unit, period,
+    /// the section it appears in) with prior-period values and qoq / yoy
+    /// changes. Default: every line item in the primary statements plus
+    /// anything elsewhere that moved >= --xbrl-min-change percent.
+    #[arg(long)]
+    xbrl: bool,
+
+    /// Only XBRL facts whose concept or label contains one of these
+    /// (comma-separated, case-insensitive), e.g. Inventory,Revenue. "*" = all.
+    #[arg(long, value_delimiter = ',')]
+    xbrl_concepts: Vec<String>,
+
+    /// Percent change that flags a fact outside the primary statements (default 25).
+    #[arg(long)]
+    xbrl_min_change: Option<f64>,
 
     /// Download exactly one file: the primary document for the most recent matching filing.
     #[arg(
@@ -1877,7 +1929,8 @@ struct FinanceFilingsArgs {
     #[arg(long)]
     press_release_text: bool,
 
-    /// Cap inline raw filing text when --raw-text is set.
+    /// Cap inline text: --raw-text and --press-release-text, and each --section
+    /// when given (sections are returned whole by default).
     #[arg(long)]
     max_chars: Option<usize>,
 
@@ -1938,7 +1991,7 @@ struct FinanceTimeseriesArgs {
     #[arg(long)]
     as_of: Option<String>,
 
-    /// Data provider (auto | yahoo | fred | ibkr | pyth | binance). "auto" routes by ticker prefix: PYTH:/CLEV:/IBKR:/BN:/FRED: → matching provider; numeric (Polymarket) and KX*-prefix (Kalshi) auto-detected; bare names → Yahoo, with FRED fallback for macro-style IDs.
+    /// Data provider (auto | yahoo | fred | ibkr | pyth | binance | govt | secnav | bond | buyback | nyfed | ofr | etf | cboe | hyperliquid | deribit). "auto" routes by ticker prefix: PYTH:/CLEV:/IBKR:/BN:/GOVT:/FRED:/NAV:/PNAV:/BOND:/BUYBACK:/NYFED:/OFR:/ETF:/CBOE:/HL:/DERIBIT: → matching provider; numeric (Polymarket) and KX*-prefix (Kalshi) auto-detected; bare names → Yahoo, with FRED fallback for macro-style IDs.
     #[arg(long, default_value = "auto")]
     provider: String,
 

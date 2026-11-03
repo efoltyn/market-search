@@ -5,9 +5,15 @@ There's no session store, no database server, and no shared mutable state, so
 you don't need sticky routing either.
 
 - **No sessions.** Every `tools/call` runs as a fresh subprocess of the same
-  binary. Nothing carries over from one request to the next. Over HTTP, the
-  `Mcp-Session-Id` header just echoes back whatever the client sent, because
-  some clients need one to be present. Any replica can answer any request.
+  binary. Nothing carries over from one request to the next. Any replica can
+  answer any request.
+- **Speaks both MCP eras.** Clients on the stateless 2026-07-28 spec send
+  their protocol version on every request and skip the handshake; the server
+  answers `server/discover`, validates the mirrored `Mcp-Method`/`Mcp-Name`
+  headers, and never mints a session id for them. Older clients that open with
+  `initialize` (claude.ai's connector today) still get the legacy path, where
+  the `Mcp-Session-Id` header just echoes back whatever the client sent,
+  because some of them need one to be present.
 - **No external services.** Everything the tools use is a public HTTP API
   (Yahoo, Kalshi, Polymarket, FRED, SEC, Treasury, the central banks, ...).
   The odds search index is an embedded SQLite file (compiled in, nothing to

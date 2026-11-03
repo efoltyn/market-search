@@ -184,7 +184,7 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
             &effective_forms,
             args.from.as_deref(),
             args.to.as_deref(),
-            args.limit,
+            args.limit.unwrap_or(5),
             user_agent.as_deref(),
         )
         .await
@@ -214,11 +214,16 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
         anyhow::bail!("--ticker is required (or use --search-text for cross-filer search)");
     };
     let ticker_for_meta = ticker.clone();
+    // TOC / section / XBRL reads cache the one document they parse; they don't
+    // need the bulk download (index + exhibits) unless asked for explicitly.
+    // A concept filter implies --xbrl.
+    let xbrl = args.xbrl || args.xbrl_concepts.iter().any(|c| !c.trim().is_empty());
+    let structured = args.toc || xbrl || args.section.iter().any(|s| !s.trim().is_empty());
     let req = eli_core::finance::FilingsRequest {
         ticker,
         forms: args.forms,
-        limit: Some(if args.single_file { 1 } else { args.limit }),
-        download: !args.no_download
+        limit: if args.single_file { Some(1) } else { args.limit },
+        download: (!args.no_download && !structured)
             || args.include_text
             || args.download_all
             || args.single_file
@@ -231,6 +236,12 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
         include_text: args.include_text,
         max_chars: args.max_chars,
         user_agent,
+        accession: args.accession,
+        toc: args.toc,
+        sections: args.section,
+        xbrl,
+        xbrl_concepts: args.xbrl_concepts,
+        xbrl_min_change_pct: args.xbrl_min_change,
     };
 
     let resp = eli_core::finance::fetch_filings(req, &cache_dir)

@@ -21,7 +21,7 @@ This gives it market search: the live odds of recession on Kalshi and Polymarket
   KALSHI:KXRECSSNBER-26:YES    30 candles    22% → 36%   +63.6%
 ```
 
-24 tools, one timeseries axis. Stocks, options, futures curves, crypto, forex, prediction markets, FRED macro, Treasury auctions, SEC filings, and central banks (Fed, ECB, BOJ, BOE, BIS). Runs on your machine. No API keys for the core data.
+25 tools, one timeseries axis. Stocks, options, futures curves, corporate bonds, government bond yields, crypto, forex, prediction markets, FRED macro, Treasury auctions, SEC filings, and central banks (Fed, ECB, BOJ, BOE, BIS). Runs on your machine. No API keys for the core data.
 
 ---
 
@@ -80,7 +80,7 @@ Or add it to your client config (`.mcp.json`, Claude Desktop, Codex, Cursor, Gem
 
 | Tool | What it does | Example |
 |------|-------------|---------|
-| `finance_timeseries` | OHLCV on one axis across stocks, FRED macro, futures, crypto, and prediction markets, auto-routed by ticker. 17 presets pull a whole domain in one call. | `--preset macro --tickers NVDA,SMH --range 90d` |
+| `finance_timeseries` | OHLCV on one axis across stocks, FRED macro, futures, crypto, and prediction markets, auto-routed by ticker. 20 presets pull a whole domain in one call. | `--preset macro --tickers NVDA,SMH --range 90d` |
 | `finance_movers` | Largest day gainers / losers / most-active, or screen a list by % move, price, volume, or market cap | `--direction gainers --min-cap 10B` |
 | `finance_options` | Full options chain: IV, max pain, put/call ratio, skew. `--all` for every expiration | `--ticker SPY --all` |
 | `finance_fundamentals` | Income statement, P/E, margins, ROE, debt/equity | `--ticker NVDA` |
@@ -88,6 +88,7 @@ Or add it to your client config (`.mcp.json`, Claude Desktop, Codex, Cursor, Gem
 | `finance_search` | Ticker lookup + FRED macro series discovery | `--query "semiconductor"` |
 | `finance_insider` | Insider buys and sells parsed from SEC Form 4: who, role, shares, price, net summary | `--ticker NVDA --days 90` |
 | `finance_short` | FINRA short interest (days-to-cover, change vs prior print) + daily per-venue short volume | `--ticker GME` |
+| `finance_bonds` | A company's outstanding bonds from FINRA TRACE: CUSIP, coupon, maturity, last price and yield. Feed a CUSIP to timeseries as `BOND:<CUSIP>:YLD` | `--issuer "ORACLE CORP"` |
 | `finance_log` | Local, hash-chained trail of every tool call with archived responses; verify or export it | `--stats` |
 
 ### Prediction markets
@@ -108,7 +109,7 @@ Or add it to your client config (`.mcp.json`, Claude Desktop, Codex, Cursor, Gem
 | `finance_fiscal` | National debt, Treasury cash balance, average interest rates | `--kind debt` |
 | `finance_stress` | OFR Financial Stress Index, decomposed into credit / equity / funding / vol | `--range 90` |
 | `finance_volsurface` | CBOE vol indices: VIX, VIX9D, VIX3M, VIX6M, VIX1Y, VVIX, OVX, GVZ, SKEW | `--symbols VIX,VVIX,SKEW` |
-| `finance_filings` | SEC filings by ticker: URLs, primary docs, optional inline text | `--ticker NVDA --forms 10-K --limit 3` |
+| `finance_filings` | SEC filings by ticker. `--toc` lists every section with its size; `--section` returns exactly the ones you name (cash flow, MD&A, risk factors, any note); `--xbrl` gives the reported figures with quarter-over-quarter and year-over-year changes | `--ticker AMZN --forms 10-Q --section cash_flow,note:debt` |
 
 ### Central banks
 
@@ -134,6 +135,16 @@ Or add it to your client config (`.mcp.json`, Claude Desktop, Codex, Cursor, Gem
 | `BN:BTC`, `BN:ETH` | Binance | Crypto OHLCV since 2019 |
 | `KXRECSSNBER-26` | Kalshi | Probability + volume candles |
 | `609655` | Polymarket | Probability + volume candles |
+| `GOVT:US10Y`, `GOVT:DE10Y`, `GOVT:JP30Y` | CNBC | Government bond yields by country and tenor, daily back to 2000 |
+| `BOND:21873SAG3:YLD` | FINRA TRACE | Corporate bond yield or price by CUSIP |
+| `NAV:OBDC`, `PNAV:FSK` | SEC XBRL | Net asset value per share, and price over NAV |
+| `NYFED:SOFR_P99`, `NYFED:SRF` | NY Fed | Repo rates, standing repo facility, reverse repo |
+| `OFR:FSI` | OFR | Financial stress index and repo market volumes |
+| `BUYBACK:20-30Y:COVER` | US Treasury | Treasury buyback operations |
+| `ETF:JNK:FLOW` | Fund issuers | ETF flows, shares outstanding, NAV |
+| `CBOE:VXCONTANGO`, `CBOE:PCR_EQUITY` | CBOE | VIX futures curve, put/call ratios |
+| `HL:BTC:FUNDING_APR` | Hyperliquid | Perpetual funding and open interest |
+| `DERIBIT:DVOL:BTC` | Deribit | Crypto implied volatility, funding, skew |
 
 Mix them in one call:
 
@@ -155,12 +166,14 @@ Core tools need no API keys.
 | FRED | None |
 | CFTC | None |
 | SEC EDGAR | None (set `ELI_SEC_USER_AGENT` to a contact, e.g. `"Jane Doe jane@example.com"`) |
+| FINRA | None |
 | NY Fed | None |
 | US Treasury | None |
 | OFR | None |
 | CBOE | None |
 | Pyth Network | None |
-| Binance | None |
+| Binance · Hyperliquid · Deribit | None |
+| CNBC | None |
 | ECB · BIS · BOJ · BOE | None |
 | EIA | Free key ([register](https://www.eia.gov/opendata/register.php)) |
 
