@@ -2005,8 +2005,9 @@ struct FinanceFilingsArgs {
 
     /// Table of contents for the filing: every section's id, title and size in
     /// characters (10-K/10-Q items, each financial statement, each numbered
-    /// note, auditor's report; 8-K items and exhibits like EX-99.1). Cheap
-    /// first call; then fetch exact text with --section.
+    /// note, auditor's report; 8-K items and exhibits like EX-99.1, with the
+    /// statements inside an earnings release under it: ex99.1:cash_flow).
+    /// Cheap first call; then fetch exact text with --section.
     #[arg(long)]
     toc: bool,
 
@@ -2014,14 +2015,18 @@ struct FinanceFilingsArgs {
     /// (comma-separated TOC ids or aliases): cash_flow, balance_sheet,
     /// income_statement, comprehensive_income, equity, mda, risk_factors,
     /// business, notes (all notes), note:5, note:inventories, auditor_report,
-    /// part2_item1a, item7, ex99.1, press_release, document.
+    /// part2_item1a, item7, ex99.1, ex99.1:balance_sheet, press_release,
+    /// document. On an earnings 8-K, cash_flow etc. reach the statements in
+    /// the press release.
     #[arg(long, visible_alias = "sections", value_delimiter = ',')]
     section: Vec<String>,
 
     /// The filing's XBRL facts as JSON (concept, label, value, unit, period,
     /// the section it appears in) with prior-period values and qoq / yoy
     /// changes. Default: every line item in the primary statements plus
-    /// anything elsewhere that moved >= --xbrl-min-change percent.
+    /// anything elsewhere that moved >= --xbrl-min-change percent. On an
+    /// earnings 8-K: the press release's tables in the same shape, values as
+    /// printed, before the 10-Q XBRL exists.
     #[arg(long)]
     xbrl: bool,
 
@@ -2033,6 +2038,19 @@ struct FinanceFilingsArgs {
     /// Percent change that flags a fact outside the primary statements (default 25).
     #[arg(long)]
     xbrl_min_change: Option<f64>,
+
+    /// With --section: what changed against the same section of the previous
+    /// filing of the same form, as exact text: added and removed paragraphs,
+    /// added / removed sentences of changed ones, and counts of paragraphs
+    /// that differ only in figures and dates. Returns the diff instead of the
+    /// section text (call without --diff for the text). A 10-Q whose risk
+    /// factors only update the 10-K is compared against the 10-K.
+    #[arg(long)]
+    diff: bool,
+
+    /// Compare against this earlier filing (accession) instead; implies --diff.
+    #[arg(long)]
+    diff_against: Option<String>,
 
     /// Download exactly one file: the primary document for the most recent matching filing.
     #[arg(

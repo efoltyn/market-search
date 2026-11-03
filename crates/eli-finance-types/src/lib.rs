@@ -736,6 +736,16 @@ pub struct FilingsRequest {
     /// primary statements (default 25).
     #[serde(default)]
     pub xbrl_min_change_pct: Option<f64>,
+
+    /// With `sections`: compare each section against the same section of an
+    /// earlier filing (default: the previous filing of the same form) and
+    /// return the differences as exact text instead of the section's text.
+    #[serde(default)]
+    pub diff: bool,
+
+    /// The earlier filing to compare against, by accession (implies `diff`).
+    #[serde(default)]
+    pub diff_against: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -872,6 +882,78 @@ pub struct FilingSectionText {
     pub truncated: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// With `diff`: what changed against the same section of an earlier
+    /// filing (`text` is then empty; a call without diff returns it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<FilingSectionDiff>,
+}
+
+/// Paragraph-level comparison of one section against an earlier filing.
+/// Every string is exact text from one of the two filings.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FilingSectionDiff {
+    pub base: FilingDiffBase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Paragraphs of this filing none of whose sentences appear in the base.
+    #[serde(default)]
+    pub added: Vec<FilingDiffParagraph>,
+    /// Base paragraphs none of whose sentences appear in this filing.
+    #[serde(default)]
+    pub removed: Vec<FilingDiffParagraph>,
+    /// Paragraphs that differ by whole sentences: the sentences this filing
+    /// adds and the ones the base had, located by the paragraph's opening words.
+    #[serde(default)]
+    pub changed: Vec<FilingDiffChange>,
+    /// Paragraphs whose only differences are numbers, dates and period words
+    /// ("third quarter", "June 27, 2026", "$4.2 billion", "12%"). Not printed.
+    pub figures_only: usize,
+    /// Where those paragraphs sit (subheading, or opening words), deduplicated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub figures_only_under: Vec<String>,
+    /// Paragraphs whose sentences all appear in the other filing, split,
+    /// merged or reordered. Not printed.
+    pub moved: usize,
+    pub unchanged: usize,
+    /// Base paragraphs a delta-style 10-Q does not restate (its comparison is
+    /// against the 10-K), counted rather than listed as removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_restated: Option<usize>,
+    /// Prose paragraphs compared: [this filing, base]. Tables are not compared.
+    pub paragraphs: [usize; 2],
+    /// Characters of this diff as JSON.
+    pub chars: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FilingDiffBase {
+    pub form: String,
+    pub filing_date: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_date: Option<String>,
+    pub accession_number: String,
+    pub section_id: String,
+    pub section_title: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FilingDiffParagraph {
+    /// Nearest subheading above the paragraph, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under: Option<String>,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FilingDiffChange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under: Option<String>,
+    /// The paragraph's opening words, in this filing.
+    pub at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_sentences: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_sentences: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -920,6 +1002,11 @@ pub struct XbrlFactRow {
     /// Balances in a 10-Q: vs the prior fiscal year-end balance sheet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vs_fye: Option<XbrlChange>,
+    /// Why an expected comparison is absent: the company did not report that
+    /// line for that date in the sources searched ("qoq: 2026-03-28 not
+    /// reported in 10-Q 2026-05-01 or SEC companyfacts").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

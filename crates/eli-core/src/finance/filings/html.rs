@@ -28,6 +28,10 @@ pub(crate) struct Block {
     pub text: String,
     /// Table rows only: the non-empty cells after `$`/`)`/`%` fragments are merged.
     pub cells: Vec<String>,
+    /// Table rows only: the first and last aligned column each cell occupies
+    /// (parallel to `cells`), so a row with blank cells still lines up with
+    /// its header. Empty for layout rows.
+    pub cols: Vec<(u16, u16)>,
     /// Table ordinal (1-based) for rows, 0 otherwise.
     pub table: u32,
     /// Row of a layout table (single text column / single row): reads as prose.
@@ -42,6 +46,7 @@ impl Block {
             kind: BlockKind::Para,
             text,
             cells: Vec::new(),
+            cols: Vec::new(),
             table: 0,
             layout: false,
             furniture: false,
@@ -541,6 +546,7 @@ impl Parser {
             kind: BlockKind::PageBreak,
             text: String::new(),
             cells: Vec::new(),
+            cols: Vec::new(),
             table: 0,
             layout: false,
             furniture: false,
@@ -972,6 +978,7 @@ impl Parser {
                 kind: BlockKind::Row,
                 text: r.text,
                 cells: r.cells,
+                cols: r.cols,
                 table: tb.ordinal,
                 layout: r.layout,
                 furniture: false,
@@ -1015,6 +1022,7 @@ pub(crate) struct RenderedRow {
     pub source_row: usize,
     pub text: String,
     pub cells: Vec<String>,
+    pub cols: Vec<(u16, u16)>,
     pub layout: bool,
 }
 
@@ -1118,6 +1126,7 @@ fn render_table(rows: &[Vec<RawCell>]) -> Vec<RenderedRow> {
                     source_row: i,
                     text: cells.join(" "),
                     cells,
+                    cols: Vec::new(),
                     layout: true,
                 }
             })
@@ -1265,6 +1274,7 @@ fn render_table(rows: &[Vec<RawCell>]) -> Vec<RenderedRow> {
         out.push(RenderedRow {
             source_row: ri,
             text: lines_out.join("\n"),
+            cols: cells.iter().map(|p| (p.k0 as u16, p.k1 as u16)).collect(),
             cells: cells.into_iter().map(|p| p.text).collect(),
             layout: false,
         });

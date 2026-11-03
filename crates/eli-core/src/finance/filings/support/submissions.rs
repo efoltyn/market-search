@@ -3,6 +3,9 @@
 pub(super) struct SecSubmissions {
     pub cik: String,
     pub name: Option<String>,
+    /// "0926": the fiscal year-end month and day.
+    #[serde(default)]
+    pub fiscal_year_end: Option<String>,
     pub filings: Option<SecFilings>,
 }
 

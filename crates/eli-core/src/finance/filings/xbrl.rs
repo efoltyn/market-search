@@ -648,7 +648,7 @@ pub(crate) fn build_xbrl(
         Some(p) if !facts.is_empty() => p,
         _ => {
             let hint = if structure.family == FormFamily::EightK {
-                "This document tags no numbers in XBRL (an 8-K cover tags only text). For an earnings 8-K, read the press-release tables with section=ex99.1 (or press_release); the quarter's numbers arrive as XBRL with the 10-Q / 10-K."
+                "This document tags no numbers in XBRL (an 8-K cover tags only text), and none of its EX-99 exhibits carries financial statement tables to read instead. Read the exhibits with section=ex99.1; the quarter's numbers arrive as XBRL with the 10-Q / 10-K."
             } else {
                 "No numeric inline-XBRL facts in this document; use section= for the statements' text."
             };
@@ -770,6 +770,24 @@ pub(crate) fn build_xbrl(
         } else {
             None
         };
+        // Name the sources searched, so a blank comparison reads as "not
+        // disclosed" rather than as a gap in the tool.
+        let mut missing: Vec<String> = Vec::new();
+        let mut sources: Vec<String> = vec!["this filing".to_string()];
+        if let Some((p, _)) = ctx.prior.as_ref() {
+            sources.push(p.label.clone());
+        }
+        if ctx.cf.is_some() && f.dims.is_empty() {
+            sources.push("SEC companyfacts".to_string());
+        }
+        let searched = sources.join(", ");
+        if qoq.is_none() && (months == 0 || months == 3) {
+            let target = f.end - chrono::Duration::days(91);
+            missing.push(format!("qoq: {target} not reported in {searched}"));
+        }
+        if yoy.is_none() {
+            missing.push(format!("yoy: {} not reported in {searched}", shift_years(f.end, -1)));
+        }
         let taxonomy_label = || {
             cf.and_then(|c| c.label(&f.concept))
                 .map(str::to_string)
@@ -809,6 +827,7 @@ pub(crate) fn build_xbrl(
             qoq,
             yoy,
             vs_fye,
+            missing,
         }
     };
 

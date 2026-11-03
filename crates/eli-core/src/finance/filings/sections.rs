@@ -228,7 +228,7 @@ pub(crate) fn title_key(s: &str) -> String {
     out.trim_end().to_string()
 }
 
-fn slug(s: &str) -> String {
+pub(crate) fn slug(s: &str) -> String {
     let k = title_key(s);
     let mut out: String = k
         .split(' ')
@@ -563,6 +563,17 @@ struct Candidate {
 
 fn find_item_headings(doc: &ParsedDoc, toc: &[bool], family: FormFamily) -> Vec<Candidate> {
     let mut cands: Vec<Candidate> = Vec::new();
+    // Running page headers ("Item 1A" atop every page, MSFT; "Item 1.
+    // Financial Statements (continued)", Ford): the copies after the first
+    // are flagged as furniture; the first is not, and would otherwise cut the
+    // real heading's section short.
+    let mut furniture_texts: HashMap<String, usize> = HashMap::new();
+    for b in doc.blocks.iter().filter(|b| b.furniture) {
+        let t = b.heading_text();
+        if t.chars().count() <= 80 {
+            *furniture_texts.entry(title_key(&t)).or_default() += 1;
+        }
+    }
     let mut current_part: u8 = 1;
     let mut seen_part2 = false;
     for i in 0..doc.blocks.len() {
@@ -570,6 +581,7 @@ fn find_item_headings(doc: &ParsedDoc, toc: &[bool], family: FormFamily) -> Vec<
             continue;
         }
         let text = doc.blocks[i].heading_text().to_string();
+        let running_header = furniture_texts.get(&title_key(&text)).is_some_and(|&n| n >= 2);
         if let Some(c) = PART_RE.captures(&text) {
             if text.chars().count() <= 120 {
                 let p = c.get(1).map(|m| m.as_str().to_ascii_lowercase()).unwrap_or_default();
@@ -603,6 +615,11 @@ fn find_item_headings(doc: &ParsedDoc, toc: &[bool], family: FormFamily) -> Vec<
         );
         let rest = c.get(3).map(|m| m.as_str()).unwrap_or("");
         if looks_like_cross_reference(rest) || is_checkbox_rest(rest) {
+            continue;
+        }
+        // Only a bare "Item 1A" or an "(continued)" line: a real heading can
+        // share its text with a running header (MA's "Item 4. Controls...").
+        if running_header && (rest.trim().is_empty() || title_key(rest).ends_with("continued")) {
             continue;
         }
         let words = item_text.split_whitespace().count();
@@ -706,7 +723,7 @@ fn is_statement_title_key(k: &str) -> bool {
 }
 
 /// Primary statement type from a heading's title key.
-fn statement_kind(k: &str) -> Option<&'static str> {
+pub(crate) fn statement_kind(k: &str) -> Option<&'static str> {
     if k.contains("notes to") || k.contains("schedule") || k.contains("index to") || k.contains(" see ") {
         return None;
     }
@@ -2064,20 +2081,10 @@ pub(crate) fn resolve_section<'a>(structure: &'a Structure, query: &str) -> Opti
             _ => vec!["item5"],
         }),
         "executive_compensation" | "compensation" => Some(vec!["item11"]),
-        "income_statement" | "is" | "operations" | "income" | "statement_of_operations" | "statements_of_operations"
-        | "p&l" | "pnl" | "earnings" | "statement_of_income" => Some(vec!["income_statement"]),
-        "comprehensive_income" | "oci" | "statement_of_comprehensive_income" => {
-            Some(vec!["comprehensive_income", "income_statement"])
-        }
-        "balance_sheet" | "bs" | "balance" | "financial_position" | "financial_condition" | "statement_of_financial_position" => {
-            Some(vec!["balance_sheet"])
-        }
-        "cash_flow" | "cash_flows" | "cashflow" | "cashflows" | "cf" | "statement_of_cash_flows" => {
-            Some(vec!["cash_flow"])
-        }
-        "equity" | "stockholders_equity" | "shareholders_equity" | "changes_in_equity" | "statement_of_equity" => {
-            Some(vec!["equity"])
-        }
+        n if statement_alias(n).is_some() => match statement_alias(n) {
+            Some("comprehensive_income") => Some(vec!["comprehensive_income", "income_statement"]),
+            other => other.map(|k| vec![k]),
+        },
         "notes" | "footnotes" | "notes_to_financial_statements" | "all_notes" => Some(vec!["notes"]),
         "auditor" | "auditors_report" | "auditor_report" | "audit_report" | "audit_opinion" => {
             Some(vec!["auditor_report"])
@@ -2159,6 +2166,25 @@ pub(crate) fn resolve_section<'a>(structure: &'a Structure, query: &str) -> Opti
         return resolve_note(secs, q);
     }
     None
+}
+
+/// Primary statement a query names ("cf", "statement_of_cash_flows",
+/// "balance sheet" -> "balance_sheet"), for queries already normalized to
+/// lowercase with `_` separators.
+pub(crate) fn statement_alias(norm: &str) -> Option<&'static str> {
+    match norm {
+        "income_statement" | "is" | "operations" | "income" | "statement_of_operations" | "statements_of_operations"
+        | "p&l" | "pnl" | "earnings" | "statement_of_income" => Some("income_statement"),
+        "comprehensive_income" | "oci" | "statement_of_comprehensive_income" => Some("comprehensive_income"),
+        "balance_sheet" | "bs" | "balance" | "financial_position" | "financial_condition" | "statement_of_financial_position" => {
+            Some("balance_sheet")
+        }
+        "cash_flow" | "cash_flows" | "cashflow" | "cashflows" | "cf" | "statement_of_cash_flows" => Some("cash_flow"),
+        "equity" | "stockholders_equity" | "shareholders_equity" | "changes_in_equity" | "statement_of_equity" => {
+            Some("equity")
+        }
+        _ => None,
+    }
 }
 
 /// A note that carries the asked-for topic as a subheading rather than in its
@@ -2290,6 +2316,34 @@ mod tests {
         h.push_str("<table><tr><td>Item 6.</td><td>Exhibits</td></tr></table><p>31.1 Certification</p>");
         h.push_str("<p>SIGNATURES</p><p>/s/ CFO</p></body></html>");
         h
+    }
+
+    #[test]
+    fn running_item_header_does_not_cut_the_real_heading() {
+        // Every risk-factor page opens with a bare "Item 1A" header (MSFT);
+        // only its first copy escapes the furniture flag.
+        let topics = ["competition", "supply chains", "cybersecurity", "regulation", "talent", "climate"];
+        let pages: String = topics
+            .iter()
+            .enumerate()
+            .map(|(k, t)| {
+                format!(
+                    "<p>{}</p><hr style=\"page-break-after:always\"/><p>Item 1A</p><p>Risks about {t} can materially and adversely affect our business, financial condition, results of operations and the trading price of our stock.</p>",
+                    40 + k
+                )
+            })
+            .collect();
+        let h = doc_10q().replace(
+            "<table><tr><td>Item 1A.</td><td>Risk Factors</td></tr></table><p>Many risks exist.</p>",
+            &format!("<p>ITEM 1A. RISK FACTORS</p><p>Our operations face the risks described below.</p>{pages}"),
+        );
+        let doc = parse_filing_html(&h);
+        let st = detect_structure(&doc, "10-Q");
+        let rf = resolve_section(&st, "risk_factors").unwrap();
+        let text = doc.text_range(rf.start, rf.end);
+        assert!(text.contains("Our operations face the risks described below."), "{text}");
+        let legal = resolve_section(&st, "part2_item1").unwrap();
+        assert!(!doc.text_range(legal.start, legal.end).contains("Our operations face"));
     }
 
     #[test]

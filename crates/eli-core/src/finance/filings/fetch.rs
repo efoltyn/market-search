@@ -22,6 +22,15 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
 
     // Structured modes read one filing closely; default to the latest one.
     let structured = req.toc || req.xbrl || req.sections.iter().any(|s| !s.trim().is_empty());
+    let diff_against = match req.diff_against.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => Some(normalize_accession(raw)?),
+        None => None,
+    };
+    if (req.diff || diff_against.is_some()) && !req.sections.iter().any(|s| !s.trim().is_empty()) {
+        return Err(Error::InvalidInput(
+            "diff compares sections: pass section= as well, e.g. section=risk_factors,mda".to_string(),
+        ));
+    }
     let accession = match req.accession.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => Some(normalize_accession(raw)?),
         None => None,
@@ -180,6 +189,45 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
         })
         .filter(|h| !h.primary_document.trim().is_empty() && !h.report_date.trim().is_empty())
         .collect();
+    // Every filing with a primary document (report date may be blank), for
+    // the base filing of a diff.
+    let all_filings: Vec<PeriodicRef> = (0..n)
+        .filter_map(|i| {
+            Some(PeriodicRef {
+                form: recent.form.get(i)?.to_ascii_uppercase(),
+                accession: recent.accession_number.get(i)?.clone(),
+                primary_document: recent.primary_document.as_ref()?.get(i)?.clone(),
+                report_date: recent
+                    .report_date
+                    .as_ref()
+                    .and_then(|r| r.get(i).cloned())
+                    .unwrap_or_default(),
+                filing_date: recent.filing_date.get(i)?.clone(),
+            })
+        })
+        .filter(|h| !h.primary_document.trim().is_empty())
+        .collect();
+    // Earnings releases (8-Ks under Item 2.02), newest first, for the
+    // previous quarter's release tables.
+    let releases: Vec<ReleaseRef> = (0..n)
+        .filter_map(|i| {
+            let form = recent.form.get(i)?.to_ascii_uppercase();
+            let items = recent.items.as_ref()?.get(i)?;
+            if !form.starts_with("8-K") || !items.split(',').any(|it| it.trim() == "2.02") {
+                return None;
+            }
+            Some(ReleaseRef {
+                form,
+                accession: recent.accession_number.get(i)?.clone(),
+                filing_date: recent.filing_date.get(i)?.clone(),
+            })
+        })
+        .collect();
+    let fiscal_year_end = submissions.fiscal_year_end.as_deref().and_then(|s| {
+        let d: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+        let (m, day) = (d.get(..2)?.parse::<u32>().ok()?, d.get(2..4)?.parse::<u32>().ok()?);
+        ((1..=12).contains(&m) && (1..=31).contains(&day)).then_some((m, day))
+    });
 
     let mut company_facts: Option<(Option<super::xbrl::CompanyFacts>, Option<String>)> = None;
     for mut doc in metas {
@@ -228,6 +276,10 @@ pub async fn fetch_filings(req: FilingsRequest, cache_dir: &Path) -> Result<Fili
                 accession_nodash: &accession_nodash,
                 base: &base,
                 history: &history,
+                all_filings: &all_filings,
+                diff_against: diff_against.as_deref(),
+                releases: &releases,
+                fiscal_year_end,
             };
             attach_structure(&ctx, &mut doc, &req, &mut company_facts).await?;
         }
@@ -324,6 +376,21 @@ struct StructureCtx<'a> {
     base: &'a str,
     /// The company's recent 10-Q / 10-K filings (for the prior period's XBRL).
     history: &'a [PeriodicRef],
+    /// Every recent filing, any form (the base of a section diff).
+    all_filings: &'a [PeriodicRef],
+    /// diff: compare against this accession instead of the previous filing.
+    diff_against: Option<&'a str>,
+    /// Its 8-K earnings releases, newest first (for the prior release's tables).
+    releases: &'a [ReleaseRef],
+    /// Fiscal year-end (month, day) from SEC submissions.
+    fiscal_year_end: Option<(u32, u32)>,
+}
+
+#[derive(Clone, Debug)]
+struct ReleaseRef {
+    form: String,
+    accession: String,
+    filing_date: String,
 }
 
 #[derive(Clone, Debug)]
@@ -586,13 +653,17 @@ async fn filing_doc_from_index_headers(
 }
 
 async fn filing_exhibits(ctx: &StructureCtx<'_>, doc: &FilingDoc) -> Vec<ExhibitDoc> {
-    let dir = ctx.filing_dir();
-    let Ok(h) = fetch_index_header(ctx.client, ctx.base, &dir, &doc.accession_number).await else {
+    exhibits_at(ctx.client, ctx.base, &ctx.filing_dir(), &doc.accession_number).await
+}
+
+/// The exhibits of any filing (by its EDGAR folder and cache dir).
+async fn exhibits_at(client: &reqwest::Client, base: &str, dir: &Path, accession: &str) -> Vec<ExhibitDoc> {
+    let Ok(h) = fetch_index_header(client, base, dir, accession).await else {
         return Vec::new();
     };
     // Raw sizes from index.json (cached by the regular download path too).
     let mut sizes: HashMap<String, u64> = HashMap::new();
-    if let Ok(bytes) = cached_archive_file(ctx.client, ctx.base, &dir, "index.json").await {
+    if let Ok(bytes) = cached_archive_file(client, base, dir, "index.json").await {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             if let Some(items) = v.pointer("/directory/item").and_then(|i| i.as_array()) {
                 for it in items {
@@ -773,6 +844,7 @@ async fn attach_structure(
     req: &FilingsRequest,
     company_facts: &mut Option<(Option<super::xbrl::CompanyFacts>, Option<String>)>,
 ) -> Result<()> {
+    use super::release::detect_release_tables;
     use super::sections::{detect_structure, form_family, resolve_by_subheading, resolve_section, FormFamily};
 
     let primary_name = doc
@@ -792,8 +864,10 @@ async fn attach_structure(
     let family = form_family(&doc.form);
     let queries = split_section_queries(&req.sections);
 
+    let is_8k = family == FormFamily::EightK;
     // Exhibits: listed for every form; read (for sizes) on 8-Ks / 6-Ks.
     let want_exhibits = req.toc
+        || (is_8k && (req.xbrl || !queries.is_empty()))
         || queries.iter().any(|q| {
             let l = q.to_ascii_lowercase();
             l.starts_with("ex") || l.contains("press") || l.contains("release") || l.chars().next().is_some_and(|c| c.is_ascii_digit())
@@ -803,6 +877,18 @@ async fn attach_structure(
     } else {
         Vec::new()
     };
+    // An 8-K / 6-K's EX-99 exhibits (the earnings release) read once: their
+    // tables are listed in the TOC, reachable by section, and read by xbrl.
+    let mut release_docs: Vec<ReleaseDoc> = Vec::new();
+    if is_8k && (req.toc || req.xbrl || !queries.is_empty()) {
+        for ex in exhibits.iter().take(12).filter(|e| e.number().starts_with("99")) {
+            if let Ok(b) = cached_archive_file(ctx.client, ctx.base, &dir, &ex.filename).await {
+                let parsed = parse_document(&b);
+                let tables = detect_release_tables(&parsed, &ex.id());
+                release_docs.push(ReleaseDoc { ex: ex.clone(), parsed, tables });
+            }
+        }
+    }
 
     if req.toc {
         let mut toc: Vec<FilingTocEntry> = structure
@@ -824,16 +910,14 @@ async fn attach_structure(
                 bytes: None,
             })
             .collect();
-        let read_exhibits = family == FormFamily::EightK;
+        // Every exhibit is read so its size is in the same unit as the sections:
+        // characters of clean text that section=<id> returns. Raw bytes only
+        // when the fetch fails.
         for ex in exhibits.iter().take(12) {
-            let chars = if read_exhibits {
-                cached_archive_file(ctx.client, ctx.base, &dir, &ex.filename)
-                    .await
-                    .ok()
-                    .map(|b| clean_document_text(&b).chars().count())
-            } else {
-                None
-            };
+            let chars = cached_archive_file(ctx.client, ctx.base, &dir, &ex.filename)
+                .await
+                .ok()
+                .map(|b| clean_document_text(&b).chars().count());
             toc.push(FilingTocEntry {
                 id: ex.id(),
                 title: exhibit_title(ex, &parsed),
@@ -843,6 +927,20 @@ async fn attach_structure(
                 bytes: if chars.is_none() { ex.bytes } else { None },
                 chars,
             });
+            // Its statements and titled tables, each its own section.
+            if let Some(rd) = release_docs.iter().find(|r| r.ex.filename == ex.filename) {
+                for t in rd.tables.iter().filter(|t| t.listed) {
+                    toc.push(FilingTocEntry {
+                        id: t.id.clone(),
+                        title: t.title.clone(),
+                        kind: if t.statement.is_some() { "statement" } else { "subsection" }.to_string(),
+                        level: 2,
+                        parent: Some(ex.id()),
+                        chars: Some(rd.parsed.chars_range(t.start, t.end)),
+                        bytes: None,
+                    });
+                }
+            }
         }
         let how = match structure.method {
             "item_headings" | "item_headings+toc" => "Sections come from the filing's Item headings.",
@@ -850,8 +948,18 @@ async fn attach_structure(
             "title_match" => "No Item headings or usable table of contents; sections were matched by standard item titles.",
             _ => "No section headings recognized; section=document returns the full clean text.",
         };
+        let release_note = release_docs
+            .iter()
+            .find(|r| r.tables.iter().any(|t| t.statement.is_some()))
+            .map(|r| {
+                let ex = r.ex.id();
+                format!(
+                    " The financial statements inside the earnings release are listed under {ex} ({ex}:income_statement, {ex}:balance_sheet, {ex}:cash_flow, ...); section=cash_flow reaches them, and xbrl=true returns the release's tables as data, as printed, before the 10-Q / 10-K XBRL exists."
+                )
+            })
+            .unwrap_or_default();
         doc.structure_note = Some(format!(
-            "{how} Get exact text with section=<id> (comma-separate several; chars is the size you will get back), passing accession={} to stay on this filing. Aliases: mda, risk_factors, business, income_statement, balance_sheet, cash_flow, equity, notes (all notes), note:<number or name>, auditor_report, exhibits, ex99.1, document (everything). xbrl=true returns the numbers with qoq/yoy changes.",
+            "{how} Get exact text with section=<id> (comma-separate several; chars is the size you will get back), passing accession={} to stay on this filing. Aliases: mda, risk_factors, business, income_statement, balance_sheet, cash_flow, equity, notes (all notes), note:<number or name>, auditor_report, exhibits, ex99.1, document (everything). xbrl=true returns the numbers with qoq/yoy changes.{release_note}",
             doc.accession_number
         ));
         doc.toc = Some(toc);
@@ -859,8 +967,53 @@ async fn attach_structure(
 
     if !queries.is_empty() {
         let mut outs: Vec<FilingSectionText> = Vec::new();
+        let diff_mode = req.diff || ctx.diff_against.is_some();
+        let mut diff_bases: Vec<DiffBaseDoc> = Vec::new();
         for q in &queries {
             let ql = q.to_ascii_lowercase();
+            // "ex99.1:cash_flow": a table inside an exhibit.
+            if let Some((pre, rest)) = ql.split_once(':') {
+                if let Some(ex) = match_exhibit(&exhibits, pre, false) {
+                    let rd = release_docs.iter().find(|r| r.ex.filename == ex.filename);
+                    match rd.and_then(|r| find_release_table(r, rest).map(|t| (r, t))) {
+                        Some((r, t)) => {
+                            let text = r.parsed.text_range(t.start, t.end);
+                            let full_chars = text.chars().count();
+                            let (text, truncated) = cap_text(text, req.max_chars);
+                            outs.push(FilingSectionText {
+                                requested: q.clone(),
+                                diff: None,
+                                id: Some(t.id.clone()),
+                                title: Some(t.title.clone()),
+                                chars: full_chars,
+                                text,
+                                truncated,
+                                error: None,
+                            });
+                        }
+                        None => {
+                            let ids: Vec<String> = rd
+                                .map(|r| r.tables.iter().filter(|t| t.listed).map(|t| t.id.clone()).collect())
+                                .unwrap_or_default();
+                            outs.push(FilingSectionText {
+                                requested: q.clone(),
+                                diff: None,
+                                id: None,
+                                title: None,
+                                chars: 0,
+                                text: String::new(),
+                                truncated: None,
+                                error: Some(if ids.is_empty() {
+                                    format!("no tables recognized inside {}; section={} returns its full text", ex.id(), ex.id())
+                                } else {
+                                    format!("no table '{rest}' inside {}. Available ids: {}", ex.id(), ids.join(", "))
+                                }),
+                            });
+                        }
+                    }
+                    continue;
+                }
+            }
             let whole = matches!(ql.as_str(), "document" | "full" | "all" | "full_text" | "everything");
             let exhibit = if ql.starts_with("ex") || ql.contains("press") || ql.contains("release") {
                 match_exhibit(&exhibits, q, false)
@@ -879,6 +1032,52 @@ async fn attach_structure(
                     None
                 }
             });
+            // A statement the 8-K itself doesn't carry: the one in its
+            // earnings release.
+            let release_hit = if !whole && section.is_none() && exhibit.is_none() {
+                release_fallback(&release_docs, q)
+            } else {
+                None
+            };
+            if diff_mode {
+                if whole || section.is_some() {
+                    let (id, title, chars) = match section {
+                        Some(s) => (s.id.clone(), s.title.clone(), parsed.chars_range(s.start, s.end)),
+                        None => (
+                            "document".to_string(),
+                            "Full document".to_string(),
+                            parsed.chars_range(0, parsed.blocks.len()),
+                        ),
+                    };
+                    let result = section_diff(ctx, doc, &parsed, q, section, &mut diff_bases).await;
+                    outs.push(FilingSectionText {
+                        requested: q.clone(),
+                        id: Some(id),
+                        title: Some(title),
+                        chars,
+                        text: String::new(),
+                        truncated: None,
+                        error: result.as_ref().err().cloned(),
+                        diff: result.ok(),
+                    });
+                    continue;
+                }
+                if exhibit.is_some() || release_hit.is_some() {
+                    outs.push(FilingSectionText {
+                        requested: q.clone(),
+                        diff: None,
+                        id: None,
+                        title: None,
+                        chars: 0,
+                        text: String::new(),
+                        truncated: None,
+                        error: Some(format!(
+                            "diff compares sections of the filing's main document (items, notes, subsections); '{q}' is an exhibit. Call without diff for its text."
+                        )),
+                    });
+                    continue;
+                }
+            }
             let (id, title, text) = if whole {
                 (
                     Some("document".to_string()),
@@ -893,6 +1092,7 @@ async fn attach_structure(
                     Err(e) => {
                         outs.push(FilingSectionText {
                             requested: q.clone(),
+                            diff: None,
                             id: Some(ex.id()),
                             title: None,
                             chars: 0,
@@ -903,11 +1103,15 @@ async fn attach_structure(
                         continue;
                     }
                 }
+            } else if let Some((r, t)) = release_hit {
+                (Some(t.id.clone()), Some(t.title.clone()), r.parsed.text_range(t.start, t.end))
             } else {
                 let mut available: Vec<String> = structure.sections.iter().map(|s| s.id.clone()).collect();
                 available.extend(exhibits.iter().map(|e| e.id()));
+                available.extend(release_docs.iter().flat_map(|r| r.tables.iter().filter(|t| t.listed).map(|t| t.id.clone())));
                 outs.push(FilingSectionText {
                     requested: q.clone(),
+                    diff: None,
                     id: None,
                     title: None,
                     chars: 0,
@@ -924,6 +1128,7 @@ async fn attach_structure(
             let (text, truncated) = cap_text(text, req.max_chars);
             outs.push(FilingSectionText {
                 requested: q.clone(),
+                diff: None,
                 id,
                 title,
                 chars: full_chars,
@@ -937,6 +1142,13 @@ async fn attach_structure(
 
     if req.xbrl {
         let mut facts = super::xbrl::extract_facts(&parsed);
+        if is_8k && facts.is_empty() {
+            // An earnings 8-K: the press release's tables as data.
+            if let Some(x) = release_xbrl(ctx, doc, &release_docs, req).await {
+                doc.xbrl = Some(x);
+                return Ok(());
+            }
+        }
         let periodic = matches!(family, FormFamily::TenK | FormFamily::TenQ | FormFamily::TwentyF);
         let mut extra_note: Option<String> = None;
         if (!facts.is_empty() || periodic) && company_facts.is_none() {
@@ -1021,6 +1233,416 @@ async fn attach_structure(
         ));
     }
     Ok(())
+}
+
+/// An earlier filing loaded as the base of a section diff.
+struct DiffBaseDoc {
+    filing: PeriodicRef,
+    parsed: super::html::ParsedDoc,
+    structure: super::sections::Structure,
+}
+
+/// The base filing's index in `cache`, loading it on first use.
+async fn load_diff_base(
+    ctx: &StructureCtx<'_>,
+    filing: &PeriodicRef,
+    cache: &mut Vec<DiffBaseDoc>,
+) -> std::result::Result<usize, String> {
+    if let Some(i) = cache.iter().position(|b| b.filing.accession == filing.accession) {
+        return Ok(i);
+    }
+    let nodash = filing.accession.replace('-', "");
+    let pbase = format!("https://www.sec.gov/Archives/edgar/data/{}/{}/", ctx.cik_num, nodash);
+    let pdir = ctx.cache_dir.join("finance").join("filings").join(ctx.ticker).join(&nodash);
+    let bytes = cached_archive_file(ctx.client, &pbase, &pdir, &filing.primary_document)
+        .await
+        .map_err(|e| format!("could not fetch the base filing {} ({}): {e}", filing.accession, filing.form))?;
+    let parsed = parse_document(&bytes);
+    let structure = super::sections::detect_structure(&parsed, &filing.form);
+    cache.push(DiffBaseDoc { filing: filing.clone(), parsed, structure });
+    Ok(cache.len() - 1)
+}
+
+/// The filing a diff compares against by default: the previous original
+/// (not amended) filing of the same form family, by report date.
+fn previous_filing<'a>(ctx: &StructureCtx<'a>, doc: &FilingDoc, family_of: &str) -> Option<&'a PeriodicRef> {
+    use super::sections::{form_family, FormFamily};
+    let fam = form_family(family_of);
+    let report = doc.report_date.clone().unwrap_or_default();
+    ctx.all_filings
+        .iter()
+        .filter(|h| h.accession != doc.accession_number && !h.form.contains("/A"))
+        .filter(|h| match fam {
+            FormFamily::Other => h.form.eq_ignore_ascii_case(family_of),
+            f => form_family(&h.form) == f,
+        })
+        .filter(|h| h.filing_date.as_str() <= doc.filing_date.as_str())
+        .filter(|h| {
+            if report.is_empty() || h.report_date.is_empty() {
+                h.filing_date.as_str() < doc.filing_date.as_str()
+            } else {
+                h.report_date.as_str() < report.as_str()
+            }
+        })
+        .max_by(|a, b| a.report_date.cmp(&b.report_date).then(a.filing_date.cmp(&b.filing_date)))
+}
+
+/// "Note 7 - Debt" -> "debt": a note's topic, since note numbers shift
+/// between filings.
+fn note_topic(title: &str) -> String {
+    let k = super::sections::title_key(title);
+    let mut words: Vec<&str> = k.split(' ').collect();
+    if words.first() == Some(&"note") {
+        words.remove(0);
+    }
+    if words.first().is_some_and(|w| w.chars().all(|c| c.is_ascii_digit())) {
+        words.remove(0);
+    }
+    words.join(" ")
+}
+
+/// The same section in the base filing: items and statements by id (ids are
+/// canonical per form), notes and subsections by title.
+fn match_base_section<'a>(
+    base: &'a super::sections::Structure,
+    cur: &super::sections::Section,
+    query: &str,
+) -> Option<&'a super::sections::Section> {
+    use super::sections::{resolve_section, SectionKind};
+    match cur.kind {
+        SectionKind::Note | SectionKind::Subsection => {
+            let topic = note_topic(&cur.title);
+            base.sections
+                .iter()
+                .find(|s| s.kind == cur.kind && !topic.is_empty() && note_topic(&s.title) == topic)
+                .or_else(|| {
+                    base.sections
+                        .iter()
+                        .find(|s| s.id == cur.id && super::sections::title_key(&s.title) == super::sections::title_key(&cur.title))
+                })
+        }
+        _ => base
+            .sections
+            .iter()
+            .find(|s| s.id == cur.id)
+            .or_else(|| resolve_section(base, query).filter(|s| s.kind == cur.kind)),
+    }
+}
+
+/// Compare one section (None: the whole document) against the same section
+/// of the base filing.
+async fn section_diff(
+    ctx: &StructureCtx<'_>,
+    doc: &FilingDoc,
+    parsed: &super::html::ParsedDoc,
+    query: &str,
+    cur: Option<&super::sections::Section>,
+    cache: &mut Vec<DiffBaseDoc>,
+) -> std::result::Result<FilingSectionDiff, String> {
+    use super::diff::{diff_paragraphs, section_paragraphs};
+    use super::sections::{form_family, resolve_section, FormFamily};
+
+    let (cstart, cend) = cur.map(|s| (s.start, s.end)).unwrap_or((0, parsed.blocks.len()));
+    let cur_paras = section_paragraphs(parsed, cstart, cend);
+
+    // The base filing: as asked, else the previous one of the same form.
+    let explicit: Option<PeriodicRef> = match ctx.diff_against {
+        Some(acc) => Some(match ctx.all_filings.iter().find(|h| h.accession == acc) {
+            Some(h) => h.clone(),
+            None => {
+                let d = filing_doc_from_index_headers(ctx.client, ctx.cache_dir, ctx.ticker, ctx.cik_num, acc)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                PeriodicRef {
+                    form: d.form.to_ascii_uppercase(),
+                    accession: d.accession_number.clone(),
+                    primary_document: d.primary_document.clone().unwrap_or_default(),
+                    report_date: d.report_date.clone().unwrap_or_default(),
+                    filing_date: d.filing_date.clone(),
+                }
+            }
+        }),
+        None => None,
+    };
+    if explicit.as_ref().is_some_and(|h| h.accession == doc.accession_number) {
+        return Err("diff_against is this same filing; pass an earlier accession".to_string());
+    }
+
+    // 10-Q risk factors update the 10-K's. Compare against the 10-K when it
+    // is newer than the previous 10-Q (the first quarter after year end), or
+    // when this section only points back at the annual report and restates
+    // what changed.
+    let mut ten_k_fallback: Option<(usize, usize)> = None;
+    let mut ten_k_newer = false;
+    let tenq_risk = explicit.is_none() && form_family(&doc.form) == FormFamily::TenQ && cur.is_some_and(|s| s.id == "part2_item1a");
+    if tenq_risk {
+        let k_date = previous_filing(ctx, doc, "10-K").map(|k| k.filing_date.clone());
+        let q_date = previous_filing(ctx, doc, &doc.form).map(|q| q.filing_date.clone());
+        ten_k_newer = match (k_date, q_date) {
+            (Some(k), Some(q)) => k > q,
+            (Some(_), None) => true,
+            _ => false,
+        };
+    }
+    if tenq_risk {
+        let cur_chars = parsed.chars_range(cstart, cend);
+        let cur_text = parsed.text_range(cstart, cend).to_ascii_lowercase();
+        let cur_text = cur_text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let refers_to_annual = cur_text.contains("form 10-k") || cur_text.contains("annual report");
+        if refers_to_annual {
+            if let Some(k) = previous_filing(ctx, doc, "10-K") {
+                let k = k.clone();
+                let bi = load_diff_base(ctx, &k, cache).await?;
+                if let Some(ks) = resolve_section(&cache[bi].structure, "risk_factors") {
+                    let k_chars = cache[bi].parsed.chars_range(ks.start, ks.end);
+                    if cur_chars * 2 < k_chars {
+                        ten_k_fallback = Some((cur_chars, k_chars));
+                    }
+                }
+            }
+        }
+    }
+
+    let base_ref: PeriodicRef = match (&explicit, ten_k_fallback) {
+        (Some(h), _) => h.clone(),
+        (None, Some(_)) => previous_filing(ctx, doc, "10-K").cloned().ok_or("no earlier 10-K found")?,
+        (None, None) if ten_k_newer => previous_filing(ctx, doc, "10-K").cloned().ok_or("no earlier 10-K found")?,
+        (None, None) => previous_filing(ctx, doc, &doc.form).cloned().ok_or_else(|| {
+            format!(
+                "no earlier {} filing found to compare against; pass diff_against=<accession>",
+                doc.form
+            )
+        })?,
+    };
+    if base_ref.primary_document.trim().is_empty() {
+        return Err(format!("base filing {} has no primary document", base_ref.accession));
+    }
+    let bi = load_diff_base(ctx, &base_ref, cache).await?;
+    let base = &cache[bi];
+
+    let base_section = match cur {
+        None => None,
+        Some(c) => {
+            let found = if ten_k_fallback.is_some() || ten_k_newer {
+                resolve_section(&base.structure, "risk_factors")
+            } else {
+                match_base_section(&base.structure, c, query)
+                    // 10-Q vs a 10-K (or back), asked for explicitly: by alias.
+                    .or_else(|| resolve_section(&base.structure, query).filter(|_| query.chars().any(|ch| ch.is_alphabetic())))
+            };
+            match found {
+                Some(s) => Some(s),
+                None => {
+                    return Err(format!(
+                        "the base filing ({} filed {}, {}) has no section matching {} ({}). Its sections: {}",
+                        base.filing.form,
+                        base.filing.filing_date,
+                        base.filing.accession,
+                        c.id,
+                        c.title,
+                        base.structure.sections.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")
+                    ))
+                }
+            }
+        }
+    };
+    let (bstart, bend) = base_section.map(|s| (s.start, s.end)).unwrap_or((0, base.parsed.blocks.len()));
+    let base_paras = section_paragraphs(&base.parsed, bstart, bend);
+
+    let mut diff = diff_paragraphs(&cur_paras, &base_paras, ten_k_fallback.is_none());
+    diff.base = FilingDiffBase {
+        form: base.filing.form.clone(),
+        filing_date: base.filing.filing_date.clone(),
+        report_date: Some(base.filing.report_date.clone()).filter(|r| !r.is_empty()),
+        accession_number: base.filing.accession.clone(),
+        section_id: base_section.map(|s| s.id.clone()).unwrap_or_else(|| "document".to_string()),
+        section_title: base_section.map(|s| s.title.clone()).unwrap_or_else(|| "Full document".to_string()),
+    };
+    if let Some((cur_chars, k_chars)) = ten_k_fallback {
+        diff.note = Some(format!(
+            "This 10-Q's risk factors ({cur_chars} chars) refer to the annual report and restate only part of it; compared against the {} filed {} ({k_chars} chars) instead of the previous 10-Q. 10-K paragraphs it does not restate are counted in not_restated, not listed as removed. diff_against=<previous 10-Q accession> compares quarter to quarter.",
+            base.filing.form, base.filing.filing_date
+        ));
+    } else if ten_k_newer {
+        diff.note = Some(format!(
+            "Compared against the {} filed {}: it came after the previous 10-Q, so its risk factors are the latest version this 10-Q updates.",
+            base.filing.form, base.filing.filing_date
+        ));
+    } else if explicit.is_none() && form_family(&doc.form) == FormFamily::TenQ {
+        // The first 10-Q after year end: the previous 10-Q came before the 10-K.
+        if let Some(k) = previous_filing(ctx, doc, "10-K").filter(|k| k.filing_date > base.filing.filing_date) {
+            diff.note = Some(format!(
+                "The previous 10-Q predates the 10-K filed {} (accession {}); year-to-date discussion and items revised in the 10-K show up as changes. diff_against={} compares with the 10-K instead.",
+                k.filing_date, k.accession, k.accession
+            ));
+        }
+    }
+    if diff.note.is_none() && (cur_paras.is_empty() || base_paras.is_empty()) {
+        diff.note = Some("One side has no prose paragraphs (tables are not compared; xbrl=true compares the numbers).".to_string());
+    }
+    diff.chars = serde_json::to_string(&diff).map(|j| j.chars().count()).unwrap_or(0);
+    Ok(diff)
+}
+
+/// An EX-99 exhibit of an 8-K / 6-K, parsed, with the tables found in it.
+struct ReleaseDoc {
+    ex: ExhibitDoc,
+    parsed: super::html::ParsedDoc,
+    tables: Vec<super::release::ReleaseTable>,
+}
+
+/// A table inside one exhibit, for the part after "ex99.1:" ("cash_flow",
+/// "cf", "segment_information").
+fn find_release_table<'a>(rd: &'a ReleaseDoc, rest: &str) -> Option<&'a super::release::ReleaseTable> {
+    let rest = rest.trim().to_ascii_lowercase();
+    let full = format!("{}:{rest}", rd.ex.id());
+    let listed = || rd.tables.iter().filter(|t| t.listed);
+    if let Some(t) = listed().find(|t| t.id == full) {
+        return Some(t);
+    }
+    let norm = rest.replace([' ', '-'], "_");
+    if let Some(kind) = super::sections::statement_alias(&norm) {
+        return listed().find(|t| t.statement == Some(kind));
+    }
+    let qk = super::sections::title_key(&rest);
+    if qk.len() < 3 {
+        return None;
+    }
+    listed().find(|t| super::sections::title_key(&t.title).contains(&qk))
+}
+
+/// `section=cash_flow` (or another statement alias) on an 8-K whose own
+/// document has no statements: the statement in its earnings release.
+fn release_fallback<'a>(docs: &'a [ReleaseDoc], q: &str) -> Option<(&'a ReleaseDoc, &'a super::release::ReleaseTable)> {
+    let norm = q.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    if let Some(kind) = super::sections::statement_alias(&norm) {
+        return docs
+            .iter()
+            .find_map(|r| r.tables.iter().find(|t| t.listed && t.statement == Some(kind)).map(|t| (r, t)));
+    }
+    let qk = super::sections::title_key(q);
+    if qk.len() < 4 {
+        return None;
+    }
+    docs.iter().find_map(|r| {
+        r.tables
+            .iter()
+            .find(|t| t.listed && super::sections::title_key(&t.title).contains(&qk))
+            .map(|t| (r, t))
+    })
+}
+
+/// xbrl=true on an earnings 8-K / 6-K: the release's tables in the XBRL
+/// shape, with quarter-over-quarter values from the previous release. None
+/// when no EX-99 exhibit carries financial statements.
+async fn release_xbrl(
+    ctx: &StructureCtx<'_>,
+    doc: &FilingDoc,
+    release_docs: &[ReleaseDoc],
+    req: &FilingsRequest,
+) -> Option<FilingXbrl> {
+    use super::release::{build_release_xbrl, detect_release_tables, extract_release, PriorRelease, ReleaseData, ReleaseOptions};
+    let rd = release_docs.iter().find(|r| r.tables.iter().any(|t| t.statement.is_some()))?;
+    let cur = extract_release(&rd.parsed, &rd.tables, &rd.ex.ex_type, ctx.fiscal_year_end);
+    let has_rows = cur.rows.iter().any(|r| r.statement.is_some());
+    if !has_rows {
+        let ids: Vec<String> = rd.tables.iter().filter(|t| t.statement.is_some()).map(|t| t.id.clone()).collect();
+        let mut notes = vec![format!(
+            "The release's statements ({}) were found, but their column headers could not be read as periods with confidence, so no numbers are returned as data. Read them as text with section=<id>.",
+            ids.join(", ")
+        )];
+        notes.extend(cur.notes.iter().cloned());
+        return Some(FilingXbrl {
+            source: format!("press release {} tables", rd.ex.ex_type),
+            document_type: Some(doc.form.clone()),
+            period_end: None,
+            fiscal_year: None,
+            fiscal_period: None,
+            facts_in_filing: cur.values,
+            selection: "none".to_string(),
+            returned: 0,
+            facts: Vec::new(),
+            notes,
+        });
+    }
+
+    // The previous earnings release: the latest earlier 8-K under Item 2.02
+    // whose statements end about a quarter before this one. (Statements
+    // headed only by quarter labels compare within the release.)
+    let target = cur.period_end.map(|end| end - chrono::Duration::days(91));
+    let mut prior: Option<(ReleaseData, String)> = None;
+    let mut checked: Vec<String> = Vec::new();
+    let is_6k = doc.form.to_ascii_uppercase().starts_with("6-K");
+    if let (false, Some(target)) = (is_6k, target) {
+        for r in ctx
+            .releases
+            .iter()
+            .filter(|r| r.accession != doc.accession_number && r.filing_date.as_str() < doc.filing_date.as_str())
+            .take(3)
+        {
+            let nodash = r.accession.replace('-', "");
+            let pbase = format!("https://www.sec.gov/Archives/edgar/data/{}/{}/", ctx.cik_num, nodash);
+            let pdir = ctx.cache_dir.join("finance").join("filings").join(ctx.ticker).join(&nodash);
+            let label = format!("{} {}", r.form, r.filing_date);
+            let mut found: Option<ReleaseData> = None;
+            for ex in exhibits_at(ctx.client, &pbase, &pdir, &r.accession)
+                .await
+                .iter()
+                .filter(|e| e.number().starts_with("99"))
+                .take(6)
+            {
+                let Ok(b) = cached_archive_file(ctx.client, &pbase, &pdir, &ex.filename).await else {
+                    continue;
+                };
+                let pd = parse_document(&b);
+                let tables = detect_release_tables(&pd, &ex.id());
+                if tables.iter().any(|t| t.statement.is_some()) {
+                    found = Some(extract_release(&pd, &tables, &ex.ex_type, ctx.fiscal_year_end));
+                    break;
+                }
+            }
+            match found {
+                Some(d) if d.period_end.is_some_and(|pe| (pe - target).num_days().abs() <= 15) => {
+                    prior = Some((d, label));
+                    break;
+                }
+                Some(d) => checked.push(format!(
+                    "{label} (period {})",
+                    d.period_end.map(|p| p.to_string()).unwrap_or_else(|| "unreadable".to_string())
+                )),
+                None => checked.push(format!("{label} (no statement tables)")),
+            }
+        }
+    }
+    let prior_note = if prior.is_some() {
+        None
+    } else if is_6k {
+        Some("a 6-K carries no item codes, so the previous release is not identified".to_string())
+    } else if target.is_none() {
+        Some("the statements print quarter labels, not dates, so the previous release is not matched".to_string())
+    } else if checked.is_empty() {
+        Some("no earlier 8-K under Item 2.02 in the company's recent filings".to_string())
+    } else {
+        Some(format!(
+            "no previous release covering {} ({} checked)",
+            target.map(|t| t.to_string()).unwrap_or_default(),
+            checked.join(", ")
+        ))
+    };
+    let prior_ref = prior.as_ref().map(|(d, l)| PriorRelease { data: d, label: l.clone() });
+    let opts = ReleaseOptions {
+        concepts: req
+            .xbrl_concepts
+            .iter()
+            .flat_map(|c| c.split(','))
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect(),
+        min_change_pct: req.xbrl_min_change_pct.unwrap_or(25.0).max(0.0),
+        fye: ctx.fiscal_year_end,
+        prior_note,
+    };
+    Some(build_release_xbrl(&cur, prior_ref.as_ref(), &opts, &doc.form))
 }
 
 struct FilingDownloadResult {

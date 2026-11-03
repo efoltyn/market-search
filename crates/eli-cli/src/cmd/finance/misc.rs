@@ -242,6 +242,8 @@ async fn cmd_finance_filings(args: FinanceFilingsArgs) -> Result<()> {
         xbrl,
         xbrl_concepts: args.xbrl_concepts,
         xbrl_min_change_pct: args.xbrl_min_change,
+        diff: args.diff || args.diff_against.is_some(),
+        diff_against: args.diff_against,
     };
 
     let resp = eli_core::finance::fetch_filings(req, &cache_dir)

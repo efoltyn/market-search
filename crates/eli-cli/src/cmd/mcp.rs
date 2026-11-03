@@ -1745,6 +1745,31 @@ fn mcp_filings_summary(v: &serde_json::Value) -> String {
                 .iter()
                 .map(|sct| {
                     let text = sct.get("text").and_then(|x| x.as_str()).unwrap_or("");
+                    if let Some(d) = sct.get("diff") {
+                        let n = |k: &str| d.get(k).and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+                        let base = d.get("base");
+                        return json!({
+                            "requested": sct.get("requested"),
+                            "id": sct.get("id"),
+                            "diff": {
+                                "base": format!(
+                                    "{} {} {}",
+                                    base.and_then(|b| b.get("form")).and_then(|x| x.as_str()).unwrap_or("?"),
+                                    base.and_then(|b| b.get("filing_date")).and_then(|x| x.as_str()).unwrap_or("?"),
+                                    base.and_then(|b| b.get("section_id")).and_then(|x| x.as_str()).unwrap_or("?"),
+                                ),
+                                "note": d.get("note"),
+                                "added": n("added"),
+                                "removed": n("removed"),
+                                "changed": n("changed"),
+                                "figures_only": d.get("figures_only"),
+                                "moved": d.get("moved"),
+                                "unchanged": d.get("unchanged"),
+                                "not_restated": d.get("not_restated"),
+                                "chars": d.get("chars"),
+                            },
+                        });
+                    }
                     json!({
                         "requested": sct.get("requested"),
                         "id": sct.get("id"),
@@ -1794,7 +1819,7 @@ fn mcp_filings_summary(v: &serde_json::Value) -> String {
     out.insert("filings".to_string(), json!(filings));
     out.insert(
         "_schema".to_string(),
-        json!(".filings[].{toc[].{id,title,kind,level,parent,chars}, sections[].{requested,id,title,chars,text}, xbrl.facts[].{concept,label,section,dims,period,unit,value,qoq,yoy,vs_fye}, raw_text}"),
+        json!(".filings[].{toc[].{id,title,kind,level,parent,chars}, sections[].{requested,id,title,chars,text,diff.{base,added[],removed[],changed[].{at,added_sentences,removed_sentences},figures_only}}, xbrl.facts[].{concept,label,section,dims,period,unit,value,qoq,yoy,vs_fye}, raw_text}"),
     );
     let obj = serde_json::Value::Object(out).to_string();
     // Fragment form: the caller wraps it in its own braces.
@@ -2607,6 +2632,17 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
                 }
                 if let Some(pct) = args.get("xbrl_min_change").and_then(|n| n.as_f64()) {
                     v.extend([s("--xbrl-min-change"), pct.to_string()]);
+                }
+                let diff_against = args
+                    .get("diff_against")
+                    .and_then(|a| a.as_str())
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty());
+                if args.get("diff").and_then(|b| b.as_bool()).unwrap_or(false) || diff_against.is_some() {
+                    v.push(s("--diff"));
+                }
+                if let Some(acc) = diff_against {
+                    v.extend([s("--diff-against"), s(acc)]);
                 }
             }
             let press_release = args
@@ -3737,6 +3773,15 @@ mod mcp_tool_tests {
         assert_eq!(built[pos("--max-chars") + 1], "9000");
         pos("--toc");
         pos("--xbrl");
+        // diff_against implies diff.
+        let diff = mcp_build_cli_args(
+            "finance_filings",
+            &serde_json::json!({"ticker": "AAPL", "section": "risk_factors", "diff_against": "0000320193-26-000013"}),
+        )
+        .expect("build args");
+        let dpos = |flag: &str| diff.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag} missing: {diff:?}"));
+        dpos("--diff");
+        assert_eq!(diff[dpos("--diff-against") + 1], "0000320193-26-000013");
         // A concept filter alone implies xbrl.
         let only_concepts = mcp_build_cli_args(
             "finance_filings",
