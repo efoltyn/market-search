@@ -953,6 +953,24 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
     };
 
     match tool {
+        "finance_odds" if v.get("schema_version").and_then(|s| s.as_str())
+            == Some("finance.odds.trades.v1") =>
+        {
+            // Kalshi trades: window totals plus the first prints inline.
+            let trades: Vec<serde_json::Value> = v
+                .get("trades")
+                .and_then(|t| t.as_array())
+                .map(|a| a.iter().take(12).cloned().collect())
+                .unwrap_or_default();
+            format!(
+                "\"ticker\":{},\"start\":{},\"end\":{},\"totals\":{},\"trades\":{}",
+                v.get("ticker").cloned().unwrap_or_default(),
+                v.get("start").cloned().unwrap_or_default(),
+                v.get("end").cloned().unwrap_or_default(),
+                v.get("_summary").cloned().unwrap_or_default(),
+                serde_json::Value::Array(trades),
+            )
+        }
         "finance_odds" => {
             // Preserve odds search ranking. The search layer already combines provider
             // rank, live hydration, relevance, freshness, and source diversity; MCP
@@ -1017,13 +1035,70 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 .and_then(|s| s.as_str())
                 .map(|s| format!(",\"change_baseline_as_of\":\"{}\"", &s[..16.min(s.len())]))
                 .unwrap_or_default();
+            // Grouped events that carry legs (Kalshi): one line per event with
+            // its distribution, so the summary shows whole outcome sets.
+            let event_lines: Vec<String> = v
+                .get("events")
+                .and_then(|e| e.as_array())
+                .map(|events| {
+                    events
+                        .iter()
+                        .filter_map(|e| {
+                            let legs = e.get("legs")?.as_array()?;
+                            if legs.is_empty() {
+                                return None;
+                            }
+                            let title = e.get("title").and_then(|t| t.as_str()).unwrap_or("?");
+                            let id = e.get("event_ticker").and_then(|t| t.as_str()).unwrap_or("?");
+                            let mut parts: Vec<String> = legs
+                                .iter()
+                                .take(6)
+                                .map(|l| {
+                                    let outcome: String = l
+                                        .get("outcome")
+                                        .and_then(|o| o.as_str())
+                                        .unwrap_or("?")
+                                        .chars()
+                                        .take(32)
+                                        .collect();
+                                    match l.get("p").and_then(|p| p.as_f64()) {
+                                        Some(p) => format!("{outcome} {:.0}%", p * 100.0),
+                                        None => outcome,
+                                    }
+                                })
+                                .collect();
+                            let more = legs.len().saturating_sub(6)
+                                + e.get("legs_omitted").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+                            if more > 0 {
+                                parts.push(format!("+{more} legs"));
+                            }
+                            let title: String = title.chars().take(80).collect();
+                            Some(format!("{title} [{id}]: {}", parts.join(", ")))
+                        })
+                        .take(5)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let events_json = if event_lines.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ",\"events\":[{}]",
+                    event_lines
+                        .iter()
+                        .map(|l| format!("\"{}\"", l.replace('"', "'")))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
             format!(
-                "\"query\":\"{}\",\"total_markets\":{},\"total_vol_usd\":{:.0},\"sources\":\"kalshi:{} poly:{}\"{},\"_schema\":\".markets[].{{title,probability_yes,volume_usd,source,ticker,event_ticker}}\",\"top\":[{}]",
+                "\"query\":\"{}\",\"total_markets\":{},\"total_vol_usd\":{:.0},\"sources\":\"kalshi:{} poly:{}\"{},\"_schema\":\".markets[].{{title,probability_yes,volume_usd,source,ticker,event_ticker}}\",\"top\":[{}]{}",
                 query, total, total_vol_usd, kalshi_count, poly_count, sync_age,
                 lines.iter()
                     .map(|l| format!("\"{}\"", l.replace('"', "'")))
                     .collect::<Vec<_>>()
-                    .join(",")
+                    .join(","),
+                events_json
             )
         }
         "finance_options" => {
@@ -2008,14 +2083,15 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             let list_tags = args.get("list_tags").and_then(|b| b.as_bool()).unwrap_or(false);
             let any_list = list_series || list_events || list_markets || list_tags;
             let search = args.get("search").and_then(|s| s.as_str());
-            if !any_list && search.is_none() {
-                anyhow::bail!("search required (or set list_series/list_events/list_markets/list_tags)");
+            let trades = args.get("trades").and_then(|b| b.as_bool()).unwrap_or(false);
+            if !any_list && search.is_none() && !trades {
+                anyhow::bail!("search required (or set list_series/list_events/list_markets/list_tags, or market + trades)");
             }
             if let Some(q) = search {
                 v.extend([s("--search"), s(q)]);
             }
             // Default --live=true only when searching; list endpoints don't need it.
-            if !any_list {
+            if !any_list && !trades {
                 let live = args.get("live").and_then(|l| l.as_bool()).unwrap_or(true);
                 if live {
                     v.push(s("--live"));
@@ -2091,6 +2167,24 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             if let Some(status) = args.get("status").and_then(|p| p.as_str()) {
                 v.extend([s("--status"), s(status)]);
+            }
+            if let Some(w) = args.get("closing_within").and_then(|p| p.as_str()) {
+                v.extend([s("--closing-within"), s(w)]);
+            }
+            if trades {
+                v.push(s("--trades"));
+                if let Some(t) = args.get("since").and_then(|p| p.as_str()) {
+                    v.extend([s("--since"), s(t)]);
+                }
+                if let Some(t) = args.get("until").and_then(|p| p.as_str()) {
+                    v.extend([s("--until"), s(t)]);
+                }
+                if let Some(n) = args.get("min_contracts").and_then(|n| n.as_f64()) {
+                    v.extend([s("--min-contracts"), n.to_string()]);
+                }
+                if let Some(n) = args.get("min_trade_usd").and_then(|n| n.as_f64()) {
+                    v.extend([s("--min-trade-usd"), n.to_string()]);
+                }
             }
             // Polymarket orderbook depth pass-through.
             if args

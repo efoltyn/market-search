@@ -386,6 +386,47 @@ async fn search_kalshi_nested_events(
     ))
 }
 
+/// Kalshi books list BIDS only, ascending: `yes` = YES bids, `no` = NO bids
+/// (a NO bid at p is a YES offer at 1-p). Returns best-first, `depth` levels.
+/// Current shape is `orderbook_fp` with dollar strings and fractional
+/// counts; the legacy `orderbook` shape had integer cents.
+fn parse_kalshi_orderbook(
+    body: &serde_json::Value,
+    depth: usize,
+) -> Option<(Vec<OddsOrderLevel>, Vec<OddsOrderLevel>)> {
+    let num = |v: &serde_json::Value| -> Option<f64> {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+            .filter(|x| x.is_finite())
+    };
+    let side = |levels: Option<&serde_json::Value>, cents: bool| -> Vec<OddsOrderLevel> {
+        let mut out: Vec<OddsOrderLevel> = levels
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|lvl| {
+                        let pair = lvl.as_array()?;
+                        let price = num(pair.first()?)?;
+                        let quantity = num(pair.get(1)?)?;
+                        Some(OddsOrderLevel {
+                            price: if cents { price / 100.0 } else { price },
+                            quantity,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+        out.truncate(depth);
+        out
+    };
+    if let Some(fp) = body.get("orderbook_fp") {
+        return Some((side(fp.get("yes_dollars"), false), side(fp.get("no_dollars"), false)));
+    }
+    let legacy = body.get("orderbook")?;
+    Some((side(legacy.get("yes"), true), side(legacy.get("no"), true)))
+}
+
 pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> {
     let client = &*crate::finance::shared_client::GENERAL;
 
@@ -1682,18 +1723,6 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
         if let Some(raw) = req.market_ticker.as_deref() {
             let ticker = raw.trim();
             if !ticker.is_empty() {
-                #[derive(Deserialize)]
-                struct OrderbookResp {
-                    orderbook: RawOrderbook,
-                }
-                #[derive(Deserialize)]
-                struct RawOrderbook {
-                    #[serde(default)]
-                    yes: Option<Vec<[i64; 2]>>,
-                    #[serde(default)]
-                    no: Option<Vec<[i64; 2]>>,
-                }
-
                 let url = format!("{}/markets/{}/orderbook", KALSHI_BASE_URL, ticker);
                 let resp =
                     client.get(url).send().await.map_err(|e| {
@@ -1705,34 +1734,14 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                         resp.status()
                     )));
                 }
-                let body: OrderbookResp = resp
+                let body: serde_json::Value = resp
                     .json()
                     .await
                     .map_err(|e| Error::Provider(format!("kalshi orderbook parse failed: {e}")))?;
-
                 let depth = req.orderbook_depth.unwrap_or(5).max(1);
-                let yes = body
-                    .orderbook
-                    .yes
-                    .unwrap_or_default()
-                    .into_iter()
-                    .take(depth)
-                    .map(|pair| OddsOrderLevel {
-                        price: pair[0],
-                        quantity: pair[1],
-                    })
-                    .collect::<Vec<_>>();
-                let no = body
-                    .orderbook
-                    .no
-                    .unwrap_or_default()
-                    .into_iter()
-                    .take(depth)
-                    .map(|pair| OddsOrderLevel {
-                        price: pair[0],
-                        quantity: pair[1],
-                    })
-                    .collect::<Vec<_>>();
+                let (yes, no) = parse_kalshi_orderbook(&body, depth).ok_or_else(|| {
+                    Error::Provider("kalshi orderbook parse failed: no orderbook_fp".to_string())
+                })?;
 
                 orderbook = Some(OddsOrderbook {
                     market_ticker: ticker.to_string(),
@@ -1847,6 +1856,23 @@ fn load_kalshi_market_candidates_from_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kalshi_orderbook_parses_fp_and_legacy_shapes() {
+        let fp = serde_json::json!({"orderbook_fp": {
+            "yes_dollars": [["0.6900", "6635.00"], ["0.7000", "91574.74"], ["0.7100", "258393.59"]],
+            "no_dollars": [["0.2700", "271513.51"], ["0.2800", "16740.05"]]
+        }});
+        let (yes, no) = parse_kalshi_orderbook(&fp, 2).unwrap();
+        assert_eq!(yes.len(), 2);
+        assert_eq!((yes[0].price, yes[0].quantity), (0.71, 258393.59));
+        assert_eq!(no[0].price, 0.28);
+        let legacy = serde_json::json!({"orderbook": {"yes": [[70, 10], [71, 5]], "no": null}});
+        let (yes, no) = parse_kalshi_orderbook(&legacy, 5).unwrap();
+        assert_eq!((yes[0].price, yes[0].quantity), (0.71, 5.0));
+        assert!(no.is_empty());
+        assert!(parse_kalshi_orderbook(&serde_json::json!({}), 5).is_none());
+    }
 
     #[test]
     fn kalshi_open_search_treats_active_as_live() {

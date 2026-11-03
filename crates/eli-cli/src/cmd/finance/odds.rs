@@ -37,6 +37,25 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         },
     };
 
+    // Kalshi trades: a non-numeric --market (numeric ids are Polymarket and
+    // take the Polymarket market-detail path below).
+    let kalshi_trades_market = args.market.as_deref().map(str::trim).filter(|m| {
+        !m.is_empty()
+            && !m.chars().all(|c| c.is_ascii_digit())
+            && !matches!(provider.as_deref(), Some("polymarket"))
+    });
+    if args.trades && kalshi_trades_market.is_some() {
+        return cmd_finance_odds_kalshi_trades(
+            args.market.as_deref().unwrap_or_default(),
+            args.since.as_deref(),
+            args.until.as_deref(),
+            args.min_contracts,
+            args.limit,
+            args.out.as_deref(),
+        )
+        .await;
+    }
+
     // When --search is provided alone (no --list-events/--list-markets/ticker),
     // search the local CSV cache from `eli finance sync` instead of hitting the API.
     let has_search = args.search.is_some();
@@ -59,6 +78,12 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
             args.include_mentions,
         )?;
         search_opts.min_volume_usd = args.min_volume;
+        search_opts.status_filter = KalshiSearchStatus::parse(args.status.as_deref())?;
+        search_opts.closing_within = args
+            .closing_within
+            .as_deref()
+            .map(parse_closing_within)
+            .transpose()?;
 
         // Check if local caches exist (SQLite FTS5 preferred, CSV fallback).
         let cache_dir = directories::ProjectDirs::from("", "", "eli")
@@ -134,12 +159,26 @@ async fn cmd_finance_odds(args: FinanceOddsArgs) -> Result<()> {
         .await;
     }
 
-    // Fail loud: the polymarket provider path ignores --market entirely and
-    // used to dump an unrelated 100-event listing (88KB of noise) instead.
-    if args.market.is_some() && matches!(provider.as_deref(), Some("polymarket")) {
-        anyhow::bail!(
-            "--market is not supported for --provider polymarket; use --search to find the market — its numeric id in markets[].ticker joins finance_timeseries directly"
-        );
+    // Polymarket market detail: a numeric --market is always a Polymarket id
+    // (Kalshi tickers are never all digits).
+    if let Some(market) = args.market.as_deref() {
+        let numeric = !market.trim().is_empty() && market.trim().chars().all(|c| c.is_ascii_digit());
+        if matches!(provider.as_deref(), Some("polymarket"))
+            || (numeric && !matches!(provider.as_deref(), Some("kalshi")))
+        {
+            if args.trades {
+                return cmd_polymarket_trades(
+                    market,
+                    args.since.as_deref(),
+                    args.until.as_deref(),
+                    args.min_trade_usd,
+                    args.limit,
+                    args.out.as_deref(),
+                )
+                .await;
+            }
+            return cmd_polymarket_market_detail(market, args.out.as_deref()).await;
+        }
     }
 
     let req = eli_core::finance::OddsRequest {
@@ -482,6 +521,14 @@ fn odds_market_stdout_row(row: &serde_json::Value) -> serde_json::Value {
             out["status"] = serde_json::json!(status);
         }
     }
+    // Venue-provided extras, kept only when a row carries them: settlement
+    // (result, settled_at), the venue's own day-ago move (chg_24h_pp), and
+    // the book when --orderbook asked for it.
+    for key in ["result", "settled_at", "chg_24h_pp", "orderbook", "orderbook_timestamp", "combo"] {
+        if let Some(v) = row.get(key).filter(|v| !v.is_null()) {
+            out[key] = v.clone();
+        }
+    }
     // Attach compact change_since (prob_delta_pp + vol_delta + the absolute baseline timestamp)
     if let Some(delta) = row.get("change_since") {
         let mut compact = serde_json::Map::new();
@@ -522,6 +569,20 @@ fn odds_event_stdout_row(row: &serde_json::Value) -> serde_json::Value {
             .map(serde_json::Value::String)
             .unwrap_or(serde_json::Value::Null),
     });
+    // Grouped-event extras, kept only when a row carries them: the whole
+    // leg distribution and the event's depth and close.
+    for key in [
+        "volume_usd",
+        "close_time",
+        "first_close_time",
+        "mutually_exclusive",
+        "legs",
+        "legs_omitted",
+    ] {
+        if let Some(v) = row.get(key).filter(|v| !v.is_null()) {
+            out[key] = v.clone();
+        }
+    }
     // Polymarket never populates category — omit the null instead of
     // repeating it on every event row.
     if let Some(cat) = row.get("category") {
@@ -661,9 +722,11 @@ fn compact_odds_search_stdout_payload(resp: &serde_json::Value) -> serde_json::V
     };
     let (event_hits, event_rest): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) =
         events.iter().partition(|row| event_word_hit(row));
-    let stdout_events: Vec<serde_json::Value> = event_hits
+    // Venues alternate inside each tier so one venue's long event list
+    // cannot push the other off the truncated slice.
+    let stdout_events: Vec<serde_json::Value> = interleave_rows_by_source(event_hits)
         .into_iter()
-        .chain(event_rest)
+        .chain(interleave_rows_by_source(event_rest))
         .take(STDOUT_DEFAULT_EVENT_LIMIT)
         .map(odds_event_stdout_row)
         .collect();
@@ -711,29 +774,75 @@ fn compact_odds_search_stdout_payload(resp: &serde_json::Value) -> serde_json::V
 }
 
 /// Display-order polish for the final live-search slice: markets whose title
-/// contains a query term as a WHOLE WORD rank ahead of substring-only hits
-/// ("warsh" → Kevin Warsh markets before Hormuz "warships" noise), and each
-/// group is volume-descending so the deepest market is scannable first
-/// (deep = information-rich, thin = one-trader opinion).
+/// (plus event_title when present) contains MORE query terms as WHOLE WORDS
+/// rank first ("ohio senate" → the
+/// Ohio race before every other Senate market; "warsh" → Kevin Warsh markets
+/// before Hormuz "warships" noise), and each tier is volume-descending so the
+/// deepest market is scannable first (deep = information-rich, thin =
+/// one-trader opinion).
+/// Round-robin rows across `source` values, keeping each source's order.
+fn interleave_rows_by_source(rows: Vec<&serde_json::Value>) -> Vec<&serde_json::Value> {
+    let mut queues: Vec<(String, std::collections::VecDeque<&serde_json::Value>)> = Vec::new();
+    for row in rows {
+        let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        match queues.iter_mut().find(|(s, _)| *s == source) {
+            Some((_, q)) => q.push_back(row),
+            None => queues.push((source, std::collections::VecDeque::from([row]))),
+        }
+    }
+    let mut out = Vec::new();
+    while queues.iter().any(|(_, q)| !q.is_empty()) {
+        for (_, q) in queues.iter_mut() {
+            if let Some(row) = q.pop_front() {
+                out.push(row);
+            }
+        }
+    }
+    out
+}
+
+/// The user's own words for display tiering: alias expansion ("fed" →
+/// decision, rates, fomc) helps discovery but would let alias-dense titles
+/// outrank titles that carry every word the user typed.
+fn live_display_terms(query: &str) -> Vec<String> {
+    let tokens = live_ascii_tokens(query);
+    let kept: Vec<String> = tokens
+        .iter()
+        .filter(|t| !live_is_stopword(t))
+        .cloned()
+        .collect();
+    if kept.is_empty() { tokens } else { kept }
+}
+
 fn order_live_markets_for_display(markets: &mut Vec<serde_json::Value>, query_terms: &[String]) {
-    let title_has_word = |m: &serde_json::Value, term: &str| -> bool {
-        m.get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|w| w == term)
-    };
-    let whole_word = |m: &serde_json::Value| -> bool {
-        query_terms.iter().any(|t| t.len() >= 3 && title_has_word(m, t))
+    let word_hits = |m: &serde_json::Value| -> usize {
+        // A leg's own title often drops the event's subject ("Will the
+        // maximum WTI front month settle..." under "How high will oil get"),
+        // so a row's event_title, when it carries one, counts too.
+        let title = [
+            m.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+            m.get("event_title").and_then(|v| v.as_str()).unwrap_or(""),
+        ]
+        .join(" ")
+        .to_ascii_lowercase();
+        let words: std::collections::HashSet<&str> =
+            title.split(|c: char| !c.is_alphanumeric()).collect();
+        let mut seen = std::collections::HashSet::new();
+        query_terms
+            .iter()
+            .filter(|t| t.len() >= 3 && words.contains(t.as_str()) && seen.insert(t.as_str()))
+            .count()
     };
     let vol = |m: &serde_json::Value| odds_market_volume_usd(m);
-    let (mut word_hits, mut rest): (Vec<_>, Vec<_>) =
-        markets.drain(..).partition(|m| whole_word(m));
-    word_hits.sort_by(|a, b| vol(b).partial_cmp(&vol(a)).unwrap_or(std::cmp::Ordering::Equal));
-    rest.sort_by(|a, b| vol(b).partial_cmp(&vol(a)).unwrap_or(std::cmp::Ordering::Equal));
-    *markets = word_hits;
-    markets.extend(rest);
+    // Within a tier, single questions before combo/parlay legs (rows a venue
+    // marks `combo`): a deep parlay must not outrank the race it bundles.
+    let combo = |m: &serde_json::Value| m.get("combo").and_then(|v| v.as_bool()).unwrap_or(false);
+    markets.sort_by(|a, b| {
+        word_hits(b)
+            .cmp(&word_hits(a))
+            .then_with(|| combo(a).cmp(&combo(b)))
+            .then_with(|| vol(b).partial_cmp(&vol(a)).unwrap_or(std::cmp::Ordering::Equal))
+    });
 }
 
 /// Round every JSON float in-place to 7 significant digits.
@@ -1314,6 +1423,10 @@ struct CsvSearchOptions {
     /// Minimum market volume in USD. Applied in live paths post-hydration
     /// (used to be a local-CSV-only filter that live search silently ignored).
     min_volume_usd: Option<f64>,
+    /// --status for live search (Kalshi: open | closed | settled | all).
+    status_filter: KalshiSearchStatus,
+    /// --closing-within for live search (Kalshi legs closing inside the window).
+    closing_within: Option<chrono::Duration>,
 }
 
 impl CsvSearchOptions {
@@ -1345,6 +1458,8 @@ impl CsvSearchOptions {
             policy,
             include_mentions,
             min_volume_usd: None,
+            status_filter: KalshiSearchStatus::Open,
+            closing_within: None,
         })
     }
 
@@ -1893,6 +2008,27 @@ async fn cmd_finance_odds_search_live_fts(
             if !hydrate_kalshi {
                 return (all_events, all_markets, errors);
             }
+            // Kalshi's live search index first; the local-catalog series
+            // hydration below is the fallback when it is unreachable.
+            match kalshi_live_search(
+                &client,
+                query,
+                &query_phrase,
+                &query_terms,
+                opts,
+                profile_applied,
+                delta_lookup.as_ref(),
+            )
+            .await
+            {
+                Ok(found) => return (found.events, found.markets, found.errors),
+                Err(error) => errors.push(serde_json::json!({
+                    "phase": "kalshi_search",
+                    "source": "kalshi",
+                    "error": error,
+                    "fallback": "local_catalog",
+                })),
+            }
             let mut hydrated = futures::stream::iter(kalshi_series_vec.iter().cloned().enumerate())
                 .map(|(idx, series_ticker)| {
                     let hydration = live_hydrate_kalshi_fts_series(
@@ -1961,13 +2097,14 @@ async fn cmd_finance_odds_search_live_fts(
     live_markets = select_diverse_live_markets(&ranked_live_markets, final_limit);
     // Ensure both sources represented if available.
     ensure_live_source_diversity(&mut live_markets, &ranked_live_markets, final_limit);
-    order_live_markets_for_display(&mut live_markets, &query_terms);
+    order_live_markets_for_display(&mut live_markets, &live_display_terms(query));
 
     // --orderbook: attach Polymarket book depth to the limited slice the user
     // sees (cheaper than running it across every ranked candidate).
     if let Some(depth) = orderbook_depth {
         attach_polymarket_orderbooks_to_live_markets(&mut live_markets, depth, &mut api_errors)
             .await;
+        attach_kalshi_orderbooks_to_live_markets(&mut live_markets, depth, &mut api_errors).await;
     }
 
     // decision_trace records CHOICES that altered the response, not execution narration.
@@ -2396,8 +2533,6 @@ fn write_back_live_markets_to_db(markets_json: &[serde_json::Value]) {
     let _ = total;
 }
 
-const LIVE_POLY_LIMIT_PER_TYPE: usize = 12;
-const LIVE_POLY_EXACT_TAG_EVENT_LIMIT: usize = 8;
 const LIVE_KALSHI_SERIES_PAGE_LIMIT: usize = 200;
 const LIVE_KALSHI_SERIES_MAX_PAGES: usize = 5;
 const LIVE_KALSHI_SERIES_FETCH_BUDGET: usize = 10;
@@ -2489,84 +2624,6 @@ struct LiveKalshiMarket {
     open_interest_fp: Option<String>,
     #[serde(default)]
     volume_fp: Option<String>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct LivePolymarketSearchResp {
-    #[serde(default)]
-    events: Vec<LivePolymarketEvent>,
-    #[serde(default)]
-    tags: Vec<LivePolymarketSearchTag>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct LivePolymarketSearchTag {
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    slug: Option<String>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct LivePolymarketEvent {
-    id: serde_json::Value,
-    #[serde(default)]
-    ticker: Option<String>,
-    #[serde(default)]
-    slug: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    active: Option<bool>,
-    #[serde(default)]
-    closed: Option<bool>,
-    #[serde(default)]
-    volume: Option<serde_json::Value>,
-    #[serde(default, rename = "volume24hr")]
-    volume_24hr: Option<serde_json::Value>,
-    #[serde(default)]
-    tags: Vec<LivePolymarketTag>,
-    #[serde(default)]
-    markets: Vec<LivePolymarketMarket>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct LivePolymarketTag {
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    slug: Option<String>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct LivePolymarketMarket {
-    id: serde_json::Value,
-    #[serde(default)]
-    question: Option<String>,
-    #[serde(default)]
-    slug: Option<String>,
-    #[serde(default)]
-    outcomes: serde_json::Value,
-    #[serde(default, rename = "outcomePrices")]
-    outcome_prices: serde_json::Value,
-    #[serde(default, rename = "clobTokenIds")]
-    clob_token_ids: serde_json::Value,
-    #[serde(default)]
-    volume: Option<serde_json::Value>,
-    #[serde(default, rename = "volume24hr")]
-    volume_24hr: Option<serde_json::Value>,
-    #[serde(default)]
-    active: Option<bool>,
-    #[serde(default)]
-    closed: Option<bool>,
-    #[serde(default, rename = "bestBid")]
-    best_bid: Option<f64>,
-    #[serde(default, rename = "bestAsk")]
-    best_ask: Option<f64>,
-    #[serde(default, rename = "lastTradePrice")]
-    last_trade_price: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -3918,67 +3975,6 @@ fn live_discover_kalshi_tags(
         .collect()
 }
 
-fn live_pick_exact_polymarket_tag(
-    search_tags: &[LivePolymarketSearchTag],
-    query_phrase: &str,
-    query_terms: &[String],
-) -> Option<String> {
-    let mut best: Option<(String, i64)> = None;
-    for tag in search_tags {
-        let label = live_normalize_whitespace(tag.label.as_deref().unwrap_or_default());
-        let slug = live_normalize_whitespace(tag.slug.as_deref().unwrap_or_default());
-        let candidates = [label.as_str(), slug.as_str()];
-        let mut matched = false;
-        let mut score = 0i64;
-        for candidate in candidates {
-            if candidate.is_empty() {
-                continue;
-            }
-            let candidate_lower = candidate.to_ascii_lowercase();
-            if candidate_lower == query_phrase {
-                matched = true;
-                score = score.max(40);
-            }
-            if query_terms
-                .iter()
-                .any(|term| candidate_lower == term.to_ascii_lowercase())
-            {
-                matched = true;
-                score = score.max(32);
-            }
-        }
-        if !matched {
-            continue;
-        }
-        let chosen = if !slug.is_empty() { slug } else { label };
-        if chosen.is_empty() {
-            continue;
-        }
-        let replace = match best.as_ref() {
-            Some((best_slug, best_score)) => {
-                score > *best_score || (score == *best_score && chosen < *best_slug)
-            }
-            None => true,
-        };
-        if replace {
-            best = Some((chosen, score));
-        }
-    }
-    best.map(|(slug, _)| slug)
-}
-
-fn live_polymarket_event_tags_text(event: &LivePolymarketEvent) -> String {
-    event
-        .tags
-        .iter()
-        .flat_map(|tag| [tag.label.as_deref(), tag.slug.as_deref()])
-        .flatten()
-        .map(live_normalize_whitespace)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn live_series_score(
     series: &LiveKalshiSeries,
     query_phrase: &str,
@@ -4089,292 +4085,6 @@ fn live_market_score(
     }
 
     (score, matched_terms)
-}
-
-async fn live_fetch_polymarket_results(
-    client: &reqwest::Client,
-    query: &str,
-    query_phrase: &str,
-    query_terms: &[String],
-    opts: &CsvSearchOptions,
-    profile_applied: SearchProfile,
-) -> std::result::Result<
-    (
-        Vec<serde_json::Value>,
-        Vec<serde_json::Value>,
-        Vec<String>,
-        Vec<serde_json::Value>,
-        Option<String>,
-    ),
-    String,
-> {
-    let power_grid_query = live_query_has_power_grid_intent(query);
-    let query_params = vec![
-        ("q", query.to_string()),
-        ("limit_per_type", LIVE_POLY_LIMIT_PER_TYPE.to_string()),
-        ("page", "1".to_string()),
-        ("events_status", "active".to_string()),
-        ("search_tags", "true".to_string()),
-        ("search_profiles", "false".to_string()),
-        ("optimized", "false".to_string()),
-    ];
-    let url = "https://gamma-api.polymarket.com/public-search";
-    let body: LivePolymarketSearchResp =
-        live_fetch_json(client, url, &query_params, "polymarket public-search").await?;
-
-    let exact_tag_slug = live_pick_exact_polymarket_tag(&body.tags, query_phrase, query_terms);
-    let mut supplemental_tag_events = Vec::new();
-    let mut api_errors = Vec::new();
-    if let Some(tag_slug) = exact_tag_slug.as_deref() {
-        let tag_query = vec![
-            ("tag_slug", tag_slug.to_string()),
-            ("related_tags", "false".to_string()),
-            ("active", "true".to_string()),
-            ("closed", "false".to_string()),
-            ("limit", LIVE_POLY_EXACT_TAG_EVENT_LIMIT.to_string()),
-            ("order", "volume24hr".to_string()),
-            ("ascending", "false".to_string()),
-        ];
-        let tag_url = "https://gamma-api.polymarket.com/events";
-        match live_fetch_json::<Vec<LivePolymarketEvent>>(
-            client,
-            tag_url,
-            &tag_query,
-            "polymarket events by tag",
-        )
-        .await
-        {
-            Ok(events) => supplemental_tag_events = events,
-            Err(error) => api_errors.push(serde_json::json!({
-                "phase": "event_discovery",
-                "source": "polymarket_tag_events",
-                "tag_slug": tag_slug,
-                "error": error,
-            })),
-        }
-    }
-
-    let mut combined_events: Vec<(LivePolymarketEvent, bool)> = body
-        .events
-        .into_iter()
-        .map(|event| (event, false))
-        .collect();
-    let mut seen_polymarket_event_keys = std::collections::HashSet::new();
-    for (event, _) in &combined_events {
-        let event_key = event
-            .slug
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| live_json_value_to_string(&event.id));
-        seen_polymarket_event_keys.insert(event_key);
-    }
-    for event in supplemental_tag_events {
-        let event_key = event
-            .slug
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| live_json_value_to_string(&event.id));
-        if seen_polymarket_event_keys.insert(event_key) {
-            combined_events.push((event, true));
-        }
-    }
-
-    let expansion_seed_events: Vec<LivePolymarketEvent> = combined_events
-        .iter()
-        .filter(|(event, _)| {
-            if !power_grid_query {
-                return true;
-            }
-            let title = event.title.as_deref().unwrap_or_default();
-            let category = event.category.as_deref().unwrap_or_default();
-            let tag_text = live_polymarket_event_tags_text(event);
-            live_market_has_power_grid_context(title, title, category, &tag_text)
-        })
-        .map(|(event, _)| event.clone())
-        .collect();
-    let expansion_terms = live_extract_expansion_terms(query_terms, &expansion_seed_events);
-    let mut events = Vec::new();
-    let mut markets = Vec::new();
-    let mut seen_events = std::collections::HashSet::new();
-    let mut seen_markets = std::collections::HashSet::new();
-
-    for (event_rank, (event, exact_tag_grounded)) in combined_events.into_iter().enumerate() {
-        let event_ticker = event
-            .ticker
-            .clone()
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| live_json_value_to_string(&event.id));
-        let title = event.title.clone().unwrap_or_else(|| event_ticker.clone());
-        let event_title = title.clone();
-        let event_ticker_value = event_ticker.clone();
-        let category = event.category.clone().unwrap_or_default();
-        let tag_text = live_polymarket_event_tags_text(&event);
-        let event_has_power_grid_context =
-            live_market_has_power_grid_context(&title, &event_title, &category, &tag_text);
-        let event_volume = event
-            .volume_24hr
-            .as_ref()
-            .and_then(live_parse_decimal_value)
-            .or_else(|| event.volume.as_ref().and_then(live_parse_decimal_value))
-            .unwrap_or(0.0);
-        let event_open = event.active.unwrap_or(true) && !event.closed.unwrap_or(false);
-        let mut matched_terms = Vec::new();
-        let (event_title_score, event_title_terms) =
-            live_scored_hits(&title, query_phrase, query_terms, 16, 10, 32);
-        let (event_slug_score, event_slug_terms) = live_scored_hits(
-            event.slug.as_deref().unwrap_or_default(),
-            query_phrase,
-            query_terms,
-            8,
-            5,
-            8,
-        );
-        let (event_category_score, event_category_terms) =
-            live_scored_hits(&category, query_phrase, query_terms, 5, 3, 0);
-        let (event_tag_score, event_tag_terms) =
-            live_scored_hits(&tag_text, query_phrase, query_terms, 4, 2, 0);
-        live_extend_unique(&mut matched_terms, &event_title_terms);
-        live_extend_unique(&mut matched_terms, &event_slug_terms);
-        live_extend_unique(&mut matched_terms, &event_category_terms);
-        live_extend_unique(&mut matched_terms, &event_tag_terms);
-
-        let mut event_score = event_title_score
-            + event_slug_score
-            + event_category_score
-            + event_tag_score
-            + live_volume_score(event_volume)
-            + (LIVE_POLY_LIMIT_PER_TYPE.saturating_sub(event_rank) as i64) * 3;
-        event_score += live_scored_hits(&tag_text, "", &expansion_terms, 2, 1, 0).0;
-        if exact_tag_grounded {
-            event_score += 18;
-        }
-        if event_open {
-            event_score += 15;
-        }
-        if profile_applied == SearchProfile::Macro {
-            event_score += macro_relevance_score(
-                &title,
-                &category,
-                &category,
-                &[],
-                &matched_terms,
-                &opts.policy,
-            );
-        }
-
-        if (!power_grid_query || event_has_power_grid_context)
-            && seen_events.insert(format!("polymarket::{event_ticker}"))
-        {
-            events.push(serde_json::json!({
-                "source": "polymarket",
-                "event_ticker": event_ticker,
-                "title": title,
-                "category": if category.is_empty() { serde_json::Value::Null } else { serde_json::json!(category) },
-                "slug": event.slug,
-                "match_score": event_score,
-            }));
-        }
-
-        for (market_rank, market) in event.markets.into_iter().enumerate() {
-            let market_title = market.question.clone().unwrap_or_else(|| title.clone());
-            let market_slug = market.slug.clone();
-            let outcomes = live_jsonish_string_array(&market.outcomes);
-            let outcome_prices = live_jsonish_string_array(&market.outcome_prices);
-            let probability_yes = live_probability_yes_from_outcomes(&outcomes, &outcome_prices);
-            let volume_usd = market
-                .volume_24hr
-                .as_ref()
-                .and_then(live_parse_decimal_value)
-                .or_else(|| market.volume.as_ref().and_then(live_parse_decimal_value))
-                .unwrap_or(event_volume);
-            let status = if market.active.unwrap_or(event_open) && !market.closed.unwrap_or(false) {
-                Some("open".to_string())
-            } else {
-                Some("closed".to_string())
-            };
-            if !live_is_open_status(status.as_deref()) {
-                continue;
-            }
-            if !category_matches_filter(&category, opts.category_filter.as_deref()) {
-                continue;
-            }
-            if power_grid_query
-                && !live_market_has_power_grid_context(
-                    &market_title,
-                    &event_title,
-                    &category,
-                    &tag_text,
-                )
-            {
-                continue;
-            }
-
-            let base_score =
-                event_score + (LIVE_POLY_LIMIT_PER_TYPE.saturating_sub(market_rank) as i64);
-            let (match_score, matched_terms) = live_market_score(
-                &market_title,
-                &event_title,
-                &category,
-                &tag_text,
-                query_phrase,
-                query_terms,
-                &expansion_terms,
-                volume_usd,
-                volume_usd,
-                0.0,
-                None,
-                status.as_deref(),
-                probability_yes,
-                base_score,
-                profile_applied,
-                &opts.policy,
-            );
-
-            let ticker = live_json_value_to_string(&market.id);
-            if !seen_markets.insert(format!("polymarket::{ticker}")) {
-                continue;
-            }
-            let clob_token_ids = live_jsonish_string_array(&market.clob_token_ids);
-
-            let mut market_json = serde_json::json!({
-                "source": "polymarket",
-                "ticker": ticker,
-                "title": market_title,
-                "event_ticker": event_ticker_value,
-                "yes_price": probability_yes,
-                "last_trade_price": market.last_trade_price,
-                "yes_bid": market.best_bid,
-                "yes_ask": market.best_ask,
-                "volume": live_volume_to_cents(volume_usd),
-                "volume_usd": volume_usd,
-                "status": status,
-                "probability_yes": probability_yes,
-                "slug": market_slug,
-                "category": if category.is_empty() { serde_json::Value::Null } else { serde_json::json!(category) },
-                "match_score": match_score,
-                "match_terms": matched_terms,
-                "score_components": {
-                    "provider_rank_bonus": base_score - event_score,
-                    "volume_usd": volume_usd,
-                },
-                "outcomes": if outcomes.is_empty() { serde_json::Value::Null } else { serde_json::json!(outcomes) },
-                "outcome_prices": if outcome_prices.is_empty() { serde_json::Value::Null } else { serde_json::json!(outcome_prices) },
-                "clob_token_ids": if clob_token_ids.is_empty() { serde_json::Value::Null } else { serde_json::json!(clob_token_ids) },
-            });
-            attach_market_delta(&mut market_json, "polymarket", &ticker, None);
-            markets.push(market_json);
-        }
-    }
-
-    if events.is_empty() && markets.is_empty() && !power_grid_query {
-        api_errors.push(serde_json::json!({
-            "phase": "event_discovery",
-            "source": "polymarket",
-            "error": "public-search returned no active events",
-        }));
-    }
-
-    Ok((events, markets, expansion_terms, api_errors, exact_tag_slug))
 }
 
 async fn live_fetch_kalshi_tags_by_categories(
@@ -4590,13 +4300,39 @@ async fn cmd_finance_odds_search_live_no_csv(
             }
         },
         async {
-            if fetch_kalshi {
-                live_discover_kalshi_series_for_query(&client, &query_phrase, &query_terms).await
-            } else {
-                LiveKalshiSeriesDiscovery::default()
+            if !fetch_kalshi {
+                return (None, LiveKalshiSeriesDiscovery::default());
+            }
+            // Kalshi's live search index first; series-catalog discovery is
+            // the fallback when it is unreachable.
+            match kalshi_live_search(
+                &client,
+                query,
+                &query_phrase,
+                &query_terms,
+                opts,
+                profile_applied,
+                delta_lookup.as_ref(),
+            )
+            .await
+            {
+                Ok(found) => (Some(found), LiveKalshiSeriesDiscovery::default()),
+                Err(error) => {
+                    let mut discovery =
+                        live_discover_kalshi_series_for_query(&client, &query_phrase, &query_terms)
+                            .await;
+                    discovery.api_errors.push(serde_json::json!({
+                        "phase": "kalshi_search",
+                        "source": "kalshi",
+                        "error": error,
+                        "fallback": "series_catalog",
+                    }));
+                    (None, discovery)
+                }
             }
         },
     );
+    let (kalshi_search_found, kalshi_discovery) = kalshi_discovery;
 
     let mut api_errors: Vec<serde_json::Value> = Vec::new();
     let mut polymarket_exact_tag = None;
@@ -4618,6 +4354,11 @@ async fn cmd_finance_odds_search_live_no_csv(
 
     api_errors.extend(kalshi_discovery.api_errors);
     let kalshi_matched_tags = kalshi_discovery.matched_tags;
+    if let Some(found) = kalshi_search_found {
+        api_errors.extend(found.errors);
+        all_events.extend(found.events);
+        live_markets.extend(found.markets);
+    }
 
     let mut ranked_series: Vec<RankedKalshiSeries> = kalshi_discovery
         .series
@@ -4800,12 +4541,13 @@ async fn cmd_finance_odds_search_live_no_csv(
     all_events.truncate(final_limit.max(8));
     live_markets = select_diverse_live_markets(&ranked_live_markets, final_limit);
     ensure_live_source_diversity(&mut live_markets, &ranked_live_markets, final_limit);
-    order_live_markets_for_display(&mut live_markets, &query_terms);
+    order_live_markets_for_display(&mut live_markets, &live_display_terms(query));
 
     // --orderbook: same as the FTS path — only attach to the slice the user sees.
     if let Some(depth) = orderbook_depth {
         attach_polymarket_orderbooks_to_live_markets(&mut live_markets, depth, &mut api_errors)
             .await;
+        attach_kalshi_orderbooks_to_live_markets(&mut live_markets, depth, &mut api_errors).await;
     }
 
     // decision_trace records CHOICES that altered the response, not execution narration.

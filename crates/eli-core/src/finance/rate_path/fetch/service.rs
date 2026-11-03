@@ -175,7 +175,7 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
                         let entry = meetings
                             .entry(meeting.date)
                             .or_insert_with(|| (meeting.clone(), MeetingAgg::default()));
-                        entry.1.add(bucket, prob, vol);
+                        entry.1.add("polymarket", bucket, prob, vol);
                     }
                 }
             }
@@ -227,7 +227,7 @@ pub async fn fetch_rate_path(req: RatePathRequest) -> Result<RatePathResponse> {
         let entry = meetings
             .entry(meeting.date)
             .or_insert_with(|| (meeting.clone(), MeetingAgg::default()));
-        entry.1.add(bucket, prob, vol);
+        entry.1.add("kalshi", bucket, prob, vol);
     }
 
     // Extract cumulative "hike/cut by date X" signals from Kalshi titles.

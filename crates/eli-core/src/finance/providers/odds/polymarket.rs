@@ -678,7 +678,8 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
     let mut page = 0usize;
     while page < max_pages {
         let url = format!(
-            "{}/events?active=true&closed=false&limit={}&offset={}",
+            // Most-traded first: an unordered page is whatever Gamma indexed last.
+            "{}/events?active=true&closed=false&order=volume24hr&ascending=false&limit={}&offset={}",
             POLYMARKET_GAMMA_URL, limit, offset
         );
         let resp = client

@@ -4,62 +4,71 @@ Prediction market odds. Real money = real belief.
 
 **Providers:** `kalshi` (default), `polymarket`, `auto`
 
-### Discovery workflow (IMPORTANT)
+### Search (start here)
 
-**Step 1: Find the series ticker**
+`--search` is live on both venues. Kalshi discovery uses Kalshi's own search
+index, so new and topical markets show up without a sync. Polymarket runs its
+search by relevance, lifetime volume and 24h volume, then ranks the union by
+match and depth; combo/parlay legs (`combo: true`) rank below single questions.
+
 ```bash
-eli finance odds --list-series --search "shutdown"
-eli finance odds --list-series --search "rate cut"
-eli finance odds --list-series --search "khamenei"
-eli finance odds --list-series --search "S&P"
+eli finance odds --search "ohio senate"            # that race's events, deepest first
+eli finance odds --search "fed" --provider kalshi
+eli finance odds --search "fed decision" --status settled   # settled legs carry result + settled_at
+eli finance odds --search "cpi" --closing-within 7d         # legs closing inside 7 days
+eli finance odds --search CONTROLS-2026-D                   # exact Kalshi market/event/series ticker
 ```
 
-**Step 2: Fetch odds by series**
+- `events[]` groups each Kalshi or Polymarket event with all its legs (`legs[]`: ticker,
+  outcome, p), so a Fed decision or a strike ladder reads as one
+  distribution. `mutually_exclusive: true` means at most one leg pays.
+  Past 12 legs the deepest are kept (`legs_omitted` counts the rest).
+- `markets[]` is leg-level: `ticker` joins `finance_timeseries` directly
+  for Kalshi and Polymarket alike. Rows add `chg_24h_pp` (the venue's own
+  day-ago move) when it moved. `volume_usd` is lifetime volume on both
+  venues; `volume_24h_usd` is the last day.
+- `--status`: `open` (default), `closed`, `settled`, `all` (both venues).
+- `--category` on Polymarket also matches event tags (`--category crypto`).
+- `--orderbook --depth N`: Kalshi rows get `orderbook.yes_bids` /
+  `orderbook.no_bids` as `[price, contracts]`, best first. Kalshi books hold
+  bids only; a NO bid at q is a YES offer at 1-q.
+
+### Kalshi trades
+
 ```bash
-eli finance odds --series KXGOVSHUTLENGTH
-eli finance odds --series KXRATECUTS
-eli finance odds --series KXKHAMENEIOUT
-eli finance odds --series KXINX
+eli finance odds --market CONTROLS-2026-D --trades --since 6h --min-contracts 5000
+eli finance odds --market KXFEDDECISION-26JUL-H0 --trades --since 2026-07-29T17:30:00Z --until 2026-07-29T18:10:00Z
 ```
 
-**DO NOT** use `--list-events | grep` or `--category X | grep`. Use `--list-series --search` instead.
+Tick-level prints (UTC timestamp, yes price, contracts, taker side, block
+flag). `_summary` totals contracts and taker-yes vs taker-no contracts over
+the window; `trades[]` lists the largest prints (`--limit`, default 50) in
+time order. Prints older than Kalshi's historical cutoff come from its
+archive automatically.
 
-### Common tickers
-
-| Topic | Ticker | Example |
-|-------|--------|---------|
-| Gov shutdown | KXGOVSHUTLENGTH | >3 days: 94% |
-| Fed rate cuts | KXRATECUTS | # of cuts in 2026 |
-| S&P 500 daily | KXINX | Range brackets |
-| S&P 500 yearly | INXY | Year-end targets |
-| Khamenei | KXKHAMENEIOUT | Leave by Sep: 47% |
-| Greenland | KXGREENLAND | Trump buys: 31% |
-| Super Bowl | KXSB | Team odds |
-| Trump markets | search "trump" | 45+ events |
-
-### Fetching odds
+### Polymarket market and trades
 
 ```bash
-# By series (after discovery)
-eli finance odds --series KXGREENLAND
+eli finance odds --market 562793                                  # one market, every sibling leg
+eli finance odds --market 562793 --trades --since 6h --min-trade-usd 5000
+eli finance odds --market 542538 --trades --since 2025-09-17 --until 2025-09-17
+```
 
-# By event (specific instance)
-eli finance odds --event KXGREENLAND-29
+`--market <id>` returns bid/ask, lifetime and 24h volume, open interest,
+1h/24h/1w/1mo moves, close or settlement time and result, the resolution
+rules, every sibling leg, and `timeseries` (which ticker returns which
+outcome: `562793` is Yes, `562793:NO` the No token). `--trades` uses the
+Kalshi trades shape (`t`, `yes_price`, `contracts`, `taker`) plus `usd` and a
+short `wallet`, so repeat prints by one wallet show; `taker: yes` means the
+taker bought Yes or sold No.
 
-# By market (with orderbook depth)
-eli finance odds --market KXGREENLAND-29-27 --orderbook
+### Fetching by ticker
 
-# Browse all events
-eli finance odds --list-events --limit 50
-
-# Polymarket tags
+```bash
+eli finance odds --series KXFEDDECISION
+eli finance odds --event KXFEDDECISION-26DEC
+eli finance odds --market CONTROLS-2026-D --orderbook
 eli finance odds --list-tags --provider polymarket
-
-# Local CSV search (breadth preserved by default)
-eli finance odds --search "recession"
-
-# Optional opt-in filters for local CSV search
-eli finance odds --search "unemployment" --country US --min-volume 10000 --top 5
 ```
 
 ### Reading the output

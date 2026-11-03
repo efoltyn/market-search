@@ -52,7 +52,7 @@ async fn fetch_rate_path_live(
                 let entry = meetings
                     .entry(meeting.date)
                     .or_insert_with(|| (meeting.clone(), MeetingAgg::default()));
-                entry.1.add(bucket, m.probability, m.volume);
+                entry.1.add("kalshi", bucket, m.probability, m.volume);
             }
 
             let cumulative_re = regex::Regex::new(
@@ -108,7 +108,7 @@ async fn fetch_rate_path_live(
                     let entry = meetings
                         .entry(meeting.date)
                         .or_insert_with(|| (meeting.clone(), MeetingAgg::default()));
-                    entry.1.add(bucket, em.probability, em.volume);
+                    entry.1.add("polymarket", bucket, em.probability, em.volume);
                 }
             }
             Err(e) => warnings.push(format!("polymarket {slug} fetch failed: {e}")),

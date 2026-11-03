@@ -17,23 +17,17 @@ struct MeetingMeta {
     label: String,
 }
 
-/// Per-meeting aggregator. Stores VOLUME-WEIGHTED sums so multiple markets
-/// pricing the same outcome (e.g., one Polymarket + one Kalshi for "Fed holds in
-/// June 2026") collapse into a single liquidity-weighted probability rather than
-/// being max-aggregated. Junk thin markets ($1K volume) no longer override deep
-/// markets ($17M volume).
+/// Per-meeting aggregator. Within one venue the legs that fall in a bucket
+/// are mutually exclusive outcomes (Kalshi H25 + H26 are both "hike"), so
+/// their probabilities SUM. Across venues each venue's bucket probability is
+/// VOLUME-WEIGHTED, so one Polymarket + one Kalshi view of "Fed holds in June"
+/// collapse into a liquidity-weighted probability and thin junk markets ($1K)
+/// do not override deep ones ($17M). (Averaging legs inside a bucket used to
+/// report Kalshi's 74.5% + 1.5% hike legs as a ~42% hike.)
 #[derive(Debug, Clone, Default)]
 struct MeetingAgg {
-    /// sum_i (prob_i * volume_i)
-    hold_prob_x_vol: f64,
-    cut_25bp_prob_x_vol: f64,
-    cut_50bp_plus_prob_x_vol: f64,
-    hike_prob_x_vol: f64,
-    /// sum of volumes from markets that contributed to each bucket
-    hold_vol: i64,
-    cut_25bp_vol: i64,
-    cut_50bp_plus_vol: i64,
-    hike_vol: i64,
+    /// (source, bucket) → (summed leg probability, summed leg volume)
+    by_source: std::collections::BTreeMap<(String, u8), (f64, i64)>,
     /// Total volume across all markets contributing to this meeting
     volume: i64,
     /// Count of distinct markets aggregated (after de-dup)
@@ -41,38 +35,33 @@ struct MeetingAgg {
 }
 
 impl MeetingAgg {
-    fn add(&mut self, bucket: FedBucket, prob: f64, vol: i64) {
-        let v_f = vol as f64;
-        match bucket {
-            FedBucket::Hold => {
-                self.hold_prob_x_vol += prob * v_f;
-                self.hold_vol += vol;
-            }
-            FedBucket::Cut25 => {
-                self.cut_25bp_prob_x_vol += prob * v_f;
-                self.cut_25bp_vol += vol;
-            }
-            FedBucket::Cut50Plus => {
-                self.cut_50bp_plus_prob_x_vol += prob * v_f;
-                self.cut_50bp_plus_vol += vol;
-            }
-            FedBucket::Hike => {
-                self.hike_prob_x_vol += prob * v_f;
-                self.hike_vol += vol;
-            }
-        }
+    fn add(&mut self, source: &str, bucket: FedBucket, prob: f64, vol: i64) {
+        let key = (source.to_string(), bucket as u8);
+        let slot = self.by_source.entry(key).or_insert((0.0, 0));
+        slot.0 += prob;
+        slot.1 += vol;
         self.volume += vol;
         self.n_markets += 1;
     }
 
-    /// Volume-weighted probability per bucket. Returns 0.0 if no volume contributed.
+    /// Per bucket: each venue's summed probability, volume-weighted across
+    /// venues. Returns 0.0 for a bucket no venue priced.
     fn weighted(&self) -> (f64, f64, f64, f64) {
-        let safe = |sum: f64, vol: i64| if vol > 0 { sum / vol as f64 } else { 0.0 };
+        let bucket = |b: FedBucket| -> f64 {
+            let (mut px, mut v) = (0.0_f64, 0_i64);
+            for ((_, key), (p, vol)) in &self.by_source {
+                if *key == b as u8 {
+                    px += p.clamp(0.0, 1.0) * *vol as f64;
+                    v += vol;
+                }
+            }
+            if v > 0 { px / v as f64 } else { 0.0 }
+        };
         (
-            safe(self.hold_prob_x_vol, self.hold_vol),
-            safe(self.cut_25bp_prob_x_vol, self.cut_25bp_vol),
-            safe(self.cut_50bp_plus_prob_x_vol, self.cut_50bp_plus_vol),
-            safe(self.hike_prob_x_vol, self.hike_vol),
+            bucket(FedBucket::Hold),
+            bucket(FedBucket::Cut25),
+            bucket(FedBucket::Cut50Plus),
+            bucket(FedBucket::Hike),
         )
     }
 }
@@ -97,3 +86,25 @@ enum FedBucket {
     Hike,
 }
 
+
+#[cfg(test)]
+mod meeting_agg_tests {
+    use super::*;
+
+    #[test]
+    fn legs_in_one_bucket_sum_within_a_venue_and_weight_across_venues() {
+        let mut agg = MeetingAgg::default();
+        // Kalshi Dec: H25 74.5% + H26 1.5% are both "hike".
+        agg.add("kalshi", FedBucket::Hike, 0.745, 674_179);
+        agg.add("kalshi", FedBucket::Hike, 0.015, 529_666);
+        agg.add("kalshi", FedBucket::Hold, 0.245, 892_504);
+        let (hold, _, _, hike) = agg.weighted();
+        assert!((hike - 0.76).abs() < 1e-9);
+        assert!((hold - 0.245).abs() < 1e-9);
+        // A second venue is volume-weighted against the first.
+        agg.add("polymarket", FedBucket::Hike, 0.70, 1_203_845);
+        let (_, _, _, hike) = agg.weighted();
+        assert!((hike - 0.73).abs() < 1e-9);
+        assert_eq!(agg.n_markets, 4);
+    }
+}

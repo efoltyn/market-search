@@ -2390,8 +2390,10 @@ pub struct OddsMarket {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OddsOrderLevel {
-    pub price: i64,
-    pub quantity: i64,
+    /// Bid price on the 0-1 probability scale (Kalshi quotes sub-cent ticks).
+    pub price: f64,
+    /// Resting contracts at that price (Kalshi counts are fractional).
+    pub quantity: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -344,11 +344,13 @@ pub(crate) async fn sync_polymarket_events(
             });
 
             let yes_price = probability_yes.map(|p| (p * 100.0).round() as i64);
-            let volume = m.volume_num.map(|v| v.round() as i64).or_else(|| {
+            // Lifetime volume in CENTS: the local index stores cents for every
+            // source (search divides by 100). Whole dollars here read 100x low.
+            let volume = m.volume_num.map(|v| (v * 100.0).round() as i64).or_else(|| {
                 m.volume
                     .as_ref()
                     .and_then(json_value_to_f64)
-                    .map(|v| v.round() as i64)
+                    .map(|v| (v * 100.0).round() as i64)
             });
 
             all_markets.push(OddsListedMarket {

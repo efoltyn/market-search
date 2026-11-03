@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, HashSet};
 const KALSHI_CANDLESTICKS_URL: &str =
     "https://api.elections.kalshi.com/trade-api/v2/markets/candlesticks";
 const POLYMARKET_GAMMA_URL: &str = "https://gamma-api.polymarket.com";
-const POLYMARKET_CLOB_HISTORY_URL: &str = "https://clob.polymarket.com/prices-history";
 
 /// Collapse redundant candle fields in a serialized timeseries response:
 /// - when o==h==l==c (macro point series, carried-forward prediction-market
@@ -85,7 +84,10 @@ fn emit_timeseries_stdout(resp: &eli_core::finance::TimeseriesResponse) -> Resul
         for e in errs {
             let informational = matches!(
                 e.stage.as_deref(),
-                Some("granularity_downgrade") | Some("data_quality") | Some("ibkr_fallback")
+                Some("granularity_downgrade")
+                    | Some("data_quality")
+                    | Some("ibkr_fallback")
+                    | Some("event_legs")
             );
             if informational {
                 notices.push(e);
@@ -1792,6 +1794,18 @@ fn parse_prediction_market_ticker(raw: &str) -> Option<PredictionMarketRequest> 
     }
 
     if let Some(rest) = trimmed.strip_prefix("POLYMARKET:") {
+        // POLYMARKET:EVENT:<id|slug>[:NO] expands to every leg of the event.
+        if let Some(event) = rest
+            .strip_prefix("EVENT:")
+            .or_else(|| rest.strip_prefix("event:"))
+        {
+            let (key, side) = split_prediction_market_side(event)?;
+            return Some(PredictionMarketRequest {
+                provider: PredictionMarketProvider::Polymarket,
+                market: format!("EVENT:{key}"),
+                side,
+            });
+        }
         let (market, side) = split_prediction_market_side(rest)?;
         return Some(PredictionMarketRequest {
             provider: PredictionMarketProvider::Polymarket,
@@ -1802,7 +1816,9 @@ fn parse_prediction_market_ticker(raw: &str) -> Option<PredictionMarketRequest> 
 
     if let Some((market, side)) = trimmed.rsplit_once(':') {
         let side = parse_prediction_market_side(side)?;
-        if market.starts_with("KX") && market.contains('-') {
+        if (market.starts_with("KX") && market.contains('-'))
+            || looks_like_bare_kalshi_market(market)
+        {
             return Some(PredictionMarketRequest {
                 provider: PredictionMarketProvider::Kalshi,
                 market: market.to_string(),
@@ -1818,7 +1834,7 @@ fn parse_prediction_market_ticker(raw: &str) -> Option<PredictionMarketRequest> 
         }
     }
 
-    if trimmed.starts_with("KX") && trimmed.contains('-') {
+    if (trimmed.starts_with("KX") && trimmed.contains('-')) || looks_like_bare_kalshi_market(trimmed) {
         return Some(PredictionMarketRequest {
             provider: PredictionMarketProvider::Kalshi,
             market: trimmed.to_string(),
@@ -1835,6 +1851,31 @@ fn parse_prediction_market_ticker(raw: &str) -> Option<PredictionMarketRequest> 
     }
 
     None
+}
+
+/// A Kalshi MARKET ticker without the KX prefix (CONTROLS-2026-D,
+/// SENATEOHS-26-R, older FED-23DEC-T5.25): uppercase SERIES-EVENT-LEG with
+/// at least two dashes, a letter-led series of 3+ characters, and a digit in
+/// the event segment. Yahoo symbols never take that shape (BRK-B, BTC-USD,
+/// RDS-A have one dash; ^VIX, CL=F, USD/JPY=X carry other characters), so
+/// finance_odds tickers join without a prefix. One-dash Kalshi EVENT
+/// tickers (CONTROLS-2026) stay ambiguous: use KALSHI:.
+fn looks_like_bare_kalshi_market(raw: &str) -> bool {
+    let parts: Vec<&str> = raw.split('-').collect();
+    if parts.len() < 3 || parts.iter().any(|p| p.is_empty()) {
+        return false;
+    }
+    if !raw
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '-' | '.'))
+    {
+        return false;
+    }
+    let series = parts[0];
+    series.len() >= 3
+        && series.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && !series.contains('.')
+        && parts[1].chars().any(|c| c.is_ascii_digit())
 }
 
 fn split_prediction_market_side(raw: &str) -> Option<(&str, PredictionMarketSide)> {
@@ -2084,19 +2125,44 @@ async fn fetch_prediction_market_series_batch(
     Vec<eli_core::finance::TickerSeries>,
     Vec<eli_core::finance::TimeseriesError>,
 ) {
-    let results = join_all(
+    // POLYMARKET:EVENT: tickers become one request per leg (+ a legend notice).
+    let (requests, poly_event_notices) = poly_expand_event_requests(requests).await;
+    // Kalshi requests share batch calls (≤100 markets each) plus archive and
+    // event fallbacks; the rest fetch one market per request.
+    let (kalshi_reqs, other_reqs): (Vec<PredictionMarketRequest>, Vec<PredictionMarketRequest>) =
         requests
             .iter()
-            .map(|req| fetch_prediction_market_series(req, start, end, granularity)),
-    )
-    .await;
+            .cloned()
+            .partition(|req| matches!(req.provider, PredictionMarketProvider::Kalshi));
+    let (kalshi_out, results) = tokio::join!(
+        async {
+            if kalshi_reqs.is_empty() {
+                (Vec::new(), Vec::new())
+            } else {
+                fetch_kalshi_series_batch(&kalshi_reqs, start, end, granularity).await
+            }
+        },
+        join_all(other_reqs.iter().map(|req| async move {
+            match req.provider {
+                PredictionMarketProvider::Polymarket => {
+                    fetch_polymarket_series_with_notices(req, start, end, granularity).await
+                }
+                _ => fetch_prediction_market_series(req, start, end, granularity)
+                    .await
+                    .map(|s| (s, Vec::new())),
+            }
+        }))
+    );
 
-    let mut series = Vec::new();
-    let mut errors = Vec::new();
+    let (mut series, mut errors) = kalshi_out;
+    errors.extend(poly_event_notices);
 
-    for (req, result) in requests.iter().zip(results) {
+    for (req, result) in other_reqs.iter().zip(results) {
         match result {
-            Ok(market_series) => series.push(market_series),
+            Ok((market_series, notices)) => {
+                series.push(market_series);
+                errors.extend(notices);
+            }
             Err(err) => errors.push(eli_core::finance::TimeseriesError {
                 ticker: prediction_market_request_label(req),
                 stage: Some(req.provider.as_str().to_string()),
@@ -2123,10 +2189,6 @@ fn prediction_market_request_label(req: &PredictionMarketRequest) -> String {
 
 fn granularity_seconds(span: eli_core::finance::Span) -> i64 {
     span.approx_duration().num_seconds().max(60)
-}
-
-fn granularity_minutes(span: eli_core::finance::Span) -> i64 {
-    ((granularity_seconds(span) + 59) / 60).max(1)
 }
 
 /// Kalshi's batch candlestick endpoint rejects any request whose window spans
@@ -2240,64 +2302,99 @@ fn resample_kalshi_minute_bars(
     out
 }
 
-async fn fetch_kalshi_market_series(
-    req: &PredictionMarketRequest,
+const KALSHI_TRADE_API_URL: &str = "https://api.elections.kalshi.com/trade-api/v2";
+/// The batch endpoint takes up to 100 tickers per call.
+const KALSHI_BATCH_MAX_TICKERS: usize = 100;
+/// Legs returned when a bare EVENT ticker is expanded (deepest first). A BTC
+/// strike ladder has ~190 legs; 30 already spans the traded distribution.
+const KALSHI_EVENT_MAX_LEGS: usize = 30;
+
+#[derive(Clone, Default, serde::Deserialize)]
+struct KalshiBidAsk {
+    // Live candles say close_dollars; the historical archive says close.
+    #[serde(default, alias = "close")]
+    close_dollars: Option<String>,
+}
+
+#[derive(Clone, Default, serde::Deserialize)]
+struct KalshiPrice {
+    #[serde(default, alias = "open")]
+    open_dollars: Option<String>,
+    #[serde(default, alias = "low")]
+    low_dollars: Option<String>,
+    #[serde(default, alias = "high")]
+    high_dollars: Option<String>,
+    #[serde(default, alias = "close")]
+    close_dollars: Option<String>,
+    #[serde(default, alias = "previous")]
+    previous_dollars: Option<String>,
+}
+
+#[derive(Clone, Default, serde::Deserialize)]
+struct KalshiCandle {
+    end_period_ts: i64,
+    #[serde(default)]
+    price: Option<KalshiPrice>,
+    #[serde(default)]
+    yes_bid: Option<KalshiBidAsk>,
+    #[serde(default)]
+    yes_ask: Option<KalshiBidAsk>,
+    // Live candles carry the fixed-point string `volume_fp` ("2963.10"
+    // contracts); the archive carries `volume` as a string, older payloads
+    // as an integer.
+    #[serde(default)]
+    volume_fp: Option<String>,
+    #[serde(default)]
+    volume: Option<serde_json::Value>,
+}
+
+impl KalshiCandle {
+    fn volume_contracts(&self) -> Option<f64> {
+        self.volume_fp.as_deref().and_then(parse_decimal).or_else(|| {
+            match self.volume.as_ref()? {
+                serde_json::Value::Number(n) => n.as_f64(),
+                serde_json::Value::String(s) => parse_decimal(s),
+                _ => None,
+            }
+        })
+    }
+}
+
+/// How a requested window maps onto Kalshi's native intervals.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct KalshiWindow {
+    start_ts: i64,
+    end_ts: i64,
+    requested_seconds: i64,
+    api_interval_minutes: i64,
+    needs_resample: bool,
+    minute_path: bool,
+}
+
+impl KalshiWindow {
+    fn page_span_secs(&self) -> i64 {
+        KALSHI_MAX_CANDLES_PER_REQUEST * self.api_interval_minutes * 60
+    }
+
+    /// Native candles one ticker needs per page (bounded by the window).
+    fn candles_per_ticker_page(&self) -> i64 {
+        let span = (self.end_ts - self.start_ts).max(1).min(self.page_span_secs());
+        span / (self.api_interval_minutes * 60) + 2
+    }
+
+    /// Tickers per batch call so that tickers × candles stays under the cap.
+    fn tickers_per_call(&self) -> usize {
+        ((KALSHI_MAX_CANDLES_PER_REQUEST / self.candles_per_ticker_page().max(1)).max(1) as usize)
+            .min(KALSHI_BATCH_MAX_TICKERS)
+    }
+}
+
+fn kalshi_window(
     start: chrono::DateTime<chrono::Utc>,
     end: chrono::DateTime<chrono::Utc>,
     granularity: eli_core::finance::Span,
-) -> Result<eli_core::finance::TickerSeries> {
-    #[derive(serde::Deserialize)]
-    struct KalshiResp {
-        #[serde(default)]
-        markets: Vec<KalshiMarketCandles>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct KalshiMarketCandles {
-        market_ticker: String,
-        #[serde(default)]
-        candlesticks: Vec<KalshiCandle>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct KalshiBidAsk {
-        #[serde(default)]
-        close_dollars: Option<String>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct KalshiPrice {
-        #[serde(default)]
-        open_dollars: Option<String>,
-        #[serde(default)]
-        low_dollars: Option<String>,
-        #[serde(default)]
-        high_dollars: Option<String>,
-        #[serde(default)]
-        close_dollars: Option<String>,
-        #[serde(default)]
-        previous_dollars: Option<String>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct KalshiCandle {
-        end_period_ts: i64,
-        #[serde(default)]
-        price: Option<KalshiPrice>,
-        #[serde(default)]
-        yes_bid: Option<KalshiBidAsk>,
-        #[serde(default)]
-        yes_ask: Option<KalshiBidAsk>,
-        // Kalshi's only volume field is the fixed-point string `volume_fp`
-        // ("2963.10" contracts); the legacy integer `volume` is kept as a fallback.
-        #[serde(default)]
-        volume_fp: Option<String>,
-        #[serde(default)]
-        volume: Option<i64>,
-    }
-
+) -> Result<KalshiWindow> {
     let requested_seconds = granularity_seconds(granularity);
-
     // Kalshi's candlestick API supports period_interval = 1 (1m), 60 (1h) and
     // 1440 (1d); other values silently degrade to daily bars. Fetch at the
     // finest native interval at or below the target and resample locally.
@@ -2313,20 +2410,15 @@ async fn fetch_kalshi_market_series(
     } else {
         (60_i64, true)
     };
-    let minute_path = api_interval_minutes == 1;
-
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(20))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("init kalshi candlestick client")?;
-
-    let start_ts = start.timestamp();
-    let end_ts = end.timestamp();
-    let interval_s = api_interval_minutes.to_string();
-    let page_span_secs = KALSHI_MAX_CANDLES_PER_REQUEST * api_interval_minutes * 60;
-    let pages_needed = ((end_ts - start_ts).max(1) + page_span_secs - 1) / page_span_secs;
+    let w = KalshiWindow {
+        start_ts: start.timestamp(),
+        end_ts: end.timestamp(),
+        requested_seconds,
+        api_interval_minutes,
+        needs_resample,
+        minute_path: api_interval_minutes == 1,
+    };
+    let pages_needed = ((w.end_ts - w.start_ts).max(1) + w.page_span_secs() - 1) / w.page_span_secs();
     if pages_needed > KALSHI_MAX_PAGES {
         anyhow::bail!(
             "kalshi {}m candles over this window need {} requests (cap {}); use --granularity 1h or a shorter --range",
@@ -2335,75 +2427,181 @@ async fn fetch_kalshi_market_series(
             KALSHI_MAX_PAGES
         );
     }
+    Ok(w)
+}
 
-    let mut market_ticker: Option<String> = None;
-    let mut raw_candles: Vec<KalshiCandle> = Vec::new();
-    let mut page_start = start_ts;
-    while page_start <= end_ts {
-        let page_end = (page_start + page_span_secs - 1).min(end_ts);
-        let page_start_s = page_start.to_string();
-        let page_end_s = page_end.to_string();
-        let mut query: Vec<(&str, &str)> = vec![
-            ("market_tickers", req.market.as_str()),
-            ("start_ts", page_start_s.as_str()),
-            ("end_ts", page_end_s.as_str()),
-            ("period_interval", interval_s.as_str()),
-        ];
-        // Minute bars are sparse (Kalshi omits minutes with no trade and no
-        // quote change), so seed the window with the last real bar before it:
-        // Kalshi prepends a synthetic bar whose `previous` is that bar's close.
-        if minute_path && page_start == start_ts {
-            query.push(("include_latest_before_start", "true"));
-        }
+fn kalshi_ts_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("init kalshi candlestick client")
+}
 
-        let resp = client
-            .get(KALSHI_CANDLESTICKS_URL)
-            .query(&query)
-            .send()
-            .await
-            .context("request kalshi candlesticks")?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "kalshi candlesticks failed for market {}: http {}: {}",
-                req.market,
-                status,
-                body.chars().take(400).collect::<String>()
-            );
-        }
-
-        let parsed: KalshiResp = resp
-            .json()
-            .await
-            .context("parse kalshi candlesticks response")?;
-        if let Some(m) = parsed.markets.into_iter().next() {
-            market_ticker.get_or_insert(m.market_ticker);
-            raw_candles.extend(m.candlesticks);
-        }
-        page_start = page_end + 1;
+/// Live candles for many markets: the batch endpoint, chunked so each call
+/// stays under Kalshi's 10k-candle cap, paged over time. A market absent
+/// from the map was unknown to the live endpoint (settled before the
+/// historical cutoff, an event ticker, or a typo).
+async fn kalshi_fetch_live_candles(
+    client: &reqwest::Client,
+    tickers: &[String],
+    w: &KalshiWindow,
+) -> Result<std::collections::HashMap<String, Vec<KalshiCandle>>> {
+    #[derive(serde::Deserialize)]
+    struct BatchResp {
+        #[serde(default)]
+        markets: Vec<BatchMarket>,
+    }
+    #[derive(serde::Deserialize)]
+    struct BatchMarket {
+        market_ticker: String,
+        #[serde(default)]
+        candlesticks: Vec<KalshiCandle>,
     }
 
-    let market_ticker = market_ticker.ok_or_else(|| {
-        // Bare event tickers (KXFEDDECISION-26JUL) hit this: candlesticks only
-        // exist for market legs. Say so instead of a dead-end "no data".
-        let has_leg_suffix = req
-            .market
-            .rsplit('-')
-            .next()
-            .is_some_and(|leg| leg.len() <= 6 && leg.chars().next().is_some_and(|c| c.is_ascii_alphabetic()));
-        if has_leg_suffix {
-            anyhow::anyhow!("kalshi returned no candlesticks for market {}", req.market)
-        } else {
-            anyhow::anyhow!(
-                "kalshi returned no candlesticks for {} — this looks like an event ticker; candlesticks exist only for market legs (use finance_odds markets[].ticker, e.g. {}-H0)",
-                req.market,
-                req.market
-            )
+    let mut out: std::collections::HashMap<String, Vec<KalshiCandle>> =
+        std::collections::HashMap::new();
+    let interval_s = w.api_interval_minutes.to_string();
+    for chunk in tickers.chunks(w.tickers_per_call()) {
+        let joined = chunk.join(",");
+        let mut page_start = w.start_ts;
+        while page_start <= w.end_ts {
+            let page_end = (page_start + w.page_span_secs() - 1).min(w.end_ts);
+            let mut query = vec![
+                ("market_tickers", joined.clone()),
+                ("start_ts", page_start.to_string()),
+                ("end_ts", page_end.to_string()),
+                ("period_interval", interval_s.clone()),
+            ];
+            // Minute bars are sparse (Kalshi omits minutes with no trade and
+            // no quote change), so seed the window with the last real bar
+            // before it: Kalshi prepends a synthetic bar whose `previous` is
+            // that bar's close.
+            if w.minute_path && page_start == w.start_ts {
+                query.push(("include_latest_before_start", "true".to_string()));
+            }
+            let body = kalshi_get_json_opt(client, KALSHI_CANDLESTICKS_URL, &query, "kalshi candlesticks")
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?
+                .unwrap_or_default();
+            let parsed: BatchResp =
+                serde_json::from_value(body).context("parse kalshi candlesticks response")?;
+            for m in parsed.markets {
+                out.entry(m.market_ticker).or_default().extend(m.candlesticks);
+            }
+            page_start = page_end + 1;
         }
-    })?;
+    }
+    Ok(out)
+}
 
+/// Candles from the historical archive (markets settled before Kalshi's
+/// historical cutoff; the live endpoints no longer know them). None = the
+/// archive does not have this ticker either.
+async fn kalshi_fetch_historical_candles(
+    client: &reqwest::Client,
+    ticker: &str,
+    w: &KalshiWindow,
+) -> Result<Option<Vec<KalshiCandle>>> {
+    #[derive(serde::Deserialize)]
+    struct HistResp {
+        #[serde(default)]
+        candlesticks: Vec<KalshiCandle>,
+    }
+    let url = format!("{KALSHI_TRADE_API_URL}/historical/markets/{ticker}/candlesticks");
+    let interval_s = w.api_interval_minutes.to_string();
+    let mut out: Vec<KalshiCandle> = Vec::new();
+    let mut page_start = w.start_ts;
+    while page_start <= w.end_ts {
+        let page_end = (page_start + w.page_span_secs() - 1).min(w.end_ts);
+        let query = vec![
+            ("start_ts", page_start.to_string()),
+            ("end_ts", page_end.to_string()),
+            ("period_interval", interval_s.clone()),
+        ];
+        let Some(body) = kalshi_get_json_opt(client, &url, &query, "kalshi historical candlesticks")
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
+        else {
+            return Ok(None);
+        };
+        let parsed: HistResp =
+            serde_json::from_value(body).context("parse kalshi historical candlesticks")?;
+        out.extend(parsed.candlesticks);
+        page_start = page_end + 1;
+    }
+    Ok(Some(out))
+}
+
+/// Legs of a Kalshi EVENT ticker: the deepest KALSHI_EVENT_MAX_LEGS, in
+/// Kalshi's order. Settled events
+/// older than the cutoff have no nested markets; their legs come from the
+/// archive. Returns (kept legs, total legs); None = not an event.
+async fn kalshi_event_legs(
+    client: &reqwest::Client,
+    event_ticker: &str,
+) -> Result<Option<(Vec<String>, usize)>> {
+    #[derive(serde::Deserialize)]
+    struct Leg {
+        ticker: String,
+        #[serde(default)]
+        volume_fp: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct EventResp {
+        #[serde(default)]
+        markets: Vec<Leg>,
+    }
+    #[derive(serde::Deserialize)]
+    struct MarketsResp {
+        #[serde(default)]
+        markets: Vec<Leg>,
+    }
+    let url = format!("{KALSHI_TRADE_API_URL}/events/{event_ticker}");
+    let Some(body) = kalshi_get_json_opt(client, &url, &[], "kalshi event")
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?
+    else {
+        return Ok(None);
+    };
+    let mut legs = serde_json::from_value::<EventResp>(body)
+        .context("parse kalshi event")?
+        .markets;
+    if legs.is_empty() {
+        let url = format!("{KALSHI_TRADE_API_URL}/historical/markets");
+        let query = vec![
+            ("event_ticker", event_ticker.to_string()),
+            ("limit", "1000".to_string()),
+        ];
+        if let Some(body) = kalshi_get_json_opt(client, &url, &query, "kalshi historical markets")
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
+        {
+            legs = serde_json::from_value::<MarketsResp>(body)
+                .context("parse kalshi historical markets")?
+                .markets;
+        }
+    }
+    let total = legs.len();
+    let vol = |l: &Leg| l.volume_fp.as_deref().and_then(parse_decimal).unwrap_or(0.0);
+    // Keep the deepest legs, then restore Kalshi's own (strike) order.
+    let mut ranked: Vec<(usize, Leg)> = legs.into_iter().enumerate().collect();
+    ranked.sort_by(|a, b| vol(&b.1).partial_cmp(&vol(&a.1)).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(KALSHI_EVENT_MAX_LEGS);
+    ranked.sort_by_key(|(idx, _)| *idx);
+    Ok(Some((ranked.into_iter().map(|(_, l)| l.ticker).collect(), total)))
+}
+
+/// Project native candles onto the requested side and window.
+fn kalshi_series_from_candles(
+    req: &PredictionMarketRequest,
+    market_ticker: &str,
+    raw_candles: Vec<KalshiCandle>,
+    w: &KalshiWindow,
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+) -> Result<eli_core::finance::TickerSeries> {
     let mut bars: Vec<KalshiBar> = Vec::new();
     for kc in raw_candles {
         let traded_close = kc
@@ -2467,11 +2665,7 @@ async fn fetch_kalshi_market_series(
             h: a.max(b),
             l: a.min(b),
             c: req.side.apply(yes_close),
-            v: kc
-                .volume_fp
-                .as_deref()
-                .and_then(parse_decimal)
-                .or(kc.volume.map(|v| v as f64)),
+            v: kc.volume_contracts(),
             traded: traded_close.is_some(),
         });
     }
@@ -2479,17 +2673,17 @@ async fn fetch_kalshi_market_series(
     if bars.is_empty() {
         anyhow::bail!(
             "no usable kalshi candlesticks found for market {} in requested window",
-            req.market
+            market_ticker
         );
     }
 
     bars.sort_by_key(|b| (b.end_ts, !b.traded));
     bars.dedup_by_key(|b| b.end_ts);
 
-    let candles: Vec<eli_core::finance::Candle> = if minute_path {
+    let candles: Vec<eli_core::finance::Candle> = if w.minute_path {
         // Native 1m and resampled 5m/15m/30m share one path: start-of-bar
         // stamps on absolute UTC boundaries, gaps carried forward.
-        resample_kalshi_minute_bars(&bars, requested_seconds, start, end)
+        resample_kalshi_minute_bars(&bars, w.requested_seconds, start, end)
     } else {
         let mut candles: Vec<eli_core::finance::Candle> = Vec::with_capacity(bars.len());
         for b in &bars {
@@ -2505,16 +2699,16 @@ async fn fetch_kalshi_market_series(
                 kind: None,
             });
         }
-        if needs_resample {
+        if w.needs_resample {
             // Kalshi timestamps are end-of-bar (the API field is `end_period_ts`).
             // Convert to start-of-bar ONLY for resampling so that the absolute-clock
             // resampler places each bar in the correct bucket.  We do NOT touch
             // timestamps for native 1h or 1d output — those are correct as-is.
-            let native_step_secs = api_interval_minutes * 60;
+            let native_step_secs = w.api_interval_minutes * 60;
             for c in &mut candles {
                 c.t = c.t - chrono::Duration::seconds(native_step_secs);
             }
-            let step = chrono::Duration::seconds(requested_seconds);
+            let step = chrono::Duration::seconds(w.requested_seconds);
             candles = eli_core::finance::resample_candles(&candles, start, step);
         }
         candles
@@ -2523,7 +2717,7 @@ async fn fetch_kalshi_market_series(
     if candles.is_empty() {
         anyhow::bail!(
             "no usable kalshi candlesticks found for market {} in requested window",
-            req.market
+            market_ticker
         );
     }
 
@@ -2535,250 +2729,193 @@ async fn fetch_kalshi_market_series(
         ),
         candles,
         source: Some("kalshi".to_string()),
-        upstream_id: Some(market_ticker.clone()),
+        upstream_id: Some(market_ticker.to_string()),
     })
 }
 
-async fn fetch_polymarket_market_series(
+/// Every Kalshi request in one pass: live markets through the batch endpoint
+/// (≤100 per call), then for ids the live endpoint does not know: the
+/// historical archive (markets settled before the cutoff), then event
+/// expansion (a bare event ticker returns its deepest legs).
+async fn fetch_kalshi_series_batch(
+    requests: &[PredictionMarketRequest],
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    granularity: eli_core::finance::Span,
+) -> (
+    Vec<eli_core::finance::TickerSeries>,
+    Vec<eli_core::finance::TimeseriesError>,
+) {
+    let mut series = Vec::new();
+    let mut errors = Vec::new();
+    let fail_all = |errors: &mut Vec<eli_core::finance::TimeseriesError>, msg: String| {
+        for req in requests {
+            errors.push(eli_core::finance::TimeseriesError {
+                ticker: prediction_market_request_label(req),
+                stage: Some("kalshi".to_string()),
+                message: msg.clone(),
+            });
+        }
+    };
+    let w = match kalshi_window(start, end, granularity) {
+        Ok(w) => w,
+        Err(e) => {
+            fail_all(&mut errors, e.to_string());
+            return (series, errors);
+        }
+    };
+    let client = match kalshi_ts_client() {
+        Ok(c) => c,
+        Err(e) => {
+            fail_all(&mut errors, e.to_string());
+            return (series, errors);
+        }
+    };
+
+    let mut tickers: Vec<String> = Vec::new();
+    for req in requests {
+        if !tickers.contains(&req.market) {
+            tickers.push(req.market.clone());
+        }
+    }
+    let mut live = match kalshi_fetch_live_candles(&client, &tickers, &w).await {
+        Ok(map) => map,
+        Err(e) => {
+            fail_all(&mut errors, format!("kalshi candlesticks: {e}"));
+            return (series, errors);
+        }
+    };
+
+    // Ids the live endpoint did not return: archive, then event expansion.
+    let mut archived: std::collections::HashMap<String, Vec<KalshiCandle>> =
+        std::collections::HashMap::new();
+    let mut expanded: std::collections::HashMap<String, (Vec<String>, usize)> =
+        std::collections::HashMap::new();
+    let mut unknown: HashSet<String> = HashSet::new();
+    for ticker in tickers.iter().filter(|t| !live.contains_key(*t)) {
+        match kalshi_fetch_historical_candles(&client, ticker, &w).await {
+            Ok(Some(candles)) => {
+                archived.insert(ticker.clone(), candles);
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                errors.push(eli_core::finance::TimeseriesError {
+                    ticker: format!("KALSHI:{ticker}"),
+                    stage: Some("kalshi_historical".to_string()),
+                    message: e.to_string(),
+                });
+                continue;
+            }
+        }
+        match kalshi_event_legs(&client, ticker).await {
+            Ok(Some((legs, total))) if !legs.is_empty() => {
+                expanded.insert(ticker.clone(), (legs, total));
+            }
+            Ok(_) => {
+                unknown.insert(ticker.clone());
+            }
+            Err(e) => {
+                errors.push(eli_core::finance::TimeseriesError {
+                    ticker: format!("KALSHI:{ticker}"),
+                    stage: Some("kalshi_event".to_string()),
+                    message: e.to_string(),
+                });
+            }
+        }
+    }
+
+    // Event legs: live batch first, archive for the ones it lacks.
+    let leg_tickers: Vec<String> = {
+        let mut v: Vec<String> = Vec::new();
+        for (legs, _) in expanded.values() {
+            for l in legs {
+                if !v.contains(l) && !live.contains_key(l) {
+                    v.push(l.clone());
+                }
+            }
+        }
+        v
+    };
+    if !leg_tickers.is_empty() {
+        match kalshi_fetch_live_candles(&client, &leg_tickers, &w).await {
+            Ok(map) => live.extend(map),
+            Err(e) => errors.push(eli_core::finance::TimeseriesError {
+                ticker: "KALSHI:event_legs".to_string(),
+                stage: Some("kalshi".to_string()),
+                message: format!("kalshi candlesticks: {e}"),
+            }),
+        }
+        for leg in leg_tickers.iter().filter(|l| !live.contains_key(*l)) {
+            if let Ok(Some(candles)) = kalshi_fetch_historical_candles(&client, leg, &w).await {
+                archived.insert(leg.clone(), candles);
+            }
+        }
+    }
+
+    let push = |req: &PredictionMarketRequest,
+                    market: &str,
+                    raw: Vec<KalshiCandle>,
+                    series: &mut Vec<eli_core::finance::TickerSeries>,
+                    errors: &mut Vec<eli_core::finance::TimeseriesError>| {
+        match kalshi_series_from_candles(req, market, raw, &w, start, end) {
+            Ok(s) => series.push(s),
+            Err(e) => errors.push(eli_core::finance::TimeseriesError {
+                ticker: format!("KALSHI:{}:{}", market, req.side.as_str().to_ascii_uppercase()),
+                stage: Some("kalshi".to_string()),
+                message: e.to_string(),
+            }),
+        }
+    };
+    for req in requests {
+        let ticker = req.market.as_str();
+        if let Some(raw) = live.get(ticker).or_else(|| archived.get(ticker)) {
+            push(req, ticker, raw.clone(), &mut series, &mut errors);
+        } else if let Some((legs, total)) = expanded.get(ticker) {
+            for leg in legs {
+                let raw = live.get(leg).or_else(|| archived.get(leg)).cloned().unwrap_or_default();
+                push(req, leg, raw, &mut series, &mut errors);
+            }
+            if *total > legs.len() {
+                errors.push(eli_core::finance::TimeseriesError {
+                    ticker: prediction_market_request_label(req),
+                    stage: Some("kalshi_event_legs".to_string()),
+                    message: format!(
+                        "event {ticker} has {total} legs; returned the {} with the most volume (pass leg tickers from finance_odds for others)",
+                        legs.len()
+                    ),
+                });
+            }
+        } else if unknown.contains(ticker) {
+            errors.push(eli_core::finance::TimeseriesError {
+                ticker: prediction_market_request_label(req),
+                stage: Some("kalshi".to_string()),
+                message: format!(
+                    "kalshi has no market, event or archived market named {ticker} (ids come from finance_odds markets[].ticker)"
+                ),
+            });
+        }
+    }
+    (series, errors)
+}
+
+async fn fetch_kalshi_market_series(
     req: &PredictionMarketRequest,
     start: chrono::DateTime<chrono::Utc>,
     end: chrono::DateTime<chrono::Utc>,
     granularity: eli_core::finance::Span,
 ) -> Result<eli_core::finance::TickerSeries> {
-    #[derive(serde::Deserialize)]
-    struct PolyHistoryPoint {
-        t: serde_json::Value,
-        p: serde_json::Value,
+    let (series, errors) =
+        fetch_kalshi_series_batch(std::slice::from_ref(req), start, end, granularity).await;
+    let wanted = format!("KALSHI:{}:", req.market);
+    if let Some(s) = series.into_iter().find(|s| s.ticker.starts_with(&wanted)) {
+        return Ok(s);
     }
-
-    #[derive(serde::Deserialize)]
-    struct PolyHistoryResp {
-        #[serde(default)]
-        history: Vec<PolyHistoryPoint>,
-    }
-
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(20))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("init polymarket history client")?;
-
-    let market_meta = fetch_polymarket_market_meta(&client, &req.market).await?;
-    let market_id = market_meta
-        .get("id")
-        .map(json_value_to_string)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| req.market.clone());
-
-    let outcomes = market_meta
-        .get("outcomes")
-        .map(parse_jsonish_string_list)
-        .unwrap_or_default();
-    let token_ids = market_meta
-        .get("clobTokenIds")
-        .map(parse_jsonish_string_list)
-        .unwrap_or_default();
-
-    if token_ids.is_empty() {
-        anyhow::bail!("polymarket market {} has no clob token IDs", req.market);
-    }
-
-    let outcome_index = pick_polymarket_outcome_index(&outcomes, req.side, token_ids.len());
-    let token_id = token_ids
-        .get(outcome_index)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("invalid polymarket outcome index for {}", req.market))?;
-    let fidelity = granularity_minutes(granularity).max(1);
-    let fidelity_s = fidelity.to_string();
-
-    let resp = client
-        .get(POLYMARKET_CLOB_HISTORY_URL)
-        .query(&[
-            ("market", token_id.as_str()),
-            ("interval", "max"),
-            ("fidelity", fidelity_s.as_str()),
-        ])
-        .send()
-        .await
-        .context("request polymarket price history")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "polymarket price history failed for market {} (token {}): http {}: {}",
-            req.market,
-            token_id,
-            status,
-            body.chars().take(400).collect::<String>()
-        );
-    }
-
-    let parsed: PolyHistoryResp = resp
-        .json()
-        .await
-        .context("parse polymarket price history response")?;
-
-    let step_seconds = granularity_seconds(granularity).max(1);
-    let start_ts = start.timestamp();
-    let end_ts = end.timestamp();
-
-    #[derive(Clone, Copy)]
-    struct Ohlc {
-        o: f64,
-        h: f64,
-        l: f64,
-        c: f64,
-        first_ts: i64,
-        last_ts: i64,
-        points: usize,
-    }
-
-    let mut buckets: BTreeMap<i64, Ohlc> = BTreeMap::new();
-
-    for point in parsed.history {
-        let ts = parse_json_number_i64(&point.t).unwrap_or_default();
-        let price = parse_json_number_f64(&point.p).unwrap_or_default();
-        if ts <= 0 || !price.is_finite() {
-            continue;
-        }
-        if ts < start_ts || ts > end_ts {
-            continue;
-        }
-
-        let bucket = ts.div_euclid(step_seconds) * step_seconds;
-        let adj_price = req.side.apply(price);
-
-        match buckets.get_mut(&bucket) {
-            Some(entry) => {
-                if ts < entry.first_ts {
-                    entry.first_ts = ts;
-                    entry.o = adj_price;
-                }
-                if ts >= entry.last_ts {
-                    entry.last_ts = ts;
-                    entry.c = adj_price;
-                }
-                if adj_price > entry.h {
-                    entry.h = adj_price;
-                }
-                if adj_price < entry.l {
-                    entry.l = adj_price;
-                }
-                entry.points += 1;
-            }
-            None => {
-                buckets.insert(
-                    bucket,
-                    Ohlc {
-                        o: adj_price,
-                        h: adj_price,
-                        l: adj_price,
-                        c: adj_price,
-                        first_ts: ts,
-                        last_ts: ts,
-                        points: 1,
-                    },
-                );
-            }
-        }
-    }
-
-    if buckets.is_empty() {
-        anyhow::bail!(
-            "no polymarket price history points found for market {} in requested window — the market may be closed or the id stale; re-run finance_odds --search to get a live market id",
-            req.market
-        );
-    }
-
-    let mut candles = Vec::with_capacity(buckets.len());
-    for (bucket, ohlc) in buckets {
-        // Use bucket START as the candle timestamp, not bucket + step (end).
-        // The old code stamped bucket + step, which made March 23 data appear
-        // as a March 24 candle at daily granularity.
-        let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(bucket, 0)
-            .ok_or_else(|| anyhow::anyhow!("invalid polymarket bucket timestamp"))?;
-        candles.push(eli_core::finance::Candle {
-            t: ts,
-            o: ohlc.o,
-            h: ohlc.h,
-            l: ohlc.l,
-            c: ohlc.c,
-            v: None,
-            kind: None,
-        });
-    }
-
-    Ok(eli_core::finance::TickerSeries {
-        ticker: format!(
-            "POLYMARKET:{market_id}:{}",
-            req.side.as_str().to_ascii_uppercase()
-        ),
-        candles,
-        source: Some("polymarket".to_string()),
-        upstream_id: Some(market_id.to_string()),
-    })
-}
-
-async fn fetch_polymarket_market_meta(
-    client: &reqwest::Client,
-    market: &str,
-) -> Result<serde_json::Value> {
-    let direct_url = format!("{POLYMARKET_GAMMA_URL}/markets/{market}");
-    let direct = client
-        .get(&direct_url)
-        .send()
-        .await
-        .context("request polymarket market metadata")?;
-
-    if direct.status().is_success() {
-        let value: serde_json::Value = direct
-            .json()
-            .await
-            .context("parse polymarket market metadata")?;
-        if value.is_object() {
-            return Ok(value);
-        }
-    } else if direct.status() != reqwest::StatusCode::NOT_FOUND {
-        let status = direct.status();
-        let body = direct.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "polymarket market metadata failed for {}: http {}: {}",
-            market,
-            status,
-            body.chars().take(400).collect::<String>()
-        );
-    }
-
-    let fallback = client
-        .get(format!("{POLYMARKET_GAMMA_URL}/markets"))
-        .query(&[("slug", market), ("limit", "1")])
-        .send()
-        .await
-        .context("request polymarket market metadata by slug")?;
-
-    if !fallback.status().is_success() {
-        let status = fallback.status();
-        let body = fallback.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "polymarket market metadata (slug) failed for {}: http {}: {}",
-            market,
-            status,
-            body.chars().take(400).collect::<String>()
-        );
-    }
-
-    let value: serde_json::Value = fallback
-        .json()
-        .await
-        .context("parse polymarket market metadata by slug")?;
-
-    let Some(first) = value.as_array().and_then(|items| items.first()).cloned() else {
-        anyhow::bail!("polymarket market '{}' not found by id or slug", market);
-    };
-
-    Ok(first)
+    Err(anyhow::anyhow!(errors
+        .into_iter()
+        .next()
+        .map(|e| e.message)
+        .unwrap_or_else(|| format!("kalshi returned no candlesticks for market {}", req.market))))
 }
 
 fn parse_decimal(raw: &str) -> Option<f64> {
@@ -2850,33 +2987,6 @@ fn parse_json_number_f64(value: &serde_json::Value) -> Option<f64> {
         return Some(v as f64);
     }
     value.as_str().and_then(|s| s.trim().parse::<f64>().ok())
-}
-
-fn pick_polymarket_outcome_index(
-    outcomes: &[String],
-    side: PredictionMarketSide,
-    token_count: usize,
-) -> usize {
-    if token_count <= 1 {
-        return 0;
-    }
-
-    let target = match side {
-        PredictionMarketSide::Yes => "yes",
-        PredictionMarketSide::No => "no",
-    };
-
-    if let Some(idx) = outcomes
-        .iter()
-        .position(|o| o.trim().eq_ignore_ascii_case(target))
-    {
-        return idx.min(token_count - 1);
-    }
-
-    match side {
-        PredictionMarketSide::Yes => 0,
-        PredictionMarketSide::No => 1.min(token_count - 1),
-    }
 }
 
 fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
@@ -3412,58 +3522,68 @@ async fn fetch_ratepath_constituents(
 
     // ── Kalshi: KXFEDDECISION-{YY}{MON} ──
     let event_ticker = format!("KXFEDDECISION-{}{}", ticker.year_short, ticker.month_token);
-    let kalshi_url = "https://api.elections.kalshi.com/trade-api/v2/markets";
-    let kalshi_resp = client
-        .get(kalshi_url)
-        .query(&[
-            ("event_ticker", event_ticker.as_str()),
-            ("status", "open"),
-            ("limit", "20"),
-        ])
-        .send()
-        .await
-        .with_context(|| format!("kalshi event lookup {event_ticker}"))?;
-    if kalshi_resp.status().is_success() {
+    // Any status: a past meeting's path is the point of RATEPATH. Meetings
+    // settled before Kalshi's historical cutoff are only in the archive.
+    let mut kalshi_markets: Vec<serde_json::Value> = Vec::new();
+    for kalshi_url in [
+        format!("{KALSHI_TRADE_API_URL}/markets"),
+        format!("{KALSHI_TRADE_API_URL}/historical/markets"),
+    ] {
+        let kalshi_resp = client
+            .get(&kalshi_url)
+            .query(&[("event_ticker", event_ticker.as_str()), ("limit", "20")])
+            .send()
+            .await
+            .with_context(|| format!("kalshi event lookup {event_ticker}"))?;
+        if !kalshi_resp.status().is_success() {
+            continue;
+        }
         let body: serde_json::Value = kalshi_resp
             .json()
             .await
             .with_context(|| format!("kalshi event parse {event_ticker}"))?;
-        if let Some(markets) = body.get("markets").and_then(|v| v.as_array()) {
-            for m in markets {
-                let market_ticker = m
-                    .get("ticker")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if market_ticker.is_empty() {
-                    continue;
-                }
-                let suffix = market_ticker.rsplit('-').next().unwrap_or("");
-                let Some(leaf_bucket) = kalshi_suffix_to_bucket(suffix) else {
-                    continue;
-                };
-                if !ticker.bucket.includes(leaf_bucket) {
-                    continue;
-                }
-                let volume = m
-                    .get("volume_fp")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(0.0) as i64;
-                if volume < RATEPATH_KALSHI_MIN_VOLUME {
-                    continue;
-                }
-                out.push(RatePathConstituent {
-                    request: PredictionMarketRequest {
-                        provider: PredictionMarketProvider::Kalshi,
-                        market: market_ticker,
-                        side: PredictionMarketSide::Yes,
-                    },
-                    bucket: leaf_bucket,
-                    volume,
-                });
-            }
+        kalshi_markets = body
+            .get("markets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if !kalshi_markets.is_empty() {
+            break;
         }
+    }
+    for m in &kalshi_markets {
+        let market_ticker = m
+            .get("ticker")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if market_ticker.is_empty() {
+            continue;
+        }
+        let suffix = market_ticker.rsplit('-').next().unwrap_or("");
+        let Some(leaf_bucket) = kalshi_suffix_to_bucket(suffix) else {
+            continue;
+        };
+        if !ticker.bucket.includes(leaf_bucket) {
+            continue;
+        }
+        let volume = m
+            .get("volume_fp")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0) as i64;
+        if volume < RATEPATH_KALSHI_MIN_VOLUME {
+            continue;
+        }
+        out.push(RatePathConstituent {
+            request: PredictionMarketRequest {
+                provider: PredictionMarketProvider::Kalshi,
+                market: market_ticker,
+                side: PredictionMarketSide::Yes,
+            },
+            bucket: leaf_bucket,
+            volume,
+        });
     }
 
     // ── Polymarket: fed-decision-in-{month}[-N] ──
@@ -3874,6 +3994,63 @@ mod timeseries_tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].t.timestamp(), T0 + 900);
         assert_eq!((out[0].o, out[0].h, out[0].l, out[0].c), (0.21, 0.23, 0.21, 0.22));
+    }
+
+    #[test]
+    fn bare_kalshi_market_tickers_route_without_prefix() {
+        for t in ["CONTROLS-2026-D", "SENATEOHS-26-R", "FED-23DEC-T5.25", "INXD-24JAN01-B4700"] {
+            assert!(looks_like_bare_kalshi_market(t), "{t}");
+            let req = parse_prediction_market_ticker(t).expect(t);
+            assert!(matches!(req.provider, PredictionMarketProvider::Kalshi));
+        }
+        let no = parse_prediction_market_ticker("CONTROLS-2026-D:NO").unwrap();
+        assert!(matches!(no.side, PredictionMarketSide::No));
+        // Real Yahoo symbols stay with Yahoo.
+        for t in ["BRK-B", "BTC-USD", "RDS-A", "^VIX", "CL=F", "USD/JPY=X", "000660.KS", "SPY", "CONTROLS-2026", "AB-CD-EF"] {
+            assert!(parse_prediction_market_ticker(t).is_none(), "{t}");
+        }
+    }
+
+    #[test]
+    fn kalshi_window_sizes_batches_under_the_candle_cap() {
+        let start = utc(T0);
+        let w = kalshi_window(start, start + chrono::Duration::days(14), eli_core::finance::Span::parse("1h").unwrap()).unwrap();
+        assert_eq!(w.api_interval_minutes, 60);
+        // 14d of hourly bars ≈ 338 per ticker → 26 tickers per call.
+        assert_eq!(w.tickers_per_call(), 26);
+        let w = kalshi_window(start, start + chrono::Duration::days(1), eli_core::finance::Span::parse("1d").unwrap()).unwrap();
+        assert_eq!(w.tickers_per_call(), KALSHI_BATCH_MAX_TICKERS);
+        let w = kalshi_window(start, start + chrono::Duration::days(30), eli_core::finance::Span::parse("1m").unwrap()).unwrap();
+        assert_eq!(w.tickers_per_call(), 1);
+        assert!(kalshi_window(start, start + chrono::Duration::days(400), eli_core::finance::Span::parse("1m").unwrap()).is_err());
+    }
+
+    #[test]
+    fn kalshi_archive_candles_parse_like_live_ones() {
+        // The historical archive drops the _dollars suffixes and sends volume as a string.
+        let archived: KalshiCandle = serde_json::from_value(serde_json::json!({
+            "end_period_ts": T0 + 3600,
+            "price": {"open": "0.7400", "high": "0.7500", "low": "0.7300", "close": "0.7500", "previous": "0.7400"},
+            "volume": "403304.33",
+            "yes_bid": {"close": "0.7400"}, "yes_ask": {"close": "0.7500"}
+        }))
+        .unwrap();
+        let live: KalshiCandle = serde_json::from_value(serde_json::json!({
+            "end_period_ts": T0 + 7200,
+            "price": {"close_dollars": null, "previous_dollars": "0.7500"},
+            "volume_fp": "0.00",
+            "yes_bid": {"close_dollars": "0.7400"}, "yes_ask": {"close_dollars": "0.7600"}
+        }))
+        .unwrap();
+        assert_eq!(archived.volume_contracts(), Some(403304.33));
+        let req = parse_prediction_market_ticker("KXFEDDECISION-26JUL-H0").unwrap();
+        let w = kalshi_window(utc(T0), utc(T0 + 7200), eli_core::finance::Span::parse("1h").unwrap()).unwrap();
+        let s = kalshi_series_from_candles(&req, "KXFEDDECISION-26JUL-H0", vec![archived, live], &w, utc(T0), utc(T0 + 7200)).unwrap();
+        assert_eq!(s.ticker, "KALSHI:KXFEDDECISION-26JUL-H0:YES");
+        assert_eq!(s.candles.len(), 2);
+        assert_eq!((s.candles[0].o, s.candles[0].h, s.candles[0].l, s.candles[0].c), (0.74, 0.75, 0.73, 0.75));
+        // No trade in the second hour: flat at the bid/ask mid.
+        assert!((s.candles[1].c - 0.75).abs() < 1e-9);
     }
 
     #[test]

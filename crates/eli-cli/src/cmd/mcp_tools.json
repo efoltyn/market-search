@@ -1,7 +1,7 @@
 [
   {
     "name": "finance_timeseries",
-    "description": "Universal data spine: OHLCV time series for every asset class on ONE shared time axis (stocks, FRED macro, futures, crypto, and prediction-market odds), with per-series return and annualized-volatility stats. PRESETS ARE THE POWER FEATURE — the `preset` arg pulls a whole curated domain in ONE call (18 available) and composes with ad-hoc `tickers` in the same call (e.g. preset=macro + tickers=NVDA,SMH gives the macro backdrop plus your names). Key presets: `macro` (34 series — CPI/PCE/jobs/GDP/rates/debt/M2 + live oil/gold/BTC), `recession` (Sahm rule, 10Y-2Y & 10Y-3M, claims, Chicago Fed), `credit` (full ICE BofA OAS stack IG→BBB→HY→BB→B→CCC→EM), `financial_conditions` (NFCI/STLFSI/VIX), `inflation`, `labor`, `housing`, `yield_curve` (1mo–30Y), `real_rates` (TIPS+breakevens), `consumer_credit`, `fed_balance_sheet` (QE/QT plumbing), `liquidity`, `forex_majors`, `crypto`, `sovereigns` (global 2/10/30Y yields: US, Bund, OAT, BTP, Gilt, JGB…), plus IBKR futures baskets `energy`/`commodities`/`treasuries` (full list + aliases in the `preset` arg). Reach for a preset before hand-listing tickers. For ad-hoc tickers, 18 providers auto-detect by pattern: stocks/ETFs/futures→Yahoo, FRED→FRED (or FRED: prefix), IBKR:→Interactive Brokers 15-min-delayed futures/FX/equities (e.g. IBKR:FUT:CL:NYMEX, IBKR:CASH:EUR:IDEALPRO), CLEV:→Cleveland Fed inflation nowcast, KX*→Kalshi, numeric 6+digit→Polymarket, PYTH:→24/7 oracle, BN:→Binance, GOVT:→global sovereign bond YIELDS in % (CNBC; e.g. GOVT:US10Y, GOVT:FR10Y, GOVT:DE2Y, GOVT:JP30Y, GOVT:GB10Y, GOVT:IT10Y; country code + tenor; daily back to 2000, intraday 1m/5m/30m/1h ~1y; the cross-country spread and curve shape behind US Treasury term premium). PLUMBING/CREDIT/LEVERAGE prefixes (no key): NAV:/PNAV:<TICKER>→SEC XBRL fund NAV/share and price÷NAV (PNAV:OBDC; NAV stamped at FILED date, never period end); BOND:<CUSIP|FINRA symbol>[:PX|:YLD]→FINRA TRACE single-bond price (% par) or yield % (BOND:21873SAG3:YLD; ≥1d = end-of-day print, <1d = trade candles ~1y; find CUSIPs with finance_bonds); BUYBACK:<bucket>[:OFFERED|ACCEPTED|MAX|COVER|FILL|ISSUES]→Treasury buyback ops (BUYBACK:20-30Y:COVER; one point per operation, stamped at op close); NYFED:<series>→SRF/RRP ops + SOFR/EFFR/BGCR/TGCR, _P1.._P99 percentiles, _VOL (NYFED:SRF, NYFED:SOFR_P99; rates stamped at next-day PUBLICATION, so FRED dates differ by a day); OFR:<mnemonic>→OFR repo/hedge-fund monitors + Financial Stress Index (OFR:FSI, OFR:REPO-DVP_OV_TOT-P; stamped at OBSERVATION date though released T+1 or later: no same-day causality); ETF:<TICKER>[:SO|NAV|AUM|FLOW|FLOW5|FLOW20]→shares outstanding / creations-redemptions in $mn (ETF:JNK:FLOW, ETF:SPY:FLOW; SSGA+ProShares full history, iShares/Direxion snapshot only); CBOE:→VX futures (CBOE:VX1, CBOE:VX2-VX1, CBOE:VXCONTANGO), daily put/call (CBOE:PCR_EQUITY, CBOE:PCR_SPX), chain snapshots CBOE:<GEX|ZEROGAMMA|PCR_OI|0DTE_SHARE|IV30|SPOT>:<ROOT> (CBOE:GEX:SPX); HL:<COIN>[:PX|FUNDING|FUNDING_APR|PREMIUM|OI|OI_USD]→Hyperliquid perps (HL:BTC:FUNDING_APR); DERIBIT:<DVOL|FUNDING|FUNDING_APR|SKEW25>:<ARG>→Deribit (DERIBIT:DVOL:BTC, DERIBIT:SKEW25:BTC:30D). ETF: and CBOE: are DAILY whatever the granularity (flows summed, never resampled). LIVE-ONLY single point at fetch time, no history (errors when as_of is >1h in the past; build history by polling): CBOE chain snapshots, HL OI/OI_USD, DERIBIT SKEW25. `sources` lists providers returned; every candle has a 't' timestamp — check it for freshness. OUTPUT NOTES: candles omit o/h/l when o==h==l==c AND no volume printed — for macro point series, carried-forward buckets in thin prediction markets, and the zero-volume bucket at a session boundary (a {t,c,v:0} candle at 20:00Z means the equity session ENDED there, not that price was flat). US equity INTRADAY series include pre/post-market bars; analytics.stats carries last + last_at — compare last_at to generated_at to judge staleness, and omit v when the whole series has zero volume (indices). `sources` lists every provider actually present; top-level `provider` is only the dispatch bucket. status: absent=all ok, partial=some tickers failed (see errors[]), error=nothing returned. Prediction-market ids come from finance_odds markets[].ticker (event tickers and Polymarket slugs do not resolve). Kalshi serves every granularity: 1m native, 5m/15m/30m resampled from 1m bars with Kalshi's hourly semantics (o/h/l/c from TRADES in the bucket, v = contracts summed; a bucket with no trade shows the yes bid/ask mid; a minute with no activity carries the last close forward with v:0), candles stamped at bucket START; native 1h/1d bars are stamped at bar END. Kalshi tickers not starting KX need the KALSHI: prefix (KALSHI:CONTROLS-2026-D).",
+    "description": "Universal data spine: OHLCV time series for every asset class on ONE shared time axis (stocks, FRED macro, futures, crypto, and prediction-market odds), with per-series return and annualized-volatility stats. PRESETS ARE THE POWER FEATURE — the `preset` arg pulls a whole curated domain in ONE call (18 available) and composes with ad-hoc `tickers` in the same call (e.g. preset=macro + tickers=NVDA,SMH gives the macro backdrop plus your names). Key presets: `macro` (34 series — CPI/PCE/jobs/GDP/rates/debt/M2 + live oil/gold/BTC), `recession` (Sahm rule, 10Y-2Y & 10Y-3M, claims, Chicago Fed), `credit` (full ICE BofA OAS stack IG→BBB→HY→BB→B→CCC→EM), `financial_conditions` (NFCI/STLFSI/VIX), `inflation`, `labor`, `housing`, `yield_curve` (1mo–30Y), `real_rates` (TIPS+breakevens), `consumer_credit`, `fed_balance_sheet` (QE/QT plumbing), `liquidity`, `forex_majors`, `crypto`, `sovereigns` (global 2/10/30Y yields: US, Bund, OAT, BTP, Gilt, JGB…), plus IBKR futures baskets `energy`/`commodities`/`treasuries` (full list + aliases in the `preset` arg). Reach for a preset before hand-listing tickers. For ad-hoc tickers, 18 providers auto-detect by pattern: stocks/ETFs/futures→Yahoo, FRED→FRED (or FRED: prefix), IBKR:→Interactive Brokers 15-min-delayed futures/FX/equities (e.g. IBKR:FUT:CL:NYMEX, IBKR:CASH:EUR:IDEALPRO), CLEV:→Cleveland Fed inflation nowcast, KX* or Kalshi market tickers→Kalshi, numeric 6+digit→Polymarket, PYTH:→24/7 oracle, BN:→Binance, GOVT:→global sovereign bond YIELDS in % (CNBC; e.g. GOVT:US10Y, GOVT:FR10Y, GOVT:DE2Y, GOVT:JP30Y, GOVT:GB10Y, GOVT:IT10Y; country code + tenor; daily back to 2000, intraday 1m/5m/30m/1h ~1y; the cross-country spread and curve shape behind US Treasury term premium). PLUMBING/CREDIT/LEVERAGE prefixes (no key): NAV:/PNAV:<TICKER>→SEC XBRL fund NAV/share and price÷NAV (PNAV:OBDC; NAV stamped at FILED date, never period end); BOND:<CUSIP|FINRA symbol>[:PX|:YLD]→FINRA TRACE single-bond price (% par) or yield % (BOND:21873SAG3:YLD; ≥1d = end-of-day print, <1d = trade candles ~1y; find CUSIPs with finance_bonds); BUYBACK:<bucket>[:OFFERED|ACCEPTED|MAX|COVER|FILL|ISSUES]→Treasury buyback ops (BUYBACK:20-30Y:COVER; one point per operation, stamped at op close); NYFED:<series>→SRF/RRP ops + SOFR/EFFR/BGCR/TGCR, _P1.._P99 percentiles, _VOL (NYFED:SRF, NYFED:SOFR_P99; rates stamped at next-day PUBLICATION, so FRED dates differ by a day); OFR:<mnemonic>→OFR repo/hedge-fund monitors + Financial Stress Index (OFR:FSI, OFR:REPO-DVP_OV_TOT-P; stamped at OBSERVATION date though released T+1 or later: no same-day causality); ETF:<TICKER>[:SO|NAV|AUM|FLOW|FLOW5|FLOW20]→shares outstanding / creations-redemptions in $mn (ETF:JNK:FLOW, ETF:SPY:FLOW; SSGA+ProShares full history, iShares/Direxion snapshot only); CBOE:→VX futures (CBOE:VX1, CBOE:VX2-VX1, CBOE:VXCONTANGO), daily put/call (CBOE:PCR_EQUITY, CBOE:PCR_SPX), chain snapshots CBOE:<GEX|ZEROGAMMA|PCR_OI|0DTE_SHARE|IV30|SPOT>:<ROOT> (CBOE:GEX:SPX); HL:<COIN>[:PX|FUNDING|FUNDING_APR|PREMIUM|OI|OI_USD]→Hyperliquid perps (HL:BTC:FUNDING_APR); DERIBIT:<DVOL|FUNDING|FUNDING_APR|SKEW25>:<ARG>→Deribit (DERIBIT:DVOL:BTC, DERIBIT:SKEW25:BTC:30D). ETF: and CBOE: are DAILY whatever the granularity (flows summed, never resampled). LIVE-ONLY single point at fetch time, no history (errors when as_of is >1h in the past; build history by polling): CBOE chain snapshots, HL OI/OI_USD, DERIBIT SKEW25. `sources` lists providers returned; every candle has a 't' timestamp — check it for freshness. OUTPUT NOTES: candles omit o/h/l when o==h==l==c AND no volume printed — for macro point series, carried-forward buckets in thin prediction markets, and the zero-volume bucket at a session boundary (a {t,c,v:0} candle at 20:00Z means the equity session ENDED there, not that price was flat). US equity INTRADAY series include pre/post-market bars; analytics.stats carries last + last_at — compare last_at to generated_at to judge staleness, and omit v when the whole series has zero volume (indices). `sources` lists every provider actually present; top-level `provider` is only the dispatch bucket. status: absent=all ok, partial=some tickers failed (see errors[]), error=nothing returned. Prediction-market ids come from finance_odds markets[].ticker (a bare Polymarket slug does not resolve; a Kalshi event ticker and POLYMARKET:EVENT:<event_ticker> return their legs, up to 30 deepest, and Polymarket adds an event_legs notice naming each leg). Polymarket: <id> is the Yes path, <id>:NO the No token's own path; candles come from observed prices (o/h/l/c = first/max/min/last in the bucket, stamped at bucket START, no volume; a bucket with no observation is omitted, never carried forward); 1m and 5m are true resolution and history reaches back over a year; when only coarser data exists a granularity_downgrade notice says so; a settled market ends at its payout (1 or 0). Kalshi serves every granularity: 1m native, 5m/15m/30m resampled from 1m bars with Kalshi's hourly semantics (o/h/l/c from TRADES in the bucket, v = contracts summed; a bucket with no trade shows the yes bid/ask mid; a minute with no activity carries the last close forward with v:0), candles stamped at bucket START; native 1h/1d bars are stamped at bar END. Every Kalshi markets[].ticker joins as-is, KX or not (CONTROLS-2026-D); only a one-dash non-KX event ticker needs KALSHI: (KALSHI:CONTROLS-2026). Kalshi markets settled before its historical cutoff come from Kalshi's archive automatically, so past FOMC or election legs return their pre-settlement path.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -11,7 +11,7 @@
         },
         "tickers": {
           "type": "string",
-          "description": "Comma-separated. Stocks: AAPL,SPY,CL=F. FRED: UNRATE,T10Y2Y. IBKR futures: IBKR:FUT:CL:NYMEX, IBKR:FUT:GC:COMEX. IBKR FX: IBKR:CASH:EUR:IDEALPRO. IBKR equities: IBKR:STK:2222:TADAWUL. Cleveland Fed: CLEV:CPI,CLEV:COREPCE. Pyth: PYTH:OIL,PYTH:BTC. Kalshi: KXNBERRECESSQ-Q1-2026. Polymarket: 609655. Binance: BN:BTCUSDT. Sovereign yields: GOVT:US10Y,GOVT:FR10Y,GOVT:DE10Y,GOVT:JP30Y (any CC+tenor, e.g. GOVT:IT2Y). Fund NAV: NAV:OBDC, PNAV:FSK. Bonds: BOND:21873SAG3:YLD, BOND:68389XEC5:PX. Buybacks: BUYBACK:10-20Y:COVER. NY Fed: NYFED:SRF, NYFED:SOFR_P99. OFR: OFR:FSI, OFR:REPO-DVP_OV_TOT-P. ETF flows: ETF:JNK:FLOW, ETF:HYG:AUM. CBOE: CBOE:VXCONTANGO, CBOE:PCR_EQUITY, CBOE:GEX:SPX. Hyperliquid: HL:BTC:FUNDING_APR. Deribit: DERIBIT:DVOL:BTC. Mix freely in one call."
+          "description": "Comma-separated. Stocks: AAPL,SPY,CL=F. FRED: UNRATE,T10Y2Y. IBKR futures: IBKR:FUT:CL:NYMEX, IBKR:FUT:GC:COMEX. IBKR FX: IBKR:CASH:EUR:IDEALPRO. IBKR equities: IBKR:STK:2222:TADAWUL. Cleveland Fed: CLEV:CPI,CLEV:COREPCE. Pyth: PYTH:OIL,PYTH:BTC. Kalshi: KXNBERRECESSQ-Q1-2026, CONTROLS-2026-D, or an event like KXFEDDECISION-26DEC (all legs). Polymarket: 609655, 609655:NO, or POLYMARKET:EVENT:<event_ticker> (all legs). Binance: BN:BTCUSDT. Sovereign yields: GOVT:US10Y,GOVT:FR10Y,GOVT:DE10Y,GOVT:JP30Y (any CC+tenor, e.g. GOVT:IT2Y). Fund NAV: NAV:OBDC, PNAV:FSK. Bonds: BOND:21873SAG3:YLD, BOND:68389XEC5:PX. Buybacks: BUYBACK:10-20Y:COVER. NY Fed: NYFED:SRF, NYFED:SOFR_P99. OFR: OFR:FSI, OFR:REPO-DVP_OV_TOT-P. ETF flows: ETF:JNK:FLOW, ETF:HYG:AUM. CBOE: CBOE:VXCONTANGO, CBOE:PCR_EQUITY, CBOE:GEX:SPX. Hyperliquid: HL:BTC:FUNDING_APR. Deribit: DERIBIT:DVOL:BTC. Mix freely in one call."
         },
         "range": {
           "type": "string",
@@ -157,13 +157,13 @@
   },
   {
     "name": "finance_odds",
-    "description": "Prediction market discovery + live pricing (Kalshi + Polymarket). Search accepts words, phrases, and exact tickers (round-tripping a ticker the tool returned works); exact word matches rank ahead of prefix expansions. Examples: 'recession', 'tariff', 'fed', 'oil', 'iran'. Returns probability_yes (0-1), volume_usd, bid/ask. JOIN CONTRACT: markets[].ticker is the id that joins finance_timeseries --tickers for probability HISTORY (Polymarket numeric id, Kalshi market leg like KXFEDDECISION-26JUL-H0). event_ticker does NOT join — it names the parent event. If stdout omitted rows, a stdout_compaction block says how many; pass out for the full set.",
+    "description": "Prediction market discovery + live pricing (Kalshi + Polymarket). Search accepts words, phrases, and exact tickers (round-tripping a ticker the tool returned works); exact word matches rank ahead of prefix expansions. Examples: 'recession', 'tariff', 'fed', 'oil', 'iran'. Returns probability_yes (0-1), volume_usd, bid/ask. JOIN CONTRACT: markets[].ticker is the id that joins finance_timeseries --tickers for probability HISTORY (Polymarket numeric id, Kalshi market leg like KXFEDDECISION-26JUL-H0 or CONTROLS-2026-D). A Kalshi event_ticker expands to its legs in finance_timeseries, and so does a Polymarket one written POLYMARKET:EVENT:<event_ticker>. events[] groups each Kalshi or Polymarket event with every leg (legs[]: ticker, outcome, p; mutually_exclusive when at most one leg pays), so a Fed decision or a strike ladder reads as one distribution. volume_usd is lifetime volume on both venues (volume_24h_usd is the last day). Rows add chg_24h_pp (the venue's own day-ago move) when it moved; status=settled rows carry result and settled_at. Polymarket combo/parlay legs carry combo=true and rank below single questions. trades=true with a Kalshi market or Polymarket id: prints (UTC time, yes price, contracts, taker side; Polymarket adds usd and a short wallet) over since/until with taker-yes vs taker-no totals. market=<Polymarket id> alone returns one market: bid/ask, lifetime and 24h volume, open interest, 1h/24h/1w/1mo moves, close or settlement, resolution rules, every sibling leg, and a timeseries map naming which ticker returns which outcome. If stdout omitted rows, a stdout_compaction block says how many; pass out for the full set.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "search": {
           "type": "string",
-          "description": "Single-word keyword works best (e.g. recession, tariff, fed, bitcoin, oil, iran, hormuz)"
+          "description": "Keyword or phrase (e.g. recession, fed, oil, hormuz, 'ohio senate') or an exact ticker. Kalshi searches its live index, so phrases and new markets work."
         },
         "live": {
           "type": "boolean",
@@ -171,11 +171,11 @@
         },
         "orderbook": {
           "type": "boolean",
-          "description": "Include Polymarket orderbook depth in returned markets"
+          "description": "Include orderbook depth in returned markets. Kalshi rows get orderbook.yes_bids / no_bids as [price, contracts], best first (Kalshi books hold bids only; a NO bid at q is a YES offer at 1-q)."
         },
         "depth": {
           "type": "integer",
-          "description": "Number of bid/ask levels per outcome. Defaults to 5 if orderbook=true. Polymarket only."
+          "description": "Number of book levels per side. Defaults to 5 if orderbook=true."
         },
         "limit": {
           "type": "integer",
@@ -220,7 +220,7 @@
         },
         "min_volume": {
           "type": "integer",
-          "description": "Minimum 24h USD volume filter on local-cache search."
+          "description": "Minimum lifetime USD volume per market."
         },
         "top": {
           "type": "integer",
@@ -239,7 +239,7 @@
         },
         "category": {
           "type": "string",
-          "description": "Category filter."
+          "description": "Category filter. On Polymarket it also matches event tags (e.g. elections, crypto)."
         },
         "profile": {
           "type": "string",
@@ -280,7 +280,31 @@
         },
         "status": {
           "type": "string",
-          "description": "Filter by status (e.g. open, closed)."
+          "description": "Search: open (default), closed, settled, all (both venues; settled rows carry result + settled_at). List endpoints: passed through."
+        },
+        "closing_within": {
+          "type": "string",
+          "description": "Search: only legs closing inside this window (30m, 6h, 2d, 1w)."
+        },
+        "trades": {
+          "type": "boolean",
+          "description": "With market: recent trades. Polymarket id: taker fills with usd, filter with min_trade_usd. Kalshi ticker: tick-level prints over since/until, taker-side totals, the largest prints (limit, default 50) in time order; prints before Kalshi's archive cutoff come from the archive."
+        },
+        "since": {
+          "type": "string",
+          "description": "Trades window start: RFC3339, YYYY-MM-DD, or a lookback like 6h, 2d (default 24h)."
+        },
+        "until": {
+          "type": "string",
+          "description": "Trades window end: RFC3339 or YYYY-MM-DD (default now)."
+        },
+        "min_contracts": {
+          "type": "number",
+          "description": "Kalshi trades: only prints of at least this many contracts."
+        },
+        "min_trade_usd": {
+          "type": "number",
+          "description": "Polymarket trades: only prints of at least this many USD."
         }
       }
     }

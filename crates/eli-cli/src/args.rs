@@ -1645,13 +1645,30 @@ struct FinanceOddsArgs {
     #[arg(long)]
     event: Option<String>,
 
-    /// Market ticker.
+    /// Market ticker (Kalshi) or numeric id (Polymarket: one market, every sibling leg).
     #[arg(long)]
     market: Option<String>,
 
-    /// Filter by status (e.g. open).
+    /// Filter by status. With --search: open (default), closed, settled, all (Kalshi;
+    /// settled rows carry result + settled_at). With list endpoints: passed through.
     #[arg(long)]
     status: Option<String>,
+
+    /// With --search: only Kalshi legs closing inside this window (30m, 6h, 2d, 1w).
+    #[arg(long = "closing-within", alias = "closing_within")]
+    closing_within: Option<String>,
+
+    /// --trades window start: RFC3339, YYYY-MM-DD, or a lookback like 6h, 2d (default 24h).
+    #[arg(long, requires = "trades")]
+    since: Option<String>,
+
+    /// --trades window end: RFC3339 or YYYY-MM-DD (default now).
+    #[arg(long, requires = "trades")]
+    until: Option<String>,
+
+    /// Kalshi --trades: only prints of at least this many contracts.
+    #[arg(long = "min-contracts", alias = "min_contracts", requires = "trades")]
+    min_contracts: Option<f64>,
 
     /// Page size limit.
     #[arg(long)]
@@ -1685,7 +1702,8 @@ struct FinanceOddsArgs {
     #[arg(long)]
     category: Option<String>,
 
-    /// Case-insensitive literal substring match (titles/tickers/slugs).
+    /// Search words, a phrase, or an exact ticker. Live on both venues (Kalshi via its
+    /// own search index; add --status settled for resolved markets).
     #[arg(long, alias = "query")]
     search: Option<String>,
 
@@ -1693,7 +1711,7 @@ struct FinanceOddsArgs {
     #[arg(long)]
     country: Option<String>,
 
-    /// Minimum market volume in USD (local CSV search).
+    /// Minimum lifetime market volume in USD.
     #[arg(long = "min-volume", alias = "min_volume")]
     min_volume: Option<f64>,
 
@@ -1745,13 +1763,23 @@ struct FinanceOddsArgs {
     #[arg(long, default_value_t = false)]
     include_mentions: bool,
 
-    /// Include orderbook depth (heavier call; Polymarket orderbook supported).
+    /// Include orderbook depth (heavier call). Kalshi books are bids only:
+    /// yes_bids / no_bids as [price, contracts], best first.
     #[arg(long)]
     orderbook: bool,
 
     /// Orderbook depth (levels).
     #[arg(long)]
     depth: Option<usize>,
+
+    /// With --market (Kalshi ticker or Polymarket id): prints over --since/--until
+    /// with taker-side totals and the largest prints (--limit, default 50) in time order.
+    #[arg(long)]
+    trades: bool,
+
+    /// Polymarket --trades: only prints of at least this many USD.
+    #[arg(long = "min-trade-usd", alias = "min_trade_usd", requires = "trades")]
+    min_trade_usd: Option<f64>,
 
     /// Output format (currently: json).
     #[arg(long, default_value = "json")]
@@ -2146,7 +2174,7 @@ struct FinanceTimeseriesArgs {
     #[arg(long)]
     as_of: Option<String>,
 
-    /// Data provider (auto | yahoo | fred | ibkr | pyth | binance | govt | secnav | bond | buyback | nyfed | ofr | etf | cboe | hyperliquid | deribit). "auto" routes by ticker prefix: PYTH:/CLEV:/IBKR:/BN:/GOVT:/FRED:/NAV:/PNAV:/BOND:/BUYBACK:/NYFED:/OFR:/ETF:/CBOE:/HL:/DERIBIT: → matching provider; numeric (Polymarket) and KX*-prefix (Kalshi) auto-detected; bare names → Yahoo, with FRED fallback for macro-style IDs.
+    /// Data provider (auto | yahoo | fred | ibkr | pyth | binance | govt | secnav | bond | buyback | nyfed | ofr | etf | cboe | hyperliquid | deribit). "auto" routes by ticker prefix: PYTH:/CLEV:/IBKR:/BN:/GOVT:/FRED:/NAV:/PNAV:/BOND:/BUYBACK:/NYFED:/OFR:/ETF:/CBOE:/HL:/DERIBIT: → matching provider; numeric (Polymarket) and Kalshi tickers (KX*, or SERIES-EVENT-LEG like CONTROLS-2026-D; KALSHI: for one-dash event tickers) auto-detected; bare names → Yahoo, with FRED fallback for macro-style IDs.
     #[arg(long, default_value = "auto")]
     provider: String,
 
