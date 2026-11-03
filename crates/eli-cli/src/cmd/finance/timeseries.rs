@@ -271,9 +271,35 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             let start = end
                 .checked_sub_signed(range.approx_duration())
                 .ok_or_else(|| anyhow::anyhow!("range underflow"))?;
-            let (market_series, market_errors) =
-                fetch_prediction_market_series_batch(&prediction_markets, start, end, granularity)
-                    .await;
+            // Same --max-points-per-ticker guard the core applies to every other
+            // provider (this standalone path never reaches the core). Matters
+            // now that Kalshi serves 1m bars: 1y at 1m is 525k points.
+            let cap_error = args.max_points_per_ticker.map(|v| v.max(2)).and_then(|max_points| {
+                let step = granularity.approx_duration().num_seconds().max(1);
+                let approx_points = ((end - start).num_seconds() / step).max(1) as usize + 1;
+                (approx_points > max_points).then(|| {
+                    format!(
+                        "requested ~{approx_points} points per ticker exceeds limit {max_points}; use a coarser --granularity for this window, or reduce range"
+                    )
+                })
+            });
+            let (market_series, market_errors) = match cap_error {
+                Some(message) => (
+                    Vec::new(),
+                    prediction_markets
+                        .iter()
+                        .map(|req| eli_core::finance::TimeseriesError {
+                            ticker: prediction_market_request_label(req),
+                            stage: Some("max_points".to_string()),
+                            message: message.clone(),
+                        })
+                        .collect(),
+                ),
+                None => {
+                    fetch_prediction_market_series_batch(&prediction_markets, start, end, granularity)
+                        .await
+                }
+            };
             if market_series.is_empty() {
                 // Emit the same JSON error envelope every other provider path
                 // uses (a bare anyhow bail printed plain text + exit 1, so
@@ -2103,6 +2129,117 @@ fn granularity_minutes(span: eli_core::finance::Span) -> i64 {
     ((granularity_seconds(span) + 59) / 60).max(1)
 }
 
+/// Kalshi's batch candlestick endpoint rejects any request whose window spans
+/// more than 10,000 candles across all markets ("requested candlesticks across
+/// all markets: 11520, max candlesticks: 10000"). One market per request, so a
+/// page holds at most this many native bars; kept under the cap for headroom.
+const KALSHI_MAX_CANDLES_PER_REQUEST: i64 = 9_000;
+/// Hard ceiling on pages per series (~187 days of 1m bars). Beyond this a
+/// sub-hour request is the wrong lens: use 1h.
+const KALSHI_MAX_PAGES: i64 = 30;
+
+/// One native Kalshi candlestick, already projected onto the requested side.
+/// `traded` = the bar carried a trade print (`price.close_dollars` non-null);
+/// otherwise o/h/l/c are the quote-derived fallback (yes bid/ask mid, then the
+/// last trade before the bar).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct KalshiBar {
+    end_ts: i64,
+    o: f64,
+    h: f64,
+    l: f64,
+    c: f64,
+    v: Option<f64>,
+    traded: bool,
+}
+
+/// Resample native Kalshi 1-minute bars (stamped by `end_ts`, the inclusive end
+/// of the minute) into `step_secs` candles stamped at bucket START on absolute
+/// UTC boundaries, with the same price semantics as Kalshi's native hourly bars:
+/// - a bucket with at least one traded minute: open = first traded open,
+///   high/low = traded extremes, close = last traded close (quote-only minutes
+///   inside the bucket are ignored, exactly as the hourly `price` block does);
+/// - a bucket with activity but no trades: flat at the last minute's quote
+///   fallback (the hourly path's yes bid/ask mid), v = 0;
+/// - a bucket with no native bar at all (Kalshi omits minutes where neither
+///   trades nor quotes changed): flat carry-forward of the previous close,
+///   v = 0, so thin stretches read as `{t, c}` after point-collapse;
+/// Volume is summed. Buckets run from the first bar's bucket through the bucket
+/// containing `end` (never past it); buckets ending before `start` are dropped
+/// after they have seeded the carry-forward.
+fn resample_kalshi_minute_bars(
+    bars: &[KalshiBar],
+    step_secs: i64,
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+) -> Vec<eli_core::finance::Candle> {
+    let step = step_secs.max(60);
+    let mut sorted: Vec<KalshiBar> = bars.to_vec();
+    // Traded bar first on a timestamp tie (e.g. the synthetic seed bar).
+    sorted.sort_by_key(|b| (b.end_ts, !b.traded));
+    sorted.dedup_by_key(|b| b.end_ts);
+
+    // bucket start → bars in it (a 1m bar ending at T covers [T-60, T)).
+    let mut buckets: BTreeMap<i64, Vec<KalshiBar>> = BTreeMap::new();
+    for b in &sorted {
+        let bar_start = b.end_ts - 60;
+        buckets
+            .entry(bar_start.div_euclid(step) * step)
+            .or_default()
+            .push(*b);
+    }
+    let Some((&first_bucket, _)) = buckets.iter().next() else {
+        return Vec::new();
+    };
+    // First FULL bucket at/after `start` (a partial leading bucket would carry
+    // only a few minutes); earlier buckets still seed the carry-forward.
+    let start_bucket = (start.timestamp() + step - 1).div_euclid(step) * step;
+    let last_bucket = (end.timestamp() - 1).div_euclid(step) * step;
+
+    let mut out = Vec::new();
+    let mut prev_close: Option<f64> = None;
+    let mut t = first_bucket;
+    while t <= last_bucket {
+        let candle = match buckets.get(&t) {
+            Some(in_bucket) => {
+                let traded: Vec<&KalshiBar> = in_bucket.iter().filter(|b| b.traded).collect();
+                let vol: Option<f64> = {
+                    let vs: Vec<f64> = in_bucket.iter().filter_map(|b| b.v).collect();
+                    (!vs.is_empty()).then(|| vs.iter().sum())
+                };
+                if let (Some(first), Some(last)) = (traded.first(), traded.last()) {
+                    let h = traded.iter().map(|b| b.h).fold(f64::MIN, f64::max);
+                    let l = traded.iter().map(|b| b.l).fold(f64::MAX, f64::min);
+                    Some((first.o, h, l, last.c, vol))
+                } else {
+                    // Quote-only bucket: flat at the last quote fallback.
+                    let c = in_bucket.last().map(|b| b.c).unwrap_or_default();
+                    Some((c, c, c, c, Some(vol.unwrap_or(0.0))))
+                }
+            }
+            None => prev_close.map(|c| (c, c, c, c, Some(0.0))),
+        };
+        if let Some((o, h, l, c, v)) = candle {
+            prev_close = Some(c);
+            if t >= start_bucket {
+                if let Some(ts) = chrono::DateTime::<chrono::Utc>::from_timestamp(t, 0) {
+                    out.push(eli_core::finance::Candle {
+                        t: ts,
+                        o,
+                        h,
+                        l,
+                        c,
+                        v,
+                        kind: None,
+                    });
+                }
+            }
+        }
+        t += step;
+    }
+    out
+}
+
 async fn fetch_kalshi_market_series(
     req: &PredictionMarketRequest,
     start: chrono::DateTime<chrono::Utc>,
@@ -2151,34 +2288,32 @@ async fn fetch_kalshi_market_series(
         yes_bid: Option<KalshiBidAsk>,
         #[serde(default)]
         yes_ask: Option<KalshiBidAsk>,
+        // Kalshi's only volume field is the fixed-point string `volume_fp`
+        // ("2963.10" contracts); the legacy integer `volume` is kept as a fallback.
+        #[serde(default)]
+        volume_fp: Option<String>,
         #[serde(default)]
         volume: Option<i64>,
     }
 
     let requested_seconds = granularity_seconds(granularity);
 
-    // Kalshi's candlestick API only truly supports period_interval=60 (1h) and
-    // 1440 (daily).  All other values silently degrade to daily bars.
-    // Strategy: fetch at the finest supported native interval, then resample
-    // locally to the target granularity.
+    // Kalshi's candlestick API supports period_interval = 1 (1m), 60 (1h) and
+    // 1440 (1d); other values silently degrade to daily bars. Fetch at the
+    // finest native interval at or below the target and resample locally.
+    //   sub-hour (1m/5m/15m/30m): native 1m, paged under the 10k-candle cap;
+    //     5m/15m/30m resample with hourly-consistent trade semantics.
+    //   1h: native. 2h/4h/...: native 1h resampled. ≥1d: native daily.
     let (api_interval_minutes, needs_resample) = if requested_seconds >= 86400 {
-        // Daily or coarser: use native daily.
         (1440_i64, false)
     } else if requested_seconds < 3600 {
-        // Sub-hour: Kalshi doesn't support it.  Fail explicitly rather than
-        // inventing fake bars.
-        anyhow::bail!(
-            "kalshi candlesticks do not support sub-hourly granularity (requested {}s); \
-             use --granularity 1h or coarser",
-            requested_seconds
-        );
+        (1_i64, requested_seconds > 60)
     } else if requested_seconds == 3600 {
-        // Exact 1h: native.
         (60_i64, false)
     } else {
-        // 2h, 3h, 4h, 6h, etc.: fetch 1h, resample locally.
         (60_i64, true)
     };
+    let minute_path = api_interval_minutes == 1;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -2189,38 +2324,68 @@ async fn fetch_kalshi_market_series(
 
     let start_ts = start.timestamp();
     let end_ts = end.timestamp();
-    let start_ts_s = start_ts.to_string();
-    let end_ts_s = end_ts.to_string();
     let interval_s = api_interval_minutes.to_string();
-
-    let resp = client
-        .get(KALSHI_CANDLESTICKS_URL)
-        .query(&[
-            ("market_tickers", req.market.as_str()),
-            ("start_ts", start_ts_s.as_str()),
-            ("end_ts", end_ts_s.as_str()),
-            ("period_interval", interval_s.as_str()),
-        ])
-        .send()
-        .await
-        .context("request kalshi candlesticks")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+    let page_span_secs = KALSHI_MAX_CANDLES_PER_REQUEST * api_interval_minutes * 60;
+    let pages_needed = ((end_ts - start_ts).max(1) + page_span_secs - 1) / page_span_secs;
+    if pages_needed > KALSHI_MAX_PAGES {
         anyhow::bail!(
-            "kalshi candlesticks failed for market {}: http {}: {}",
-            req.market,
-            status,
-            body.chars().take(400).collect::<String>()
+            "kalshi {}m candles over this window need {} requests (cap {}); use --granularity 1h or a shorter --range",
+            api_interval_minutes,
+            pages_needed,
+            KALSHI_MAX_PAGES
         );
     }
 
-    let parsed: KalshiResp = resp
-        .json()
-        .await
-        .context("parse kalshi candlesticks response")?;
-    let market = parsed.markets.into_iter().next().ok_or_else(|| {
+    let mut market_ticker: Option<String> = None;
+    let mut raw_candles: Vec<KalshiCandle> = Vec::new();
+    let mut page_start = start_ts;
+    while page_start <= end_ts {
+        let page_end = (page_start + page_span_secs - 1).min(end_ts);
+        let page_start_s = page_start.to_string();
+        let page_end_s = page_end.to_string();
+        let mut query: Vec<(&str, &str)> = vec![
+            ("market_tickers", req.market.as_str()),
+            ("start_ts", page_start_s.as_str()),
+            ("end_ts", page_end_s.as_str()),
+            ("period_interval", interval_s.as_str()),
+        ];
+        // Minute bars are sparse (Kalshi omits minutes with no trade and no
+        // quote change), so seed the window with the last real bar before it:
+        // Kalshi prepends a synthetic bar whose `previous` is that bar's close.
+        if minute_path && page_start == start_ts {
+            query.push(("include_latest_before_start", "true"));
+        }
+
+        let resp = client
+            .get(KALSHI_CANDLESTICKS_URL)
+            .query(&query)
+            .send()
+            .await
+            .context("request kalshi candlesticks")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "kalshi candlesticks failed for market {}: http {}: {}",
+                req.market,
+                status,
+                body.chars().take(400).collect::<String>()
+            );
+        }
+
+        let parsed: KalshiResp = resp
+            .json()
+            .await
+            .context("parse kalshi candlesticks response")?;
+        if let Some(m) = parsed.markets.into_iter().next() {
+            market_ticker.get_or_insert(m.market_ticker);
+            raw_candles.extend(m.candlesticks);
+        }
+        page_start = page_end + 1;
+    }
+
+    let market_ticker = market_ticker.ok_or_else(|| {
         // Bare event tickers (KXFEDDECISION-26JUL) hit this: candlesticks only
         // exist for market legs. Say so instead of a dead-end "no data".
         let has_leg_suffix = req
@@ -2239,13 +2404,14 @@ async fn fetch_kalshi_market_series(
         }
     })?;
 
-    let mut candles: Vec<eli_core::finance::Candle> = Vec::new();
-    for kc in market.candlesticks {
-        let yes_close = kc
+    let mut bars: Vec<KalshiBar> = Vec::new();
+    for kc in raw_candles {
+        let traded_close = kc
             .price
             .as_ref()
             .and_then(|p| p.close_dollars.as_deref())
-            .and_then(parse_decimal)
+            .and_then(parse_decimal);
+        let yes_close = traded_close
             .or_else(|| {
                 match (
                     kc.yes_bid
@@ -2292,19 +2458,67 @@ async fn fetch_kalshi_market_series(
             .and_then(parse_decimal)
             .unwrap_or(yes_close);
 
-        let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(kc.end_period_ts, 0)
-            .ok_or_else(|| anyhow::anyhow!("invalid kalshi candlestick timestamp"))?;
-
-        candles.push(eli_core::finance::Candle {
-            t: ts,
+        // Project onto the requested side. NO = 1 - YES flips the range, so
+        // re-take max/min after projecting (YES high is NO low).
+        let (a, b) = (req.side.apply(yes_high), req.side.apply(yes_low));
+        bars.push(KalshiBar {
+            end_ts: kc.end_period_ts,
             o: req.side.apply(yes_open),
-            h: req.side.apply(yes_high),
-            l: req.side.apply(yes_low),
+            h: a.max(b),
+            l: a.min(b),
             c: req.side.apply(yes_close),
-            v: kc.volume.map(|v| v as f64),
-            kind: None,
+            v: kc
+                .volume_fp
+                .as_deref()
+                .and_then(parse_decimal)
+                .or(kc.volume.map(|v| v as f64)),
+            traded: traded_close.is_some(),
         });
     }
+
+    if bars.is_empty() {
+        anyhow::bail!(
+            "no usable kalshi candlesticks found for market {} in requested window",
+            req.market
+        );
+    }
+
+    bars.sort_by_key(|b| (b.end_ts, !b.traded));
+    bars.dedup_by_key(|b| b.end_ts);
+
+    let candles: Vec<eli_core::finance::Candle> = if minute_path {
+        // Native 1m and resampled 5m/15m/30m share one path: start-of-bar
+        // stamps on absolute UTC boundaries, gaps carried forward.
+        resample_kalshi_minute_bars(&bars, requested_seconds, start, end)
+    } else {
+        let mut candles: Vec<eli_core::finance::Candle> = Vec::with_capacity(bars.len());
+        for b in &bars {
+            let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(b.end_ts, 0)
+                .ok_or_else(|| anyhow::anyhow!("invalid kalshi candlestick timestamp"))?;
+            candles.push(eli_core::finance::Candle {
+                t: ts,
+                o: b.o,
+                h: b.h,
+                l: b.l,
+                c: b.c,
+                v: b.v,
+                kind: None,
+            });
+        }
+        if needs_resample {
+            // Kalshi timestamps are end-of-bar (the API field is `end_period_ts`).
+            // Convert to start-of-bar ONLY for resampling so that the absolute-clock
+            // resampler places each bar in the correct bucket.  We do NOT touch
+            // timestamps for native 1h or 1d output — those are correct as-is.
+            let native_step_secs = api_interval_minutes * 60;
+            for c in &mut candles {
+                c.t = c.t - chrono::Duration::seconds(native_step_secs);
+            }
+            let step = chrono::Duration::seconds(requested_seconds);
+            candles = eli_core::finance::resample_candles(&candles, start, step);
+        }
+        candles
+    };
 
     if candles.is_empty() {
         anyhow::bail!(
@@ -2313,31 +2527,15 @@ async fn fetch_kalshi_market_series(
         );
     }
 
-    candles.sort_by_key(|c| c.t);
-
-    // Resample 1h bars → target granularity if needed.
-    if needs_resample {
-        // Kalshi timestamps are end-of-bar (the API field is `end_period_ts`).
-        // Convert to start-of-bar ONLY for resampling so that the absolute-clock
-        // resampler places each bar in the correct bucket.  We do NOT touch
-        // timestamps for native 1h or 1d output — those are correct as-is.
-        let native_step_secs = api_interval_minutes * 60;
-        for c in &mut candles {
-            c.t = c.t - chrono::Duration::seconds(native_step_secs);
-        }
-        let step = chrono::Duration::seconds(requested_seconds);
-        candles = eli_core::finance::resample_candles(&candles, start, step);
-    }
-
     Ok(eli_core::finance::TickerSeries {
         ticker: format!(
             "KALSHI:{}:{}",
-            market.market_ticker,
+            market_ticker,
             req.side.as_str().to_ascii_uppercase()
         ),
         candles,
         source: Some("kalshi".to_string()),
-        upstream_id: Some(market.market_ticker.clone()),
+        upstream_id: Some(market_ticker.clone()),
     })
 }
 
@@ -3575,6 +3773,113 @@ async fn fetch_constituent_history(
 mod timeseries_tests {
     use super::*;
     use chrono::TimeZone;
+
+    // 2026-11-03T23:00:00Z, a 15-minute boundary.
+    const T0: i64 = 1_793_746_800;
+
+    fn kbar(minute: i64, o: f64, h: f64, l: f64, c: f64, v: f64, traded: bool) -> KalshiBar {
+        // A 1m bar covering [T0 + 60*minute, +60) is stamped at its END.
+        KalshiBar { end_ts: T0 + 60 * (minute + 1), o, h, l, c, v: Some(v), traded }
+    }
+
+    fn quote(minute: i64, mid: f64) -> KalshiBar {
+        kbar(minute, mid, mid, mid, mid, 0.0, false)
+    }
+
+    fn utc(ts: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.timestamp_opt(ts, 0).unwrap()
+    }
+
+    #[test]
+    fn kalshi_resample_5m_uses_trades_only_and_sums_volume() {
+        let bars = vec![
+            quote(0, 0.50),                                 // quote-only: ignored for OHLC
+            kbar(1, 0.52, 0.55, 0.51, 0.54, 10.0, true),
+            kbar(3, 0.54, 0.60, 0.53, 0.58, 5.0, true),
+            quote(4, 0.45),                                 // trailing quote: close stays last trade
+        ];
+        let out = resample_kalshi_minute_bars(&bars, 300, utc(T0), utc(T0 + 300));
+        assert_eq!(out.len(), 1);
+        let c = &out[0];
+        assert_eq!(c.t.timestamp(), T0, "stamped at bucket START");
+        assert_eq!((c.o, c.h, c.l, c.c), (0.52, 0.60, 0.51, 0.58));
+        assert_eq!(c.v, Some(15.0));
+    }
+
+    #[test]
+    fn kalshi_resample_quote_only_bucket_is_flat_at_last_quote() {
+        let bars = vec![quote(0, 0.40), quote(2, 0.42)];
+        let out = resample_kalshi_minute_bars(&bars, 300, utc(T0), utc(T0 + 300));
+        assert_eq!(out.len(), 1);
+        let c = &out[0];
+        assert_eq!((c.o, c.h, c.l, c.c, c.v), (0.42, 0.42, 0.42, 0.42, Some(0.0)));
+    }
+
+    #[test]
+    fn kalshi_resample_carries_forward_missing_buckets_to_window_end() {
+        // Trade in the first 5m bucket, then silence for 15 minutes.
+        let bars = vec![kbar(2, 0.30, 0.31, 0.29, 0.31, 7.0, true)];
+        let out = resample_kalshi_minute_bars(&bars, 300, utc(T0), utc(T0 + 1200));
+        let ts: Vec<i64> = out.iter().map(|c| c.t.timestamp() - T0).collect();
+        assert_eq!(ts, vec![0, 300, 600, 900]);
+        for c in &out[1..] {
+            assert_eq!((c.o, c.h, c.l, c.c, c.v), (0.31, 0.31, 0.31, 0.31, Some(0.0)));
+        }
+    }
+
+    #[test]
+    fn kalshi_native_1m_fills_gaps_and_keeps_bar_ohlc() {
+        let bars = vec![
+            kbar(0, 0.70, 0.72, 0.69, 0.71, 3.0, true),
+            quote(3, 0.705),
+        ];
+        let out = resample_kalshi_minute_bars(&bars, 60, utc(T0), utc(T0 + 300));
+        let got: Vec<(i64, f64, Option<f64>)> =
+            out.iter().map(|c| (c.t.timestamp() - T0, c.c, c.v)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, 0.71, Some(3.0)),
+                (60, 0.71, Some(0.0)),   // gap: carried forward
+                (120, 0.71, Some(0.0)),  // gap: carried forward
+                (180, 0.705, Some(0.0)), // quote-only minute: quote mid
+                (240, 0.705, Some(0.0)), // gap after the quote
+            ]
+        );
+        assert_eq!((out[0].o, out[0].h, out[0].l), (0.70, 0.72, 0.69));
+    }
+
+    #[test]
+    fn kalshi_resample_seed_before_start_only_seeds_carry_forward() {
+        // Seed bar (last real bar before the window) sits in the bucket before
+        // `start`; the window's first bucket has no bars and must carry it.
+        let start = T0 + 300;
+        let bars = vec![kbar(4, 0.62, 0.62, 0.62, 0.62, 1.0, true)];
+        let out = resample_kalshi_minute_bars(&bars, 300, utc(start), utc(start + 600));
+        let ts: Vec<i64> = out.iter().map(|c| c.t.timestamp() - T0).collect();
+        assert_eq!(ts, vec![300, 600]);
+        assert!(out.iter().all(|c| c.c == 0.62 && c.v == Some(0.0)));
+    }
+
+    #[test]
+    fn kalshi_resample_partial_leading_bucket_dropped_and_traded_wins_tie() {
+        // start falls mid-bucket: the partial [T0, T0+900) bucket is dropped.
+        let mut bars = vec![
+            quote(10, 0.20),
+            kbar(16, 0.21, 0.23, 0.21, 0.22, 4.0, true),
+        ];
+        // Duplicate timestamp: quote-only copy of the traded minute must lose.
+        bars.push(quote(16, 0.99));
+        let out = resample_kalshi_minute_bars(&bars, 900, utc(T0 + 420), utc(T0 + 1800));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].t.timestamp(), T0 + 900);
+        assert_eq!((out[0].o, out[0].h, out[0].l, out[0].c), (0.21, 0.23, 0.21, 0.22));
+    }
+
+    #[test]
+    fn kalshi_resample_empty_input_is_empty() {
+        assert!(resample_kalshi_minute_bars(&[], 300, utc(T0), utc(T0 + 600)).is_empty());
+    }
 
     #[test]
     fn new_prefix_providers_route_to_their_own_bucket() {

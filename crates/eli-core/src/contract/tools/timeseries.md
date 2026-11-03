@@ -33,6 +33,8 @@ eli finance bonds --issuer "ORACLE CORP"     # list an issuer's CUSIPs (exact FI
 | `HL:` | `HL:BTC:FUNDING_APR`, `HL:ETH:PX`, `HL:BTC:OI_USD` | Hyperliquid | OI / OI_USD LIVE-ONLY. Funding stamped at hourly settlement. |
 | `DERIBIT:` | `DERIBIT:DVOL:BTC`, `DERIBIT:FUNDING_APR:BTC`, `DERIBIT:SKEW25:BTC:30D` | Deribit | SKEW25 LIVE-ONLY. Funding stamped at end of the hour it covers. |
 
+**Prediction markets (Kalshi `KX*` / `KALSHI:<ticker>`, Polymarket numeric id):** Kalshi supports every granularity. `1m` is native; `5m`/`15m`/`30m` are resampled from 1m bars with the same semantics as Kalshi's native hourly bars: o/h/l/c come from trades in the bucket, `v` sums contracts, a bucket with no trade shows the yes bid/ask mid, and minutes with no activity carry the last close forward (`v: 0`). Sub-hour candles are stamped at bucket START; native `1h`/`1d` Kalshi bars are stamped at bar END. Kalshi caps a request at 10,000 candles, so long 1m windows are paged (max ~187 days of minutes per call). Kalshi tickers that don't start with `KX` need the prefix: `KALSHI:CONTROLS-2026-D`.
+
 **Range/granularity units:**
 - Minutes: `30min`, `1h`
 - Days: `1d`, `5d`
