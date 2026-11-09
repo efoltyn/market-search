@@ -27,6 +27,13 @@
       "interface": {
         "displayName": "Market Search"
       }
+    },
+    "com.nousresearch.hermes": {
+      "servers": {
+        "market-search": {
+          "trust": "untrusted"
+        }
+      }
     }
   }
 }
