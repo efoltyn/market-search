@@ -43,6 +43,14 @@ irm https://eliterminal.com/install.ps1 | iex
 
 Both install one binary and run `market-search setup`, which connects it to Claude Desktop, Claude Code, Cursor, VS Code, Windsurf, Codex, Gemini CLI, LM Studio and Zed. Restart the Claude app if it was open, then ask: "Plot the odds of a recession against the S&P 500 and oil this year."
 
+**As a plugin** (macOS and Linux; adds the server plus a skill that tells the model which tool fits which question):
+
+```bash
+claude plugin marketplace add efoltyn/market-search && claude plugin install market-search@market-search   # Claude Code
+codex plugin marketplace add efoltyn/market-search && codex plugin add market-search@market-search         # Codex
+gemini extensions install https://github.com/efoltyn/market-search                                         # Gemini CLI
+```
+
 **Claude app only:** open [market-search.mcpb](https://github.com/efoltyn/market-search/releases/latest/download/market-search.mcpb) to install it as a Claude Desktop extension (Mac and Windows).
 
 **Or let your AI set it up.** Paste this into Claude Code, Codex or another coding agent:
@@ -215,5 +223,7 @@ Core tools need no API keys.
 ---
 
 Runs on your own machine and IP, making the same requests your browser would, at human rates. That is why it is a local binary and not a hosted service.
+
+Market Search fetches data for you; it does not license or redistribute it. Government and central-bank data (SEC, Treasury, NY Fed, OFR, CFTC, EIA, ECB, BIS, BOJ, BOE) is public. Other sources (Yahoo Finance, Kalshi, Polymarket, FRED, CBOE, Binance and others) publish terms that limit use to personal, non-commercial purposes; you are responsible for using their data within those terms. Market Search is not affiliated with any of them, and nothing it returns is investment advice. It collects nothing about you: see [PRIVACY.md](PRIVACY.md).
 
 [eliterminal.com](https://eliterminal.com) · Licensed under [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html).

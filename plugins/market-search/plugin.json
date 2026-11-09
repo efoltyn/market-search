@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "market-search",
+  "version": "0.5.0",
+  "description": "Live markets for your agent: Kalshi and Polymarket odds, stocks, options, futures curves, bonds, FRED macro, Treasury auctions, SEC filings and central-bank data on one timeseries axis. Runs locally; no API keys.",
+  "author": {
+    "name": "Eli Foltyn",
+    "url": "https://eliterminal.com"
+  },
+  "homepage": "https://eliterminal.com",
+  "repository": "https://github.com/efoltyn/market-search",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "finance",
+    "markets",
+    "prediction-markets",
+    "kalshi",
+    "polymarket",
+    "stocks",
+    "macro",
+    "fred",
+    "sec",
+    "mcp"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Market Search"
+      }
+    }
+  }
+}

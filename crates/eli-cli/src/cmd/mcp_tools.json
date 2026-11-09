@@ -1,6 +1,7 @@
 [
   {
     "name": "finance_timeseries",
+    "title": "Time Series (all assets on one axis)",
     "description": "Universal data spine: OHLCV time series for every asset class on ONE shared time axis (stocks, FRED macro, futures, crypto, and prediction-market odds), with per-series return and annualized-volatility stats. PRESETS ARE THE POWER FEATURE — the `preset` arg pulls a whole curated domain in ONE call (18 available) and composes with ad-hoc `tickers` in the same call (e.g. preset=macro + tickers=NVDA,SMH gives the macro backdrop plus your names). Key presets: `macro` (34 series — CPI/PCE/jobs/GDP/rates/debt/M2 + live oil/gold/BTC), `recession` (Sahm rule, 10Y-2Y & 10Y-3M, claims, Chicago Fed), `credit` (full ICE BofA OAS stack IG→BBB→HY→BB→B→CCC→EM), `financial_conditions` (NFCI/STLFSI/VIX), `inflation`, `labor`, `housing`, `yield_curve` (1mo–30Y), `real_rates` (TIPS+breakevens), `consumer_credit`, `fed_balance_sheet` (QE/QT plumbing), `liquidity`, `forex_majors`, `crypto`, `sovereigns` (global 2/10/30Y yields: US, Bund, OAT, BTP, Gilt, JGB…), plus IBKR futures baskets `energy`/`commodities`/`treasuries` (full list + aliases in the `preset` arg). Reach for a preset before hand-listing tickers. For ad-hoc tickers, 18 providers auto-detect by pattern: stocks/ETFs/futures→Yahoo, FRED→FRED (or FRED: prefix), IBKR:→Interactive Brokers 15-min-delayed futures/FX/equities (e.g. IBKR:FUT:CL:NYMEX, IBKR:CASH:EUR:IDEALPRO), CLEV:→Cleveland Fed inflation nowcast, KX* or Kalshi market tickers→Kalshi, numeric 6+digit→Polymarket, PYTH:→24/7 oracle, BN:→Binance, GOVT:→global sovereign bond YIELDS in % (CNBC; e.g. GOVT:US10Y, GOVT:FR10Y, GOVT:DE2Y, GOVT:JP30Y, GOVT:GB10Y, GOVT:IT10Y; country code + tenor; daily back to 2000, intraday 1m/5m/30m/1h ~1y; the cross-country spread and curve shape behind US Treasury term premium). PLUMBING/CREDIT/LEVERAGE prefixes (no key): NAV:/PNAV:<TICKER>→SEC XBRL fund NAV/share and price÷NAV (PNAV:OBDC; NAV stamped at FILED date, never period end); BOND:<CUSIP|FINRA symbol>[:PX|:YLD]→FINRA TRACE single-bond price (% par) or yield % (BOND:21873SAG3:YLD; ≥1d = end-of-day print, <1d = trade candles ~1y; find CUSIPs with finance_bonds); BUYBACK:<bucket>[:OFFERED|ACCEPTED|MAX|COVER|FILL|ISSUES]→Treasury buyback ops (BUYBACK:20-30Y:COVER; one point per operation, stamped at op close); NYFED:<series>→SRF/RRP ops + SOFR/EFFR/BGCR/TGCR, _P1.._P99 percentiles, _VOL (NYFED:SRF, NYFED:SOFR_P99; rates stamped at next-day PUBLICATION, so FRED dates differ by a day); OFR:<mnemonic>→OFR repo/hedge-fund monitors + Financial Stress Index (OFR:FSI, OFR:REPO-DVP_OV_TOT-P; stamped at OBSERVATION date though released T+1 or later: no same-day causality); ETF:<TICKER>[:SO|NAV|AUM|FLOW|FLOW5|FLOW20]→shares outstanding / creations-redemptions in $mn (ETF:JNK:FLOW, ETF:SPY:FLOW; SSGA+ProShares full history, iShares/Direxion snapshot only); CBOE:→VX futures (CBOE:VX1, CBOE:VX2-VX1, CBOE:VXCONTANGO), daily put/call (CBOE:PCR_EQUITY, CBOE:PCR_SPX), chain snapshots CBOE:<GEX|ZEROGAMMA|PCR_OI|0DTE_SHARE|IV30|SPOT>:<ROOT> (CBOE:GEX:SPX); HL:<COIN>[:PX|FUNDING|FUNDING_APR|PREMIUM|OI|OI_USD]→Hyperliquid perps (HL:BTC:FUNDING_APR); DERIBIT:<DVOL|FUNDING|FUNDING_APR|SKEW25>:<ARG>→Deribit (DERIBIT:DVOL:BTC, DERIBIT:SKEW25:BTC:30D). ETF: and CBOE: are DAILY whatever the granularity (flows summed, never resampled). LIVE-ONLY single point at fetch time, no history (errors when as_of is >1h in the past; build history by polling): CBOE chain snapshots, HL OI/OI_USD, DERIBIT SKEW25. `sources` lists providers returned; every candle has a 't' timestamp — check it for freshness. OUTPUT NOTES: candles omit o/h/l when o==h==l==c AND no volume printed — for macro point series, carried-forward buckets in thin prediction markets, and the zero-volume bucket at a session boundary (a {t,c,v:0} candle at 20:00Z means the equity session ENDED there, not that price was flat). US equity INTRADAY series include pre/post-market bars; analytics.stats carries last + last_at — compare last_at to generated_at to judge staleness, and omit v when the whole series has zero volume (indices). `sources` lists every provider actually present; top-level `provider` is only the dispatch bucket. status: absent=all ok, partial=some tickers failed (see errors[]), error=nothing returned. Prediction-market ids come from finance_odds markets[].ticker (a bare Polymarket slug does not resolve; a Kalshi event ticker and POLYMARKET:EVENT:<event_ticker> return their legs, up to 30 deepest, and Polymarket adds an event_legs notice naming each leg). Polymarket: <id> is the Yes path, <id>:NO the No token's own path; candles come from observed prices (o/h/l/c = first/max/min/last in the bucket, stamped at bucket START, no volume; a bucket with no observation is omitted, never carried forward); 1m and 5m are true resolution and history reaches back over a year; when only coarser data exists a granularity_downgrade notice says so; a settled market ends at its payout (1 or 0). Kalshi serves every granularity: 1m native, 5m/15m/30m resampled from 1m bars with Kalshi's hourly semantics (o/h/l/c from TRADES in the bucket, v = contracts summed; a bucket with no trade shows the yes bid/ask mid; a minute with no activity carries the last close forward with v:0), candles stamped at bucket START; native 1h/1d bars are stamped at bar END. Every Kalshi markets[].ticker joins as-is, KX or not (CONTROLS-2026-D); only a one-dash non-KX event ticker needs KALSHI: (KALSHI:CONTROLS-2026). Kalshi markets settled before its historical cutoff come from Kalshi's archive automatically, so past FOMC or election legs return their pre-settlement path.",
     "inputSchema": {
       "type": "object",
@@ -42,10 +43,18 @@
           "description": "Safety cap. Errors if window×granularity would exceed this; suggests a coarser granularity."
         }
       }
+    },
+    "annotations": {
+      "title": "Time Series (all assets on one axis)",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_movers",
+    "title": "Market Movers",
     "description": "Largest day movers across Yahoo Finance day-gainer/day-loser screeners or an explicit ticker list. Filter by direction, percent move, price, volume, min/max market cap, and sort by percent, market cap, dollar volume, or estimated market-cap value change. Served by Yahoo; pass provider=ibkr explicitly to price from IB Gateway instead (auto never consults IBKR). Outside regular hours the extended-hours overlay is automatic: price/change_pct are the FROZEN regular-session values, extended_price/extended_change_pct (with their own timestamp) are the live pre/post-market quote; market_state is normalized to premarket|regular|after_hours|closed.",
     "inputSchema": {
       "type": "object",
@@ -145,18 +154,34 @@
           "description": "If true, also fetch pre-market / after-hours move and surface as extended_price, extended_change_pct, extended_session. Sort metrics combine regular + extended when this is enabled."
         }
       }
+    },
+    "annotations": {
+      "title": "Market Movers",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_rate_path",
+    "title": "Fed Rate Path Odds",
     "description": "Aggregated Polymarket+Kalshi probabilities per FOMC meeting (hold/cut/hike buckets). DERIVED — combines multiple prediction markets per meeting via volume-weighted average. Returns: meetings[] (per-meeting hold/cut/hike + n_markets + volume_total, dates snapped to actual FOMC decision day), year_view (cuts_distribution, eoy_rate_distribution, cut_by_meeting_distribution from cardinality markets), compound_paths[] (joint multi-meeting Pause-Pause-Pause paths). For raw individual markets use finance_odds.",
     "inputSchema": {
       "type": "object",
       "properties": {}
+    },
+    "annotations": {
+      "title": "Fed Rate Path Odds",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_odds",
+    "title": "Prediction Market Odds",
     "description": "Prediction market discovery + live pricing (Kalshi + Polymarket). Search accepts words, phrases, and exact tickers (round-tripping a ticker the tool returned works); exact word matches rank ahead of prefix expansions. Examples: 'recession', 'tariff', 'fed', 'oil', 'iran'. Returns probability_yes (0-1), volume_usd, bid/ask. JOIN CONTRACT: markets[].ticker is the id that joins finance_timeseries --tickers for probability HISTORY (Polymarket numeric id, Kalshi market leg like KXFEDDECISION-26JUL-H0 or CONTROLS-2026-D). A Kalshi event_ticker expands to its legs in finance_timeseries, and so does a Polymarket one written POLYMARKET:EVENT:<event_ticker>. events[] groups each Kalshi or Polymarket event with every leg (legs[]: ticker, outcome, p; mutually_exclusive when at most one leg pays), so a Fed decision or a strike ladder reads as one distribution. volume_usd is lifetime volume on both venues (volume_24h_usd is the last day). Rows add chg_24h_pp (the venue's own day-ago move) when it moved; status=settled rows carry result and settled_at. Polymarket combo/parlay legs carry combo=true and rank below single questions. trades=true with a Kalshi market or Polymarket id: prints (UTC time, yes price, contracts, taker side; Polymarket adds usd and a short wallet) over since/until with taker-yes vs taker-no totals. market=<Polymarket id> alone returns one market: bid/ask, lifetime and 24h volume, open interest, 1h/24h/1w/1mo moves, close or settlement, resolution rules, every sibling leg, and a timeseries map naming which ticker returns which outcome. If stdout omitted rows, a stdout_compaction block says how many; pass out for the full set.",
     "inputSchema": {
       "type": "object",
@@ -307,10 +332,18 @@
           "description": "Polymarket trades: only prints of at least this many USD."
         }
       }
+    },
+    "annotations": {
+      "title": "Prediction Market Odds",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_options",
+    "title": "Options Chain",
     "description": "Options chain with provider-native quotes/IV where available, put/call OI ratio, max pain, and vol skew. Default provider is auto: Yahoo baseline plus opportunistic IBKR delayed/model overlay when Gateway/TWS is reachable. Use provider=yahoo for Yahoo-only or provider=ibkr for IBKR-only debugging. Yahoo IV is passthrough and filtered fail-closed for placeholder values; Yahoo does not provide Greeks. Max pain filters out pre-split strike artifacts. For full chain across ALL expirations with IV term structure and OI concentration, pass all=true. Top-level `atm_iv` mirrors `metrics.atm_iv` (jq `.atm_iv`); in `all=true` mode it reflects the nearest non-expired snapshot's ATM IV.",
     "inputSchema": {
       "type": "object",
@@ -389,10 +422,18 @@
       "required": [
         "ticker"
       ]
+    },
+    "annotations": {
+      "title": "Options Chain",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_fundamentals",
+    "title": "Company Fundamentals",
     "description": "Quarterly financial statements: income statement, balance sheet, cash flow. Not for ETFs — use finance_timeseries instead.",
     "inputSchema": {
       "type": "object",
@@ -405,10 +446,18 @@
       "required": [
         "tickers"
       ]
+    },
+    "annotations": {
+      "title": "Company Fundamentals",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_search",
+    "title": "Ticker and Series Search",
     "description": "Search for ticker symbols or FRED macro series IDs by name. Use before timeseries when you don't know the exact ticker/series ID.",
     "inputSchema": {
       "type": "object",
@@ -450,10 +499,18 @@
       "required": [
         "query"
       ]
+    },
+    "annotations": {
+      "title": "Ticker and Series Search",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_filings",
+    "title": "SEC Filings",
     "description": "SEC filings by ticker (10-K, 10-Q, 8-K, 20-F, ...). READ A FILING PRECISELY IN TWO CALLS, no max_chars guessing: (1) toc=true (with forms, e.g. forms='10-Q', or accession=...) returns the latest filing's table of contents: every section's id, title and exact size in characters — 10-K/10-Q items (risk factors, MD&A, controls, legal proceedings, ...), each primary financial statement (income_statement, comprehensive_income, balance_sheet, cash_flow, equity), the notes and every numbered note under its own title (note:5 = 'Note 5. Inventories'), the auditor's report, 8-K items, and exhibits such as ex99.1 (the earnings press release), with the statements inside an earnings release listed under it (ex99.1:income_statement, ex99.1:balance_sheet, ex99.1:cash_flow, plus titled tables such as segment results). (2) section=<ids> returns exactly that clean text and nothing else (tables as aligned plain-text rows with | between columns, page numbers and TOC noise removed); comma-separate several: section='cash_flow,note:inventories,mda'. On an earnings 8-K, section=cash_flow returns the cash flow table from the press release (or name it: ex99.1:cash_flow). Aliases: mda, risk_factors, business, legal_proceedings, notes (all notes, where the unusual items hide), note:<number or words>, press_release, document (everything). NUMBERS AS DATA: xbrl=true returns the filing's XBRL facts as JSON (concept, label, value, unit, period, and the section id the number sits in, so you can pull the prose behind it) with prior-quarter (qoq), year-ago (yoy) and prior fiscal-year-end (vs_fye) values and % changes; default = every line of the primary statements plus facts elsewhere that moved >= 25% (~30-50k chars); xbrl_concepts='Inventory,Revenue' returns just those concepts, every period. On an earnings 8-K (no XBRL until the 10-Q), xbrl=true returns the press release's tables in the same shape: values exactly as printed, period from the column headers, unit from the caption, concept 'release:<label>' (never mapped to us-gaap), yoy / vs_fye from the release's own columns and qoq from the previous earnings release. WHAT CHANGED: section=risk_factors,mda with diff=true compares each section with the same section of the previous filing of that form and returns only the differences, as exact text: added and removed paragraphs, the added and removed sentences of changed paragraphs (located by their opening words and subheading), and counts of paragraphs that differ only in numbers, dates and period words (figures_only, not printed), moved and unchanged. A 10-Q's risk factors are compared with the 10-K when the 10-K is newer than the previous 10-Q, or when the 10-Q only lists updates to it (then 10-K paragraphs it does not restate are counted, not listed). diff_against=<accession> picks the earlier filing. Tables are not compared (xbrl does numbers). toc/section/xbrl read one filing (limit 1) unless limit is set. Without these flags: metadata and SEC URLs (over this connector also raw_text, the first 50k chars of the document). search_text (no ticker) = market-wide full-text search: 'which companies filed 8-Ks mentioning X this week'.",
     "inputSchema": {
       "type": "object",
@@ -552,10 +609,18 @@
         }
       },
       "required": []
+    },
+    "annotations": {
+      "title": "SEC Filings",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_schedule",
+    "title": "Earnings and Macro Calendar",
     "description": "Earnings calendar (Nasdaq) + macro release calendar (FRED). Shows upcoming CPI, PCE, GDP, jobs, FOMC, claims, and earnings dates. Use min_cap (e.g. '50B') to filter large-cap earnings only.",
     "inputSchema": {
       "type": "object",
@@ -602,10 +667,18 @@
           "description": "Macro filtering profile. broad=all releases, market=common-watched only, major=top-tier only. The boolean `major` is a shortcut for macro_profile=major."
         }
       }
+    },
+    "annotations": {
+      "title": "Earnings and Macro Calendar",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_auctions",
+    "title": "Treasury Auctions",
     "description": "Recent US Treasury auction results: bid-to-cover, direct/indirect bidder pct, high yield, total accepted, total tendered, CUSIP, security type, security term, auction/issue/maturity dates.",
     "inputSchema": {
       "type": "object",
@@ -619,10 +692,18 @@
           "description": "Number of recent auctions (default: 50)"
         }
       }
+    },
+    "annotations": {
+      "title": "Treasury Auctions",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_cot",
+    "title": "CFTC Commitments of Traders",
     "description": "CFTC Commitment of Traders weekly positions (specs vs commercials, longs/shorts/net, OI, week-over-week change). Released Friday for prior Tuesday. Natural query matching — use 'crude', 'gold', '10-year', 'spx', 'yen', 'treasury'. Auto-detects financial vs disaggregated report. Includes historical percentile rank across the requested window.",
     "inputSchema": {
       "type": "object",
@@ -644,10 +725,18 @@
           "description": "Max distinct contracts to return (default: 15). Use higher for broad queries"
         }
       }
+    },
+    "annotations": {
+      "title": "CFTC Commitments of Traders",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_nyfed",
+    "title": "NY Fed Rates and Operations",
     "description": "NY Fed Markets data: overnight reference rates (SOFR, EFFR, OBFR, TGCR, BGCR with percentiles and volume), ON RRP facility (total amount, counterparties, rate), SOMA holdings (Fed balance sheet by security type), primary dealer positions. Real-time Fed plumbing data.",
     "inputSchema": {
       "type": "object",
@@ -657,10 +746,18 @@
           "description": "rates (SOFR/EFFR/OBFR/TGCR/BGCR), rrp (reverse repo facility), soma (Fed balance sheet), dealers (primary dealer positions). Default: rates"
         }
       }
+    },
+    "annotations": {
+      "title": "NY Fed Rates and Operations",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_volsurface",
+    "title": "CBOE Volatility Indices",
     "description": "CBOE volatility indices: VIX (30-day), VIX9D (9-day), VIX3M (3-month), VIX6M (6-month), VIX1Y (1-year), VVIX (vol-of-vol), OVX (oil), GVZ (gold), SKEW. Returns latest OHLC + optional history. Not a per-underlying strike/expiry implied-vol surface.",
     "inputSchema": {
       "type": "object",
@@ -674,10 +771,18 @@
           "description": "Trading days of history (default: latest only)"
         }
       }
+    },
+    "annotations": {
+      "title": "CBOE Volatility Indices",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_stress",
+    "title": "OFR Financial Stress Index",
     "description": "OFR Financial Stress Index (composite + credit/equity/funding/safe-assets/volatility components). Daily, updated T+1. Index is z-scored vs OFR's own historical baseline; raw values returned without categorical labeling.",
     "inputSchema": {
       "type": "object",
@@ -687,10 +792,18 @@
           "description": "Days of history (default: 30)"
         }
       }
+    },
+    "annotations": {
+      "title": "OFR Financial Stress Index",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_bonds",
+    "title": "Corporate Bonds (FINRA TRACE)",
     "description": "FINRA TRACE corporate/agency bond lookup: an issuer's outstanding bonds (CUSIP, FINRA symbol, coupon %, maturity, last sale price + yield, last trade date), sorted by maturity. FINRA matches the EXACT issuer name only (e.g. \"ORACLE CORP\", \"COREWEAVE INC\", \"META PLATFORMS INC\"; \"META\" returns nothing). Not a timeseries: feed a returned cusip into finance_timeseries as BOND:<CUSIP>:YLD (yield %) or BOND:<CUSIP>:PX (price, % of par).",
     "inputSchema": {
       "type": "object",
@@ -704,10 +817,18 @@
           "description": "Look up one bond by 9-char CUSIP or FINRA issue symbol (e.g. 21873SAG3, CRWV6364372). Overrides issuer."
         }
       }
+    },
+    "annotations": {
+      "title": "Corporate Bonds (FINRA TRACE)",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_fiscal",
+    "title": "US Fiscal Data",
     "description": "Treasury fiscal data: daily national debt total (public + intragovernmental, in billions), daily Treasury operating cash balance (deposits/withdrawals), average interest rates by security type.",
     "inputSchema": {
       "type": "object",
@@ -717,10 +838,18 @@
           "description": "debt (daily national debt), statement (Treasury cash balance), interest (avg rates by security). Default: debt"
         }
       }
+    },
+    "annotations": {
+      "title": "US Fiscal Data",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_ecb",
+    "title": "European Central Bank Data",
     "description": "ECB Statistical Data Warehouse (SDMX): EUR exchange rates, Euro STR, M3 money supply, EURIBOR term structure, euro area yield curve, Eurosystem balance sheet. No auth required. Presets or custom SDMX dataset+key.",
     "inputSchema": {
       "type": "object",
@@ -746,10 +875,18 @@
           "description": "End period (YYYY-MM-DD or YYYY-MM). Defaults to now."
         }
       }
+    },
+    "annotations": {
+      "title": "European Central Bank Data",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_eia",
+    "title": "EIA Energy Data",
     "description": "EIA (U.S. Energy Information Administration): weekly petroleum inventories (crude oil, gasoline, distillate stocks) and natural gas storage. Preset-driven: crude | gasoline | distillate | all | nat_gas (or a custom `route`). Requires EIA_API_KEY env var (free registration at eia.gov/opendata).",
     "inputSchema": {
       "type": "object",
@@ -771,10 +908,18 @@
           "description": "Custom EIA API route (e.g. petroleum/stoc/wstk/data/). Overrides preset."
         }
       }
+    },
+    "annotations": {
+      "title": "EIA Energy Data",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_bis",
+    "title": "BIS Central Bank Data",
     "description": "BIS (Bank for International Settlements): global central bank policy rates, total assets, credit-to-GDP gaps, property prices, real effective exchange rates. Covers 40-50 economies. Preset-driven: policy_rates | assets | credit_gap | property | eer (or a custom SDMX dataset+key). No auth.",
     "inputSchema": {
       "type": "object",
@@ -800,10 +945,18 @@
           "description": "Start period YYYY-MM. Default: 2020-01"
         }
       }
+    },
+    "annotations": {
+      "title": "BIS Central Bank Data",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_boj",
+    "title": "Bank of Japan Data",
     "description": "Bank of Japan: monetary base, BOJ balance sheet (total assets, JGB holdings, ETF holdings), TANKAN business sentiment DI, call rate, M2/M3 money stock, USD/JPY. Preset-driven: policy_rate | call_rate | monetary_base | balance_sheet | money_stock | tankan | fx (or custom db+codes). New Feb 2026 API, no auth.",
     "inputSchema": {
       "type": "object",
@@ -825,10 +978,18 @@
           "description": "BOJ series codes (comma-separated)."
         }
       }
+    },
+    "annotations": {
+      "title": "Bank of Japan Data",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_boe",
+    "title": "Bank of England Data",
     "description": "Bank of England: Bank Rate, SONIA, gilt yields (5Y/10Y/20Y par and zero-coupon), M4 money supply, GBP exchange rates. Preset-driven: bank_rate | sonia | gilts | m4 | fx | all (or custom `codes`). CSV endpoint, no auth.",
     "inputSchema": {
       "type": "object",
@@ -850,10 +1011,18 @@
           "description": "End date DD/Mon/YYYY format like 01/Jan/2026, or 'now'. Defaults to now."
         }
       }
+    },
+    "annotations": {
+      "title": "Bank of England Data",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_curve",
+    "title": "Futures Forward Curve",
     "description": "Futures forward curve for commodities. Returns every contract month's price, front month price, back month price, raw spread (back-front), and spread_pct. Supported: oil/wti, brent, gold, silver, natgas, copper, platinum, palladium, gasoline/rbob, heating/ho.",
     "inputSchema": {
       "type": "object",
@@ -871,10 +1040,18 @@
           "description": "List supported commodities and exit (no curve data)."
         }
       }
+    },
+    "annotations": {
+      "title": "Futures Forward Curve",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_log",
+    "title": "Tool Call Log",
     "description": "Query the local activity trail: a tamper-evident (hash-chained), append-only record of every finance tool invocation, with the FULL response payload of each call archived content-addressed so the exact information basis of past research can be reconstructed and proven. Filter by time window or substring; verify chain integrity; replay any archived payload by seq; per-tool usage stats. Local files only.",
     "inputSchema": {
       "type": "object",
@@ -908,10 +1085,18 @@
           "description": "Print the exact archived response payload for a record seq, integrity-checked against its recorded hash."
         }
       }
+    },
+    "annotations": {
+      "title": "Tool Call Log",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
     "name": "finance_insider",
+    "title": "Insider Trades (SEC Form 4)",
     "description": "Parsed insider transactions from SEC Form 4 filings for a ticker: who bought/sold, role (director/officer/10% owner), transaction code (P=purchase S=sale A=award M=exercise), shares, price, value, shares owned after — plus buy/sell summary (net shares, net value, unique insiders). T+2-business-day freshness from EDGAR.",
     "inputSchema": {
       "type": "object",
@@ -936,10 +1121,18 @@
       "required": [
         "ticker"
       ]
+    },
+    "annotations": {
+      "title": "Insider Trades (SEC Form 4)",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   },
   {
     "name": "finance_short",
+    "title": "Short Interest (FINRA)",
     "description": "FINRA short-selling data for a ticker, two cadences in one call: consolidated short interest (bi-monthly settlement print: shares short, days-to-cover, change vs prior period) and Reg SHO daily short volume (per-venue off-exchange short-sale volume + short ratio, T+1/T+2 fresh) — the positioning/squeeze layer for equities, complementing finance_cot for futures.",
     "inputSchema": {
       "type": "object",
@@ -952,6 +1145,13 @@
       "required": [
         "ticker"
       ]
+    },
+    "annotations": {
+      "title": "Short Interest (FINRA)",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   }
 ]

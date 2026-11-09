@@ -1,0 +1,15 @@
+{
+  "name": "market-search",
+  "owner": { "name": "Eli Foltyn", "url": "https://eliterminal.com" },
+  "metadata": {
+    "description": "Live market data for Claude: prediction-market odds, prices, macro and filings. Runs locally."
+  },
+  "plugins": [
+    {
+      "name": "market-search",
+      "source": "./plugins/market-search",
+      "description": "Kalshi and Polymarket odds, stocks, options, futures, bonds, FRED macro, Treasury, SEC filings and central banks on one timeseries axis. Local, no API keys.",
+      "category": "data"
+    }
+  ]
+}

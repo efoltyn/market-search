@@ -3743,6 +3743,18 @@ mod mcp_tool_tests {
     }
 
     #[test]
+    fn mcp_every_tool_has_title_and_annotations() {
+        // Claude's and OpenAI's directories require a title and a readOnlyHint/destructiveHint per tool.
+        let list = mcp_tools_list(json!(1));
+        for t in list["result"]["tools"].as_array().expect("tools array") {
+            let name = t["name"].as_str().unwrap_or("?");
+            assert!(t["title"].as_str().is_some_and(|s| !s.is_empty()), "{name}: missing title");
+            assert!(t["annotations"]["readOnlyHint"].is_boolean(), "{name}: missing readOnlyHint");
+            assert!(t["annotations"]["destructiveHint"].is_boolean(), "{name}: missing destructiveHint");
+        }
+    }
+
+    #[test]
     fn mcp_build_cli_args_maps_finance_paper() {
         let args = serde_json::json!({
             "command": "trade",

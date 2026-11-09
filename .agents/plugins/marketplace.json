@@ -1,0 +1,12 @@
+{
+  "name": "market-search",
+  "interface": { "displayName": "Market Search" },
+  "plugins": [
+    {
+      "name": "market-search",
+      "source": { "source": "local", "path": "./plugins/market-search" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Data"
+    }
+  ]
+}
