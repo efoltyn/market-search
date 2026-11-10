@@ -17,6 +17,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write      # build provenance attestations
+  attestations: write
 
 jobs:
   build:
@@ -51,6 +53,12 @@ jobs:
           if [[ "${{ matrix.target }}" == *windows* ]]; then src="$src.exe"; out="$out.exe"; fi
           cp "$src" "$out"
           ls -lh "$out"
+
+      # Signed provenance tying each binary to this workflow and commit
+      # (verify: gh attestation verify <file> --repo efoltyn/market-search).
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: market-search-${{ matrix.target }}*
 
       - uses: softprops/action-gh-release@v2
         with:
