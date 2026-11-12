@@ -192,6 +192,12 @@ pub fn normalize_tickers(tickers: &[String]) -> Vec<String> {
         .map(|t| t.trim())
         .filter(|t| !t.is_empty())
         .map(|t| {
+            // Hyperliquid names are case-sensitive ("kPEPE"; the dex in
+            // "xyz:GOLD" is lower case) and its fetcher folds them itself,
+            // so only the prefix is normalized for an HL: ticker.
+            if t.len() > 3 && t.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("HL:")) {
+                return format!("HL:{}", &t[3..]);
+            }
             let upper = t.to_ascii_uppercase();
             // Auto-add ^ prefix for known indices when user omits it.
             if !upper.starts_with('^') && YAHOO_INDEX_BARE_NAMES.iter().any(|idx| upper == *idx) {
