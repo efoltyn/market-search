@@ -343,9 +343,33 @@ fn mcp_validate_modern_headers(
     Ok(())
 }
 
+/// The catalog: every tool this server offers.
+fn mcp_tool_catalog() -> serde_json::Value {
+    serde_json::from_str(include_str!("mcp_tools.json")).expect("valid MCP tools catalog")
+}
+
+/// True when `name` is in the catalog. `tools/call` runs nothing else. The command
+/// line has commands the catalog leaves out (a brokerage bridge, web fetch, agent
+/// runs), and a client must not reach one of them by sending a name it was never given.
+fn mcp_tool_is_listed(name: &str) -> bool {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            mcp_tool_catalog()
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|t| t["name"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .iter()
+        .any(|listed| listed == name)
+}
+
 fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
-    let mut tools: serde_json::Value =
-        serde_json::from_str(include_str!("mcp_tools.json")).expect("valid MCP tools catalog");
+    let mut tools = mcp_tool_catalog();
     // MARKET_SEARCH_FEEDBACK=off takes the one tool that sends a note off this machine away.
     if !feedback_enabled() {
         if let Some(list) = tools.as_array_mut() {
@@ -393,17 +417,20 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
         }
     };
 
+    // Only a tool in the catalog runs. Anything else gets the same answer, whether
+    // the name is a typo or a command line feature the catalog leaves out.
+    if !mcp_tool_is_listed(&tool_name) {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32602, "message": format!("Unknown tool: {tool_name}") }
+        });
+    }
+
     let mut args = params
         .get("arguments")
         .cloned()
         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-
-    // ── data_query: jq on cached eli_* scratch files (no subprocess needed) ──
-    // Stdio only: HTTP clients already get full output inline and never see a
-    // `_file` pointer, and a network-reachable jq is a file/env disclosure risk.
-    if tool_name == "data_query" && !full_output {
-        return mcp_data_query(id, &args).await;
-    }
 
     // ── report_issue: a note to the Market Search developer (cmd/feedback.rs) ──
     if tool_name == "report_issue" {
@@ -603,110 +630,6 @@ fn mcp_scratch_dir() -> std::path::PathBuf {
 
 fn mcp_scratch_path(file_name: &str) -> String {
     mcp_scratch_dir().join(file_name).display().to_string()
-}
-
-/// Handle data_query: run jq on a cached eli_* scratch file.
-/// This is the "filing cabinet drawer pull" — lets the AI extract specific
-/// slices from large cached outputs without loading the whole file into context.
-async fn mcp_data_query(id: serde_json::Value, args: &serde_json::Value) -> serde_json::Value {
-    let file = match args.get("file").and_then(|f| f.as_str()) {
-        Some(f) => f,
-        None => {
-            return json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32602, "message": "file parameter required" }
-            });
-        }
-    };
-
-    // Security: only allow eli_* files directly inside the scratch dir (no
-    // `..` or nested components that could walk out of it).
-    let requested = std::path::Path::new(file);
-    let in_scratch = requested.parent() == Some(mcp_scratch_dir().as_path())
-        && requested
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("eli_"));
-    if !in_scratch {
-        return json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32602, "message": "file must be an eli_* scratch path from a previous tool call" }
-        });
-    }
-
-    if !std::path::Path::new(file).exists() {
-        return json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32602, "message": format!("File not found: {file}") }
-        });
-    }
-
-    let jq_expr = match args.get("jq").and_then(|j| j.as_str()) {
-        Some(j) => j,
-        None => {
-            return json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32602, "message": "jq expression required" }
-            });
-        }
-    };
-
-    // Run jq on the file
-    // Clear the environment so a jq `env`/`$ENV` expression cannot read API keys.
-    let result = TokioCommand::new("jq")
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .arg("-c")
-        .arg(jq_expr)
-        .arg(file)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
-
-    match result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": -32603, "message": format!("jq error: {}", stderr.trim()) }
-                });
-            }
-            // Apply same inline threshold — if query result is still huge, save it
-            const QUERY_THRESHOLD: usize = 4_000;
-            let response_text = if stdout.len() <= QUERY_THRESHOLD {
-                stdout
-            } else {
-                let ts = chrono::Utc::now().timestamp_millis();
-                let out_path = mcp_scratch_path(&format!("eli_query_{ts}.json"));
-                let _ = std::fs::write(&out_path, &stdout);
-                format!(
-                    "{{\"_file\":\"{}\",\"_chars\":{}}}",
-                    out_path, stdout.len()
-                )
-            };
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{ "type": "text", "text": response_text }]
-                }
-            })
-        }
-        Err(_) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32603, "message": "jq not found — install with: brew install jq" }
-        }),
-    }
 }
 
 /// Strip repeated per-item metadata keys before saving to file.
@@ -2145,6 +2068,11 @@ fn mcp_filings_summary(v: &serde_json::Value) -> String {
     obj[1..obj.len() - 1].to_string()
 }
 
+/// Maps a tool call to the command line that serves it. Some arms are for names the
+/// catalog does not list (`finance_sync`, `finance_paper`, the `finance_ibkr_*` account
+/// reads, `web_*`, `code_analyze`, `agent_run`). MCP cannot reach those:
+/// `mcp_tools_call_inner` refuses an unlisted name before it gets here. No arm places or
+/// cancels an order, and none should be added.
 fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Vec<String>> {
     let s = |v: &str| v.to_string();
     match tool {
@@ -2648,89 +2576,6 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             s("--command"),
             s("open-orders"),
         ]),
-        "finance_ibkr_place_order" => {
-            let symbol = args
-                .get("symbol")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("symbol required"))?;
-            let side = args
-                .get("side")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("side required"))?;
-            let quantity = args
-                .get("quantity")
-                .and_then(|v| v.as_f64())
-                .ok_or_else(|| anyhow::anyhow!("quantity required"))?;
-            let mut v = vec![
-                s("finance"),
-                s("ibkr"),
-                s("--command"),
-                s("place-order"),
-                s("--symbol"),
-                s(symbol),
-                s("--side"),
-                s(side),
-                s("--quantity"),
-                quantity.to_string(),
-            ];
-            if let Some(account) = args.get("account").and_then(|a| a.as_str()) {
-                v.extend([s("--account"), s(account)]);
-            }
-            if let Some(order_type) = args.get("order_type").and_then(|a| a.as_str()) {
-                v.extend([s("--order-type"), s(order_type)]);
-            }
-            if let Some(limit_price) = args.get("limit_price").and_then(|a| a.as_f64()) {
-                v.extend([s("--limit-price"), limit_price.to_string()]);
-            }
-            if let Some(stop_price) = args.get("stop_price").and_then(|a| a.as_f64()) {
-                v.extend([s("--stop-price"), stop_price.to_string()]);
-            }
-            if let Some(tif) = args.get("tif").and_then(|a| a.as_str()) {
-                v.extend([s("--tif"), s(tif)]);
-            }
-            if let Some(sec_type) = args.get("sec_type").and_then(|a| a.as_str()) {
-                v.extend([s("--sec-type"), s(sec_type)]);
-            }
-            if let Some(exchange) = args.get("exchange").and_then(|a| a.as_str()) {
-                v.extend([s("--exchange"), s(exchange)]);
-            }
-            if let Some(primary_exchange) = args.get("primary_exchange").and_then(|a| a.as_str()) {
-                v.extend([s("--primary-exchange"), s(primary_exchange)]);
-            }
-            if let Some(currency) = args.get("currency").and_then(|a| a.as_str()) {
-                v.extend([s("--currency"), s(currency)]);
-            }
-            if let Some(expiry) = args.get("expiry").and_then(|a| a.as_str()) {
-                v.extend([s("--expiry"), s(expiry)]);
-            }
-            if let Some(strike) = args.get("strike").and_then(|a| a.as_f64()) {
-                v.extend([s("--strike"), strike.to_string()]);
-            }
-            if let Some(right) = args.get("right").and_then(|a| a.as_str()) {
-                v.extend([s("--right"), s(right)]);
-            }
-            if let Some(multiplier) = args.get("multiplier").and_then(|a| a.as_str()) {
-                v.extend([s("--multiplier"), s(multiplier)]);
-            }
-            if let Some(trading_class) = args.get("trading_class").and_then(|a| a.as_str()) {
-                v.extend([s("--trading-class"), s(trading_class)]);
-            }
-            Ok(v)
-        }
-        "finance_ibkr_cancel_order" => {
-            let order_id = args
-                .get("order_id")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| anyhow::anyhow!("order_id required"))?;
-            Ok(vec![
-                s("finance"),
-                s("ibkr"),
-                s("--command"),
-                s("cancel-order"),
-                s("--order-id"),
-                order_id.to_string(),
-            ])
-        }
         "web_search" => {
             let query = args
                 .get("query")
