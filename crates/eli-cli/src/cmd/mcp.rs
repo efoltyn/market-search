@@ -808,6 +808,136 @@ fn zigzag_pivots(values: &[f64], reversal: f64) -> Vec<usize> {
     pivots
 }
 
+/// Seconds since the epoch for a candle's "t": RFC 3339 text or a bare date.
+/// A number is read as seconds, or as milliseconds when it is above 1e11.
+fn mcp_candle_epoch_secs(candle: &serde_json::Value) -> Option<i64> {
+    let from_number = |n: f64| -> Option<i64> {
+        if !n.is_finite() {
+            return None;
+        }
+        Some(if n.abs() > 1e11 { (n / 1000.0) as i64 } else { n as i64 })
+    };
+    let t = candle.get("t")?;
+    if let Some(n) = t.as_f64() {
+        return from_number(n);
+    }
+    let s = t.as_str()?.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp());
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp());
+    }
+    s.parse::<f64>().ok().and_then(from_number)
+}
+
+/// How many bars a year a series has, for annualizing its volatility.
+///
+/// Measured from the candles rather than assumed. The median gap between
+/// candles is the bar length (the median ignores overnight and weekend
+/// gaps). The number of candles inside 24 hours is one trading day's worth:
+/// 16 for hourly SPY with its pre- and post-market bars, 24 for a market
+/// that never closes. A year has 365 such days when the venue trades
+/// through the weekend or the series has a candle on a Saturday (UTC), and
+/// 252 otherwise. Sunday proves nothing, because FX and CME futures print
+/// Sunday-evening bars and still trade five days. With too little to go on
+/// the answer is 252, one bar per trading day, which is what this used to
+/// assume for every series.
+fn mcp_bars_per_year(candles: &[serde_json::Value], source: Option<&str>) -> f64 {
+    const TRADING_DAYS: f64 = 252.0;
+    const DAY: i64 = 86_400;
+
+    if candles.len() < 3 {
+        return TRADING_DAYS;
+    }
+    let mut times = Vec::with_capacity(candles.len());
+    for candle in candles {
+        match mcp_candle_epoch_secs(candle) {
+            Some(t) => times.push(t),
+            None => return TRADING_DAYS,
+        }
+    }
+    times.sort_unstable();
+    let mut gaps: Vec<i64> = times
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|gap| *gap > 0)
+        .collect();
+    if gaps.len() < 2 {
+        return TRADING_DAYS;
+    }
+    gaps.sort_unstable();
+    let step = gaps[(gaps.len() - 1) / 2];
+
+    // Weekly, monthly and longer bars: calendar time.
+    if step >= 6 * DAY {
+        return 365.25 * DAY as f64 / step as f64;
+    }
+
+    // Venues that trade every hour of every day (source strings as the
+    // fetchers write them).
+    let round_the_clock = source.is_some_and(|s| {
+        s.starts_with("binance")
+            || matches!(
+                s,
+                "kraken_futures" | "hyperliquid" | "deribit" | "kalshi" | "polymarket"
+            )
+    });
+    // 1970-01-01 was a Thursday, so day 2 of the epoch was a Saturday.
+    let saturday_bar = times
+        .iter()
+        .any(|t| (t.div_euclid(DAY) + 5).rem_euclid(7) == 0);
+    let days_per_year = if round_the_clock || saturday_bar {
+        365.0
+    } else {
+        TRADING_DAYS
+    };
+
+    // Daily bars.
+    if step >= 20 * 3600 {
+        return days_per_year;
+    }
+
+    // Intraday. Count the candles inside the 24 hours that end at each
+    // candle, for every candle with a full day of the series behind it, and
+    // take the most common count (the larger on a tie). A short first day
+    // after a weekend or a live bar at the end then does not move it, and a
+    // 24-hour window that straddles midnight still counts as one day. A
+    // series shorter than a day has only its own length to offer.
+    let mut counts: Vec<usize> = Vec::new();
+    let mut oldest = 0usize;
+    for newest in 0..times.len() {
+        while times[newest] - times[oldest] >= DAY {
+            oldest += 1;
+        }
+        if times[newest] - times[0] >= DAY - step {
+            counts.push(newest - oldest + 1);
+        }
+    }
+    counts.sort_unstable();
+    let mut bars_per_day = times.len();
+    let mut longest_run = 0usize;
+    let mut run_start = 0usize;
+    while run_start < counts.len() {
+        let mut run_end = run_start;
+        while run_end < counts.len() && counts[run_end] == counts[run_start] {
+            run_end += 1;
+        }
+        if run_end - run_start >= longest_run {
+            longest_run = run_end - run_start;
+            bars_per_day = counts[run_start];
+        }
+        run_start = run_end;
+    }
+    let mut bars_per_day = bars_per_day as f64;
+    if round_the_clock {
+        // A window shorter than a day cannot show a full day of bars, and a
+        // thin market skips bars; the venue is open for all of them.
+        bars_per_day = bars_per_day.max((DAY as f64 / step as f64).round());
+    }
+    bars_per_day * days_per_year
+}
+
 /// Compute per-ticker summary stats from a timeseries JSON response.
 /// Returns a JSON string like `{"SPY":{"start":550.0,"end":530.0,...},...}` or None on parse failure.
 fn mcp_timeseries_summary(output: &str) -> Option<String> {
@@ -849,23 +979,10 @@ fn mcp_timeseries_summary(output: &str) -> Option<String> {
         } else {
             50.0
         };
-        // Annualised volatility — detect candle period from timestamps to use correct √N
-        // √252 is only correct for daily candles; hourly needs √(252*6.5), etc.
-        let ann_factor = if candles.len() >= 2 {
-            let t0 = candles[0].get("t").and_then(|t| t.as_f64());
-            let t1 = candles[1].get("t").and_then(|t| t.as_f64());
-            if let (Some(t0), Some(t1)) = (t0, t1) {
-                let diff = (t1 - t0).abs();
-                // If timestamps look like milliseconds (>1e10), convert to seconds
-                let diff_secs = if diff > 1e9 { diff / 1000.0 } else { diff };
-                if diff_secs < 120.0        { 252.0 * 390.0 }  // 1-min (390 min/day)
-                else if diff_secs < 600.0   { 252.0 * 78.0  }  // 5-min
-                else if diff_secs < 1800.0  { 252.0 * 26.0  }  // 15-min
-                else if diff_secs < 7200.0  { 252.0 * 6.5   }  // 1-hour
-                else if diff_secs < 28800.0 { 252.0 * 2.0   }  // 4-hour
-                else                        { 252.0          }  // daily or longer
-            } else { 252.0 }
-        } else { 252.0f64 };
+        // Annualised volatility: stdev of the log returns times the square
+        // root of the number of bars this series has in a year.
+        let ann_factor =
+            mcp_bars_per_year(candles, entry.get("source").and_then(|s| s.as_str()));
         let closes: Vec<f64> = candles.iter().filter_map(get_close).collect();
         let vol_ann = if closes.len() >= 2 {
             let log_rets: Vec<f64> = closes
