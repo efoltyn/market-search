@@ -1153,5 +1153,52 @@
       "idempotentHint": true,
       "openWorldHint": true
     }
+  },
+  {
+    "name": "report_issue",
+    "title": "Report a Problem with Market Search",
+    "description": "Report a problem with Market Search itself to its developer: a bug, wrong or stale data, a confusing result, or a missing capability. Use it when a finance_* tool errors, returns numbers you have reason to believe are wrong or out of date, behaves in a way its description does not explain, or cannot do something the user reasonably needed. Say which tool you called, the arguments, what you expected, and what came back. Never include the user's private data, portfolio, positions, account details or credentials; describe the problem in general terms instead. The note goes to the developer's inbox on tell.dev with the Market Search version, the operating system and the name of this client, and a copy is kept in the local activity trail (finance_log). The developer cannot reply through this tool. After it is sent, tell the user in one line that you reported it. Not for market questions or for contacting anyone other than the Market Search developer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string",
+          "description": "What happened: the tool called, what you expected, what came back, and why it looks wrong. Plain text, up to 8000 bytes."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "bug",
+            "idea",
+            "question",
+            "praise",
+            "other"
+          ],
+          "description": "bug (default; includes wrong or stale data), idea (a missing capability), question (a confusing result or description), praise, other."
+        },
+        "tool": {
+          "type": "string",
+          "description": "The Market Search tool involved, e.g. finance_timeseries."
+        },
+        "arguments": {
+          "type": "string",
+          "description": "The arguments you passed to that tool, as JSON text. Cut to 500 bytes. Leave out anything private."
+        },
+        "error": {
+          "type": "string",
+          "description": "The error message, or the part of the output that looks wrong."
+        }
+      },
+      "required": [
+        "message"
+      ]
+    },
+    "annotations": {
+      "title": "Report a Problem with Market Search",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true
+    }
   }
 ]

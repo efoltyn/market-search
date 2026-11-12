@@ -25,3 +25,4 @@ include!("cmd/finance/mod.rs");
 include!("cmd/finance/audit.rs");
 include!("cmd/picks.rs");
 include!("cmd/setup.rs");
+include!("cmd/feedback.rs");

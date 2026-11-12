@@ -189,6 +189,8 @@ fn mcp_initialize(id: serde_json::Value, request: &serde_json::Value) -> serde_j
         .and_then(|c| c.get("name"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    // report_issue tells the developer which client the report came from.
+    feedback_note_client(client_name);
     if client_name != "Anthropic/ClaudeAI" {
         use base64::Engine as _;
         let icon_data_uri = format!(
@@ -337,8 +339,14 @@ fn mcp_validate_modern_headers(
 }
 
 fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
-    let tools: serde_json::Value =
+    let mut tools: serde_json::Value =
         serde_json::from_str(include_str!("mcp_tools.json")).expect("valid MCP tools catalog");
+    // MARKET_SEARCH_FEEDBACK=off takes the one tool that sends a note off this machine away.
+    if !feedback_enabled() {
+        if let Some(list) = tools.as_array_mut() {
+            list.retain(|t| t["name"] != "report_issue");
+        }
+    }
 
     json!({
         "jsonrpc": "2.0",
@@ -390,6 +398,11 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
     // `_file` pointer, and a network-reachable jq is a file/env disclosure risk.
     if tool_name == "data_query" && !full_output {
         return mcp_data_query(id, &args).await;
+    }
+
+    // ── report_issue: a note to the Market Search developer (cmd/feedback.rs) ──
+    if tool_name == "report_issue" {
+        return mcp_report_issue(id, &args).await;
     }
 
     // claude.ai / web (full_output, no file access) can't read the local files finance_filings

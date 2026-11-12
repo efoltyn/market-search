@@ -312,6 +312,30 @@ it doesn't have real-time data, the connector isn't working. Check:
 - **`market-search mcp share` says "cloudflared not found"**: install
   cloudflared as above, or use the background service.
 
+## Reporting problems with Market Search
+
+The MCP server has one tool that is not market data: `report_issue`. If a
+Market Search tool errors, returns data that looks wrong or stale, or
+can't do something the user needed, call it to tell the developer. Say
+which tool, the arguments, what you expected and what came back. Leave
+out anything private: no portfolio, positions, account details or
+credentials. Then tell the user in one line that you sent it.
+
+The note goes to the developer's inbox on tell.dev with the Market Search
+version, the OS and the name of the client. A copy lands in the local
+activity trail (`finance_log`). Nothing is sent unless you call the tool.
+
+From a shell, the same thing is:
+
+```bash
+market-search feedback "what happened" --kind bug --tool finance_odds --args '{"query":"fed"}' --error "the error text"
+```
+
+`--dry-run` checks a note without sending it. People can use
+https://tell.dev/f/tell_pk_sndQpXc7X_l7y9gOQNEZDocO instead. If the user
+does not want this, `MARKET_SEARCH_FEEDBACK=off` in the server's
+environment removes the tool and turns off the command.
+
 ## What you (the agent) should NOT do
 
 - Do not run `market-search mcp share` yourself in a non-blocking shell — it

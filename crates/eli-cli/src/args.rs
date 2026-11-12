@@ -64,6 +64,65 @@ enum Command {
         #[command(subcommand)]
         cmd: PicksCommand,
     },
+
+    /// Send feedback (a bug, wrong data, an idea) to the Market Search developer.
+    Feedback(FeedbackArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct FeedbackArgs {
+    /// What happened, in your own words.
+    #[arg(value_name = "MESSAGE", num_args = 1.., required = true)]
+    message: Vec<String>,
+
+    /// What kind of note this is.
+    #[arg(long, value_enum, default_value_t = FeedbackKind::Bug)]
+    kind: FeedbackKind,
+
+    /// The tool or command involved, e.g. finance_odds.
+    #[arg(long)]
+    tool: Option<String>,
+
+    /// The arguments you passed to it, as text.
+    #[arg(long = "args", value_name = "TEXT")]
+    arguments: Option<String>,
+
+    /// The error message, or the part of the output that looks wrong.
+    #[arg(long)]
+    error: Option<String>,
+
+    /// How to reach you if you want an answer, usually an email.
+    #[arg(long)]
+    contact: Option<String>,
+
+    /// The agent sending this, if one is (e.g. "Codex"). Leave out when a person sends it.
+    #[arg(long)]
+    agent: Option<String>,
+
+    /// Check the note with tell.dev without sending it.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+enum FeedbackKind {
+    Bug,
+    Idea,
+    Question,
+    Praise,
+    Other,
+}
+
+impl FeedbackKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            FeedbackKind::Bug => "bug",
+            FeedbackKind::Idea => "idea",
+            FeedbackKind::Question => "question",
+            FeedbackKind::Praise => "praise",
+            FeedbackKind::Other => "other",
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]

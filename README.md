@@ -222,8 +222,24 @@ Core tools need no API keys.
 
 ---
 
+## Feedback
+
+Agents use Market Search more than people do, so the MCP server has one extra tool, `report_issue`. When a tool errors, returns a wrong or stale number, or can't do what was needed, the agent can send a short note to the developer through [tell.dev](https://tell.dev). It is told to leave out your private data and to tell you when it has sent one.
+
+People can use [this form](https://tell.dev/f/tell_pk_sndQpXc7X_l7y9gOQNEZDocO) or the CLI:
+
+```bash
+market-search feedback "finance_curve CL settles look a day old" --kind bug
+```
+
+Add `--contact you@example.com` if you want an answer, or `--dry-run` to check a note without sending it.
+
+Nothing is sent unless an agent calls the tool or you run the command. A note carries its text, the Market Search version, your OS and CPU type, the name of the AI app that sent it, and the tool name, arguments and error if the sender included them. A copy goes in the local activity trail (`finance_log`), so you can read exactly what left your machine. The key in the binary is a public tell.dev key that can only add notes to this inbox. Set `MARKET_SEARCH_FEEDBACK=off` in the server's environment to remove the tool and turn off the command.
+
+---
+
 Runs on your own machine and IP, making the same requests your browser would, at human rates. That is why it is a local binary and not a hosted service.
 
-Market Search fetches data for you; it does not license or redistribute it. Government and central-bank data (SEC, Treasury, NY Fed, OFR, CFTC, EIA, ECB, BIS, BOJ, BOE) is public. Other sources (Yahoo Finance, Kalshi, Polymarket, FRED, CBOE, Binance and others) publish terms that limit use to personal, non-commercial purposes; you are responsible for using their data within those terms. Market Search is not affiliated with any of them, and nothing it returns is investment advice. It collects nothing about you: see [PRIVACY.md](PRIVACY.md).
+Market Search fetches data for you; it does not license or redistribute it. Government and central-bank data (SEC, Treasury, NY Fed, OFR, CFTC, EIA, ECB, BIS, BOJ, BOE) is public. Other sources (Yahoo Finance, Kalshi, Polymarket, FRED, CBOE, Binance and others) publish terms that limit use to personal, non-commercial purposes; you are responsible for using their data within those terms. Market Search is not affiliated with any of them, and nothing it returns is investment advice. It collects nothing about you; the only thing that reaches the developer is feedback you or your agent choose to send. See [PRIVACY.md](PRIVACY.md).
 
 [eliterminal.com](https://eliterminal.com) · Licensed under [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html).

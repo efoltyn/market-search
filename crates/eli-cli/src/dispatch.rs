@@ -69,6 +69,7 @@ pub async fn run() -> Result<()> {
             }
         }
         Some(Command::Picks { cmd }) => cmd_picks(cmd).await,
+        Some(Command::Feedback(args)) => cmd_feedback(args).await,
     }
 }
 
