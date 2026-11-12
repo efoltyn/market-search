@@ -10,6 +10,7 @@ pub use fetch::{is_buyback_ticker, is_nyfed_ticker, is_ofr_ticker};
 pub use fetch::is_etf_flow_ticker;
 pub use fetch::is_cboe_ticker;
 pub use fetch::is_hyperliquid_ticker;
+pub use fetch::is_kraken_futures_ticker;
 pub use fetch::is_deribit_ticker;
 pub use fetch::is_secnav_ticker;
 pub use fetch::is_pyth_ticker;

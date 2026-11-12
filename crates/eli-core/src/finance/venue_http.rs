@@ -1,4 +1,6 @@
-//! One HTTP path for the prediction-market venues (Kalshi, Polymarket).
+//! One HTTP path for the prediction-market venues (Kalshi, Polymarket). The
+//! Kraken Futures charts host is spaced here too, so that several processes
+//! paging long candle histories at once still add up to one polite client.
 //!
 //! `VenueSend::venue_send()` is a drop-in for `RequestBuilder::send()`:
 //!
@@ -36,6 +38,10 @@ const KALSHI_SPACING_MS: u64 = 125;
 /// Polymarket's tightest documented read limit is 20 a second per IP
 /// (data-api prices-history); 10 a second per host stays well inside it.
 const POLYMARKET_SPACING_MS: u64 = 100;
+/// Kraken Futures' charts API documents no limit and sends no rate-limit
+/// headers. 92,000 one-minute candles were read at 600 ms spacing without a
+/// refusal; 300 ms is the floor the candle pager keeps in any case.
+const KRAKEN_FUTURES_SPACING_MS: u64 = 300;
 const MIN_SPACING_MS: u64 = 50;
 const DEFAULT_PAUSE_SECS: u64 = 60;
 const REFUSALS_BEFORE_PAUSE: u32 = 3;
@@ -69,6 +75,7 @@ fn host_rule(host: &str) -> Option<HostRule> {
         "gamma-api.polymarket.com" => ("polymarket-gamma", "Polymarket", POLYMARKET_SPACING_MS),
         "clob.polymarket.com" => ("polymarket-clob", "Polymarket", POLYMARKET_SPACING_MS),
         "data-api.polymarket.com" => ("polymarket-data", "Polymarket", POLYMARKET_SPACING_MS),
+        "futures.kraken.com" => ("kraken-futures", "Kraken Futures", KRAKEN_FUTURES_SPACING_MS),
         _ => return None,
     };
     Some(HostRule {

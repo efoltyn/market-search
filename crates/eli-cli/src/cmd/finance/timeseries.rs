@@ -426,7 +426,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     let mut fred_tickers = Vec::new();
     let mut binance_tickers = Vec::new();
     let mut govt_tickers = Vec::new();
-    // NAV:/PNAV:, BOND:, BUYBACK:, NYFED:, OFR:, ETF:, CBOE:, HL:, DERIBIT: — one
+    // NAV:/PNAV:, BOND:, BUYBACK:, NYFED:, OFR:, ETF:, CBOE:, HL:, DERIBIT:, KF: — one
     // bucket per provider, fetched concurrently as side merges (or as the main
     // bucket when nothing else is present).
     let mut extra_buckets: Vec<(ExtraProvider, Vec<String>)> = Vec::new();
@@ -480,7 +480,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         other => match ExtraProvider::from_provider_str(other) {
             Some(p) => p.kind(),
             None => anyhow::bail!(
-                "unsupported --provider '{other}' (supported: auto, yahoo, fred, ibkr, pyth, binance, govt, secnav, bond, buyback, nyfed, ofr, etf, cboe, hyperliquid, deribit)"
+                "unsupported --provider '{other}' (supported: auto, yahoo, fred, ibkr, pyth, binance, govt, secnav, bond, buyback, nyfed, ofr, etf, cboe, hyperliquid, deribit, kraken_futures)"
             ),
         },
     };
@@ -1504,6 +1504,7 @@ enum ExtraProvider {
     Cboe,
     Hyperliquid,
     Deribit,
+    KrakenFutures,
 }
 
 impl ExtraProvider {
@@ -1527,6 +1528,8 @@ impl ExtraProvider {
             Some(Self::Hyperliquid)
         } else if f::is_deribit_ticker(ticker) {
             Some(Self::Deribit)
+        } else if f::is_kraken_futures_ticker(ticker) {
+            Some(Self::KrakenFutures)
         } else {
             None
         }
@@ -1543,6 +1546,7 @@ impl ExtraProvider {
             "cboe" => Self::Cboe,
             "hl" | "hyperliquid" => Self::Hyperliquid,
             "deribit" => Self::Deribit,
+            "kf" | "kraken_futures" | "kraken-futures" | "krakenfutures" => Self::KrakenFutures,
             _ => return None,
         })
     }
@@ -1559,6 +1563,7 @@ impl ExtraProvider {
             Self::Cboe => K::Cboe,
             Self::Hyperliquid => K::Hyperliquid,
             Self::Deribit => K::Deribit,
+            Self::KrakenFutures => K::KrakenFutures,
         }
     }
 
@@ -1573,6 +1578,7 @@ impl ExtraProvider {
             Self::Cboe => "cboe",
             Self::Hyperliquid => "hyperliquid",
             Self::Deribit => "deribit",
+            Self::KrakenFutures => "kraken_futures",
         }
     }
 }

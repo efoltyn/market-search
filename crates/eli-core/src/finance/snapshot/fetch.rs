@@ -211,7 +211,8 @@ pub async fn fetch_snapshot(req: SnapshotRequest) -> Result<SnapshotResponse> {
         | ProviderKind::EtfFlows
         | ProviderKind::Cboe
         | ProviderKind::Hyperliquid
-        | ProviderKind::Deribit => {
+        | ProviderKind::Deribit
+        | ProviderKind::KrakenFutures => {
             return Err(Error::InvalidInput(format!(
                 "{:?} provider does not support snapshot (use timeseries)",
                 provider

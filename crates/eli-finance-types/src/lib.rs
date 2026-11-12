@@ -58,6 +58,9 @@ pub enum ProviderKind {
     Hyperliquid,
     /// Deribit public data (DVOL, funding, 25d skew) — DERIBIT: prefix.
     Deribit,
+    /// Kraken Futures public charts (index, mark and trade candles, 24/7) — KF: prefix.
+    #[serde(rename = "kraken_futures")]
+    KrakenFutures,
 }
 
 impl Default for ProviderKind {

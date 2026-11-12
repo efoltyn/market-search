@@ -118,6 +118,9 @@ pub async fn fetch_timeseries(
         ProviderKind::Deribit => {
             fetch_deribit_series(&tickers, start, end, req.granularity).await?
         }
+        ProviderKind::KrakenFutures => {
+            fetch_kraken_futures_series(&tickers, start, end, req.granularity).await?
+        }
         ProviderKind::Eia | ProviderKind::Ecb => {
             return Err(Error::InvalidInput(
                 "EIA/ECB timeseries providers are not yet integrated into the core fetch path; use the dedicated CLI tools".to_string(),

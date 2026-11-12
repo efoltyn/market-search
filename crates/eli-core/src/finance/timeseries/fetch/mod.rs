@@ -17,6 +17,7 @@ include!("ofr.rs");
 include!("etf_flows.rs");
 include!("cboe.rs");
 include!("hyperliquid.rs");
+include!("kraken_futures.rs");
 include!("deribit.rs");
 include!("secnav.rs");
 include!("rng.rs");
