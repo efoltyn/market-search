@@ -106,7 +106,7 @@ struct EtfObs {
 /// Returns true if the ticker should route to the ETF creations/redemptions provider.
 pub fn is_etf_flow_ticker(ticker: &str) -> bool {
     let t = ticker.trim();
-    t.len() > 4 && t[..4].eq_ignore_ascii_case("ETF:")
+    ticker_has_prefix(t, "ETF:")
 }
 
 fn etf_parse_field(s: &str) -> Option<EtfField> {

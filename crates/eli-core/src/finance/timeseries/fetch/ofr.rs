@@ -44,7 +44,7 @@ const OFR_FSI_CSV_URL: &str = "https://www.financialresearch.gov/financial-stres
 /// Returns true if the ticker routes to the OFR provider.
 pub fn is_ofr_ticker(ticker: &str) -> bool {
     let t = ticker.trim();
-    t.len() > 4 && t[..4].eq_ignore_ascii_case("OFR:")
+    ticker_has_prefix(t, "OFR:")
 }
 
 fn ofr_mnemonic(ticker: &str) -> String {

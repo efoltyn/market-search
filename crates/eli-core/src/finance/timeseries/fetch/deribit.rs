@@ -52,7 +52,7 @@ enum DeribitFundingField {
 /// Returns true if the ticker should route to the Deribit provider.
 pub fn is_deribit_ticker(ticker: &str) -> bool {
     let t = ticker.trim();
-    t.len() > 8 && t[..8].eq_ignore_ascii_case("DERIBIT:")
+    ticker_has_prefix(t, "DERIBIT:")
 }
 
 fn deribit_parse_ticker(ticker: &str) -> Option<DeribitQuery> {

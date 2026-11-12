@@ -91,7 +91,7 @@ enum CboeChainMetric {
 /// Returns true if the ticker should route to the CBOE provider.
 pub fn is_cboe_ticker(ticker: &str) -> bool {
     let t = ticker.trim();
-    t.len() > 5 && t[..5].eq_ignore_ascii_case("CBOE:")
+    ticker_has_prefix(t, "CBOE:")
 }
 
 fn cboe_parse_ticker(ticker: &str) -> std::result::Result<CboeSpec, String> {

@@ -40,7 +40,7 @@ enum HlMetric {
 /// Returns true if the ticker should route to the Hyperliquid provider.
 pub fn is_hyperliquid_ticker(ticker: &str) -> bool {
     let t = ticker.trim();
-    t.len() > 3 && t[..3].eq_ignore_ascii_case("HL:")
+    ticker_has_prefix(t, "HL:")
 }
 
 fn hl_norm_coin(raw: &str) -> String {

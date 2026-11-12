@@ -43,7 +43,7 @@ const NYFED_API_BASE: &str = "https://markets.newyorkfed.org/api";
 /// Returns true if the ticker routes to the NY Fed timeseries provider.
 pub fn is_nyfed_ticker(ticker: &str) -> bool {
     let t = ticker.trim();
-    t.len() > 6 && t[..6].eq_ignore_ascii_case("NYFED:")
+    ticker_has_prefix(t, "NYFED:")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

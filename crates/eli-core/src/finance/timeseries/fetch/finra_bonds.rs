@@ -67,7 +67,7 @@ fn finra_bond_parse_ticker(ticker: &str) -> Option<(String, FinraBondField)> {
 /// Returns true if the ticker should route to the FINRA TRACE bond provider.
 pub fn is_finra_bond_ticker(ticker: &str) -> bool {
     let t = ticker.trim();
-    t.len() > 5 && t[..5].eq_ignore_ascii_case("BOND:")
+    ticker_has_prefix(t, "BOND:")
 }
 
 /// FINRA returns numbers sometimes as JSON numbers, sometimes as strings.

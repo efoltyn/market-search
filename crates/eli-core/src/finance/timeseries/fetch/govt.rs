@@ -50,7 +50,7 @@ fn govt_best_bar(granularity: Span) -> (&'static str, i64, Option<i64>) {
 /// Accepts GOVT:FR10Y, GOVT:FR10Y-FR, GOVT:US10Y, GOVT:us30y.
 fn govt_symbol(ticker: &str) -> String {
     let t = ticker.trim();
-    let raw = if t.len() >= 5 && t[..5].eq_ignore_ascii_case("GOVT:") {
+    let raw = if t.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("GOVT:")) {
         &t[5..]
     } else {
         t
@@ -59,11 +59,9 @@ fn govt_symbol(ticker: &str) -> String {
     if upper.contains('-') || upper.starts_with("US") || upper.len() < 3 {
         return upper;
     }
-    let cc = &upper[..2];
-    if cc.chars().all(|c| c.is_ascii_alphabetic()) {
-        format!("{upper}-{cc}")
-    } else {
-        upper
+    match upper.get(..2) {
+        Some(cc) if cc.chars().all(|c| c.is_ascii_alphabetic()) => format!("{upper}-{cc}"),
+        _ => upper,
     }
 }
 
@@ -256,7 +254,7 @@ pub(crate) async fn fetch_govt_series(
 /// Returns true if the ticker should route to the sovereign-yield (CNBC) provider.
 pub fn is_govt_ticker(ticker: &str) -> bool {
     let t = ticker.trim();
-    t.len() > 5 && t[..5].eq_ignore_ascii_case("GOVT:")
+    ticker_has_prefix(t, "GOVT:")
 }
 
 #[cfg(test)]

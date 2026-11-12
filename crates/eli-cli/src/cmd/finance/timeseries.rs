@@ -3458,8 +3458,8 @@ fn parse_ratepath_ticker(raw: &str) -> Option<RatePathTicker> {
     if meeting.len() != 7 {
         return None;
     }
-    let month_token = &meeting[..3];
-    let year_str = &meeting[3..];
+    let month_token = meeting.get(..3)?;
+    let year_str = meeting.get(3..)?;
     let year_full: i32 = year_str.parse().ok()?;
     let month_word_lower = match month_token {
         "JAN" => "january",

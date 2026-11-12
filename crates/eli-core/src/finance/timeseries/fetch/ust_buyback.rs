@@ -44,7 +44,7 @@ const PLUMB_USER_AGENT: &str = concat!(
 /// Returns true if the ticker routes to the Treasury buyback provider.
 pub fn is_buyback_ticker(ticker: &str) -> bool {
     let t = ticker.trim();
-    t.len() > 8 && t[..8].eq_ignore_ascii_case("BUYBACK:")
+    ticker_has_prefix(t, "BUYBACK:")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

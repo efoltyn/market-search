@@ -54,9 +54,9 @@ enum SecNavKind {
 /// Split `NAV:OBDC` / `pnav:fsk` into (kind, upper-case symbol).
 fn secnav_parse_ticker(ticker: &str) -> Option<(SecNavKind, String)> {
     let t = ticker.trim();
-    let (kind, rest) = if t.len() > 5 && t[..5].eq_ignore_ascii_case("PNAV:") {
+    let (kind, rest) = if ticker_has_prefix(t, "PNAV:") {
         (SecNavKind::PriceToNav, &t[5..])
-    } else if t.len() > 4 && t[..4].eq_ignore_ascii_case("NAV:") {
+    } else if ticker_has_prefix(t, "NAV:") {
         (SecNavKind::Nav, &t[4..])
     } else {
         return None;
