@@ -1,6 +1,6 @@
 [package]
 name = "market-search"
-version = "0.6.1"
+version = "0.6.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -29,7 +29,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/efoltyn/market-search"
@@ -68,9 +68,9 @@ axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-eli-cli = { path = "crates/eli-cli", version = "0.6.1" }
-eli-core = { path = "crates/eli-core", version = "0.6.1" }
-eli-finance-types = { path = "crates/eli-finance-types", version = "0.6.1" }
+eli-cli = { path = "crates/eli-cli", version = "0.6.2" }
+eli-core = { path = "crates/eli-core", version = "0.6.2" }
+eli-finance-types = { path = "crates/eli-finance-types", version = "0.6.2" }
 
 # ── dev build speed ────────────────────────────────────────────────────────────
 [profile.dev]

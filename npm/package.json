@@ -1,6 +1,6 @@
 {
   "name": "market-search",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Live markets in your AI: prediction-market odds + prices + macro on one timeseries axis. Local MCP server, free, no API keys.",
   "bin": {
     "market-search": "bin/market-search.js"
