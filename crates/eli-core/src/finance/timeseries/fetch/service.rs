@@ -286,7 +286,10 @@ fn cache_key(
         // Binance alone is on v=4: BN: series used to come from Binance.US
         // under the label "binance" and now name the venue that served them,
         // so an entry cached by an older binary must not be read back.
-        v: if matches!(req.provider, ProviderKind::Binance) { 4 } else { 3 },
+        // Pyth is on v=4 for the same reason: an old entry holds real Pyth
+        // data under the source "pyth"; PYTH: is now the Kraken Futures index
+        // and always says so in a notice, which a replayed entry would lack.
+        v: if matches!(req.provider, ProviderKind::Binance | ProviderKind::Pyth) { 4 } else { 3 },
         provider: &req.provider,
         tickers: tickers_sorted,
         range: req.range.to_string_compact(),
