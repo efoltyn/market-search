@@ -1,26 +1,17 @@
-### `eli finance prices`
+### Live prices around the clock
 
-Live spot prices from Pyth (crypto, commodities, FX, metals).
-
-**Two-step process:**
+There is no separate prices command. For the current price of crypto, gold, silver, oil, natural gas, copper, the Nasdaq-100 (Kraken's US Tech 100 index) or EUR and GBP at any hour, pull one-minute candles from Kraken Futures (no key):
 
 ```bash
-# Step 1: Discover feed ID
-eli finance prices --query "btc" --asset-type crypto
-# Returns candidates with IDs
-
-# Step 2: Fetch price by ID
-eli finance prices --ids e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43
+eli finance timeseries --tickers KF:BTC,KF:ETH,KF:GOLD,KF:OIL --range 1h --granularity 1m
 ```
 
-**Asset types:** `crypto`, `equity`, `fx`, `metal`, `rates`, `commodities`
+The last candle is the current minute. `KF:<NAME>` is the market's index price; `KF:<NAME>:TRADE` is the traded perpetual, with volume.
 
-**Returns:**
-- `symbol`, `value` (price), `timestamp`
+`PYTH:<NAME>` still works and returns the same Kraken Futures index: Pyth ended keyless access on 2026-08-26.
 
-**When to use:**
-- Real-time crypto prices (BTC, ETH, etc.)
-- Live commodity prices (gold, oil)
-- FX rates
+**Also open at all hours:**
+- `HL:xyz:SP500`, `HL:xyz:NVDA`: Hyperliquid perps on indexes and US stocks
+- `BN:BTCUSDT`: Binance spot candles with volume
 
-**For stocks:** Use `snapshot` instead - faster, more data.
+**For stocks:** `eli finance timeseries --tickers AAPL --range 1d --granularity 1m`; intraday series include pre-market and after-hours bars.
