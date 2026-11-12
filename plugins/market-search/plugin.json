@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "market-search",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Live markets for your agent: Kalshi and Polymarket odds, stocks, options, futures curves, bonds, FRED macro, Treasury auctions, SEC filings and central-bank data on one timeseries axis. Runs locally; no API keys.",
   "author": {
     "name": "Eli Foltyn",

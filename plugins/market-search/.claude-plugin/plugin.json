@@ -1,7 +1,7 @@
 {
   "name": "market-search",
   "displayName": "Market Search",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Live markets for Claude: Kalshi and Polymarket odds, stocks, options, futures curves, bonds, FRED macro, Treasury auctions, SEC filings and central-bank data on one timeseries axis. Runs locally on your machine; no API keys, no account.",
   "author": { "name": "Eli Foltyn", "url": "https://eliterminal.com" },
   "homepage": "https://eliterminal.com",

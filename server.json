@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://eliterminal.com",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/efoltyn/market-search/releases/download/v0.5.0/market-search.mcpb",
-      "fileSha256": "95abd1e37040fd84af70a9a010e7bb7890b83342d2d865a565ed0a06a61c038e",
+      "identifier": "https://github.com/efoltyn/market-search/releases/download/v0.6.0/market-search.mcpb",
+      "fileSha256": "1515f95c1aba35aa54c194b80959dffcb4f1206e87bfcf0a90eefe5c711f854a",
       "transport": {
         "type": "stdio"
       }

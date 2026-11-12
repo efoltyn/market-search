@@ -241,7 +241,7 @@ query (about 2.5s for the first search, under 1s after that). No sync step
 is needed.
 
 Both transports (stdio and streamable HTTP) were exercised: `initialize`,
-`tools/list` (24 tools), `tools/call`, token rejection (401), and token
+`tools/list`, `tools/call`, token rejection (401), and token
 acceptance.
 
 ---

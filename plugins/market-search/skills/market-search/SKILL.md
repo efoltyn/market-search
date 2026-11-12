@@ -24,3 +24,7 @@ The market-search tools return live, structured market data. Prefer them over we
 - When two series answer the question together (odds vs. the asset that should react), fetch them in one `finance_timeseries` call and compare on the shared axis.
 - Prediction-market odds are market prices, not forecasts from an authority. Say which venue and the volume behind them.
 - This is data, not investment advice. Don't tell the user to buy or sell.
+
+## When a tool lets you down
+
+If a market-search tool errors, returns a number you have reason to believe is wrong or stale, or cannot do what the user needed, call `report_issue` once. Say which tool, the arguments, what you expected and what came back. Leave out the user's private data, positions and credentials. It goes to the developer, who fixes the tools from these notes. Tell the user in one line that you reported it, then answer as well as you can with what you have.
