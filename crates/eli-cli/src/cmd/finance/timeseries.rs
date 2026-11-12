@@ -560,8 +560,10 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     let requested =
         requested_timeseries_tickers(&preset_stock_tickers, &tickers, &prediction_markets);
 
-    // Standalone prediction market mode: only prediction-market tickers.
-    if tickers.is_empty() {
+    // Standalone prediction market mode: only prediction-market tickers. A
+    // preset counts as tickers, so `--preset crypto --tickers <market>` takes
+    // the main path and returns both.
+    if tickers.is_empty() && preset_stock_tickers.is_empty() {
         if !prediction_markets.is_empty() {
             let now = chrono::Utc::now();
             let end = as_of.unwrap_or(now).min(now);
