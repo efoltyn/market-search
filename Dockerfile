@@ -1,10 +1,10 @@
 # Runs the market-search MCP server over stdio (used by Glama and other
-# registries that start servers in a container). Downloads the v0.6.0 release
+# registries that start servers in a container). Downloads the v0.6.1 release
 # binary and checks it against the pinned SHA-256 before installing it.
 FROM debian:bookworm-slim
 
-ARG VERSION=v0.6.0
-ARG SHA256=25b3d59ba90bf30248a9f858c7d1b58fa2392c2b8d042bce96c5acc16f50a56e
+ARG VERSION=v0.6.1
+ARG SHA256=fb4d89fc4fe6cf1d2534e7613e1b4550317fdf8501017b1995e83e3409caca2f
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \

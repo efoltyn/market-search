@@ -10,6 +10,7 @@ The market-search tools return live, structured market data. Prefer them over we
 ## Pick the tool
 
 - A price, rate or probability over time: `finance_timeseries`. It puts stocks, FRED macro, futures, crypto and prediction-market odds on one time axis, so mix them in one call (`tickers: "SPY,CL=F,DGS10,KXRECSSNBER-26"`). Reach for a `preset` (`macro`, `recession`, `credit`, `yield_curve`, `inflation`, `liquidity`, `sovereigns`, ...) before hand-listing tickers.
+- A price while US markets are closed (nights, weekends): `KF:` tickers in `finance_timeseries` (`KF:BTC`, `KF:GOLD`, `KF:OIL`, `KF:US100`). They are Kraken Futures index candles and keep printing all week.
 - "What are the odds of X": `finance_odds` with a short `search` term. It searches Kalshi and Polymarket together. Feed a market's `ticker` from the result into `finance_timeseries` to chart how the odds moved.
 - Fed meetings: `finance_rate_path` (no arguments) for hold/cut/hike odds per meeting.
 - A company: `finance_fundamentals`, `finance_options`, `finance_insider`, `finance_short`, `finance_bonds`, and `finance_filings` (use `toc` first, then `section` to read only the parts you need).

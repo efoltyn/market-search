@@ -1,6 +1,6 @@
 {
   "name": "market-search",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Live markets for Gemini: Kalshi and Polymarket odds, stocks, options, futures, bonds, FRED macro, Treasury, SEC filings and central-bank data on one timeseries axis. Runs locally, no API keys.",
   "mcpServers": {
     "market-search": {
