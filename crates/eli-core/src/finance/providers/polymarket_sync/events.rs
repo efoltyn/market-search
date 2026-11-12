@@ -578,7 +578,7 @@ async fn fetch_polymarket_event_page(
             .append_pair("limit", &limit.to_string())
             .append_pair("offset", &offset.to_string());
 
-        let resp = match client.get(url).send().await {
+        let resp = match client.get(url).venue_send().await {
             Ok(resp) => resp,
             Err(err) => {
                 if attempts < 6 {
@@ -690,7 +690,7 @@ async fn fetch_polymarket_market_page(
             .append_pair("limit", &limit.to_string())
             .append_pair("offset", &offset.to_string());
 
-        let resp = match client.get(url).send().await {
+        let resp = match client.get(url).venue_send().await {
             Ok(resp) => resp,
             Err(err) => {
                 if attempts < 6 {

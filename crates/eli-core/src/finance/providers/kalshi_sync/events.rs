@@ -1212,7 +1212,7 @@ async fn fetch_json_with_retry<T: DeserializeOwned>(
         attempt = attempt.saturating_add(1);
         metrics.attempts = metrics.attempts.saturating_add(1);
 
-        let resp = match client.get(url.clone()).send().await {
+        let resp = match client.get(url.clone()).venue_send().await {
             Ok(resp) => resp,
             Err(err) => {
                 if attempt < KALSHI_MAX_RETRIES {

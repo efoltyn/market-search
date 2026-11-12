@@ -18,6 +18,7 @@ use eli_core::contract::{self, StepStatus};
 use eli_core::diff::engine::UndoManager;
 use eli_core::diff::engine::{DiffEngine, DiffResult};
 use eli_core::executor::command_runner::{CommandResult, CommandRunner};
+use eli_core::finance::venue_http::VenueSend;
 use eli_core::orchestrator::{
     compact_memory_now, maybe_compact_memory, run_subagents, SubagentResult,
 };

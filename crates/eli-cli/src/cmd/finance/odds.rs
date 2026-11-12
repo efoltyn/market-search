@@ -3768,11 +3768,12 @@ where
 {
     let mut attempt = 0usize;
     loop {
-        live_provider_throttle(url).await;
+        // venue_send spaces requests per venue across processes and has
+        // already backed off and retried a 429 by the time it returns one.
         let resp = client
             .get(url)
             .query(query)
-            .send()
+            .venue_send()
             .await
             .map_err(|e| format!("{label} failed: {e}"))?;
 
@@ -3784,148 +3785,18 @@ where
                 .map_err(|e| format!("{label} parse failed: {e}"));
         }
 
-        if (status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
-            && attempt < 4
-        {
-            let retry_after_ms = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(|seconds| seconds.saturating_mul(1000));
+        if let Some(note) = eli_core::finance::venue_http::refusal_note(&resp) {
+            return Err(format!("{label} failed: {note}"));
+        }
+
+        if status.is_server_error() && attempt < 4 {
             attempt += 1;
-            let backoff_ms = retry_after_ms.unwrap_or(500 * attempt as u64);
-            live_provider_note_cooldown(url, backoff_ms).await;
-            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
             continue;
         }
 
         return Err(format!("{label} failed: http {status}"));
     }
-}
-
-fn live_provider_throttle_spec(url: &str) -> Option<(&'static str, u64)> {
-    if url.contains("api.elections.kalshi.com") {
-        // Kalshi is the provider that 429s under concurrent live hydration.
-        // 125ms schedules around 8 req/s across CLI/MCP processes, close to
-        // common public API ceilings while leaving a small safety margin.
-        return Some(("kalshi", 125));
-    }
-    None
-}
-
-async fn live_provider_throttle(url: &str) {
-    let Some((provider, spacing_ms)) = live_provider_throttle_spec(url) else {
-        return;
-    };
-    let provider = provider.to_string();
-    let wait_ms = tokio::task::spawn_blocking(move || {
-        live_provider_reserve_slot(&provider, spacing_ms)
-    })
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    if wait_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-    }
-}
-
-async fn live_provider_note_cooldown(url: &str, cooldown_ms: u64) {
-    let Some((provider, _)) = live_provider_throttle_spec(url) else {
-        return;
-    };
-    let provider = provider.to_string();
-    let _ = tokio::task::spawn_blocking(move || {
-        live_provider_extend_cooldown(&provider, cooldown_ms);
-    })
-    .await;
-}
-
-fn live_provider_limit_dir() -> std::path::PathBuf {
-    directories::ProjectDirs::from("", "", "eli")
-        .map(|d| d.cache_dir().join("odds").join("provider_limits"))
-        .unwrap_or_else(|| std::env::temp_dir().join("eli-odds-provider-limits"))
-}
-
-fn live_now_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default()
-}
-
-struct LiveProviderDirLock {
-    path: std::path::PathBuf,
-}
-
-impl Drop for LiveProviderDirLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir(&self.path);
-    }
-}
-
-fn live_provider_acquire_lock(
-    base_dir: &std::path::Path,
-    provider: &str,
-) -> Option<LiveProviderDirLock> {
-    let lock_path = base_dir.join(format!("{provider}.lock"));
-    for _ in 0..200 {
-        match std::fs::create_dir(&lock_path) {
-            Ok(()) => {
-                return Some(LiveProviderDirLock { path: lock_path });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = std::fs::metadata(&lock_path)
-                    .and_then(|meta| meta.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|elapsed| elapsed > std::time::Duration::from_secs(10));
-                if stale {
-                    let _ = std::fs::remove_dir(&lock_path);
-                } else {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
-            Err(_) => return None,
-        }
-    }
-    None
-}
-
-fn live_provider_read_next_ms(path: &std::path::Path) -> u128 {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u128>().ok())
-        .unwrap_or_default()
-}
-
-fn live_provider_reserve_slot(provider: &str, spacing_ms: u64) -> Option<u64> {
-    let base_dir = live_provider_limit_dir();
-    std::fs::create_dir_all(&base_dir).ok()?;
-    let _lock = live_provider_acquire_lock(&base_dir, provider)?;
-    let state_path = base_dir.join(format!("{provider}.next_ms"));
-    let now = live_now_millis();
-    let next_allowed = live_provider_read_next_ms(&state_path);
-    let scheduled = now.max(next_allowed);
-    let following = scheduled.saturating_add(spacing_ms as u128);
-    let _ = std::fs::write(&state_path, following.to_string());
-    Some(scheduled.saturating_sub(now).min(u64::MAX as u128) as u64)
-}
-
-fn live_provider_extend_cooldown(provider: &str, cooldown_ms: u64) {
-    let base_dir = live_provider_limit_dir();
-    if std::fs::create_dir_all(&base_dir).is_err() {
-        return;
-    }
-    let Some(_lock) = live_provider_acquire_lock(&base_dir, provider) else {
-        return;
-    };
-    let state_path = base_dir.join(format!("{provider}.next_ms"));
-    let now = live_now_millis();
-    let next_allowed = live_provider_read_next_ms(&state_path);
-    let cooldown_until = now.saturating_add(cooldown_ms as u128);
-    let _ = std::fs::write(&state_path, next_allowed.max(cooldown_until).to_string());
 }
 
 fn live_discover_kalshi_tags(

@@ -181,14 +181,18 @@ async fn poly_history_get(
         let resp = client
             .get(url)
             .query(params)
-            .send()
+            .venue_send()
             .await
             .context("request polymarket price history")?;
         let status = resp.status();
         if status.is_success() {
             return resp.json().await.context("parse polymarket price history");
         }
-        if (status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) && attempt < 2 {
+        // venue_send has already backed off and retried a 429.
+        if let Some(note) = eli_core::finance::venue_http::refusal_note(&resp) {
+            anyhow::bail!("{note}");
+        }
+        if status.is_server_error() && attempt < 2 {
             let wait = resp
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
@@ -454,7 +458,7 @@ async fn fetch_polymarket_market_meta(
     let direct_url = format!("{POLYMARKET_GAMMA_URL}/markets/{market}");
     let direct = client
         .get(&direct_url)
-        .send()
+        .venue_send()
         .await
         .context("request polymarket market metadata")?;
 
@@ -480,7 +484,7 @@ async fn fetch_polymarket_market_meta(
     let fallback = client
         .get(format!("{POLYMARKET_GAMMA_URL}/markets"))
         .query(&[("slug", market), ("limit", "1")])
-        .send()
+        .venue_send()
         .await
         .context("request polymarket market metadata by slug")?;
 

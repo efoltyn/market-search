@@ -211,7 +211,7 @@ async fn search_kalshi_nested_events(
             }
 
             let url = format!("{}/events", KALSHI_BASE_URL);
-            let resp = match client.get(&url).query(&query).send().await {
+            let resp = match client.get(&url).query(&query).venue_send().await {
                 Ok(resp) => resp,
                 Err(e) => {
                     warn!("kalshi nested events search fetch failed: {e}");
@@ -462,7 +462,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             let resp = client
                 .get(&url)
                 .query(&query)
-                .send()
+                .venue_send()
                 .await
                 .map_err(|e| Error::Provider(format!("kalshi series list failed: {e}")))?;
 
@@ -704,7 +704,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             let resp = client
                 .get(&url)
                 .query(&query)
-                .send()
+                .venue_send()
                 .await
                 .map_err(|e| Error::Provider(format!("kalshi events list failed: {e}")))?;
 
@@ -975,7 +975,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                     }
 
                     let url = format!("{}/events", KALSHI_BASE_URL);
-                    let resp = match client.get(&url).query(&query).send().await {
+                    let resp = match client.get(&url).query(&query).venue_send().await {
                         Ok(resp) => resp,
                         Err(e) => {
                             warn!("kalshi events prefilter request failed: {e}");
@@ -1058,7 +1058,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                         }
 
                         let url = format!("{}/markets", KALSHI_BASE_URL);
-                        let resp = match client.get(&url).query(&query).send().await {
+                        let resp = match client.get(&url).query(&query).venue_send().await {
                             Ok(resp) => resp,
                             Err(e) => {
                                 warn!("kalshi markets targeted request failed: {e}");
@@ -1189,7 +1189,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             let resp = client
                 .get(&url)
                 .query(&query)
-                .send()
+                .venue_send()
                 .await
                 .map_err(|e| Error::Provider(format!("kalshi markets list failed: {e}")))?;
 
@@ -1337,7 +1337,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             let url = format!("{}/series/{}", KALSHI_BASE_URL, ticker);
             let resp = client
                 .get(url)
-                .send()
+                .venue_send()
                 .await
                 .map_err(|e| Error::Provider(format!("kalshi series fetch failed: {e}")))?;
             if !resp.status().is_success() {
@@ -1414,7 +1414,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
                     }
 
                     let url = format!("{}/markets", KALSHI_BASE_URL);
-                    let resp = client.get(url).query(&query).send().await.map_err(|e| {
+                    let resp = client.get(url).query(&query).venue_send().await.map_err(|e| {
                         Error::Provider(format!("kalshi markets fetch failed: {e}"))
                     })?;
                     if !resp.status().is_success() {
@@ -1484,7 +1484,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             let url = format!("{}/events/{}", KALSHI_BASE_URL, ticker);
             let resp = client
                 .get(url)
-                .send()
+                .venue_send()
                 .await
                 .map_err(|e| Error::Provider(format!("kalshi event fetch failed: {e}")))?;
             if !resp.status().is_success() {
@@ -1563,7 +1563,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
 
                 let url = format!("{}/markets", KALSHI_BASE_URL);
                 let resp =
-                    client.get(url).query(&query).send().await.map_err(|e| {
+                    client.get(url).query(&query).venue_send().await.map_err(|e| {
                         Error::Provider(format!("kalshi markets fetch failed: {e}"))
                     })?;
                 if !resp.status().is_success() {
@@ -1643,7 +1643,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             let url = format!("{}/markets/{}", KALSHI_BASE_URL, ticker);
             let resp = client
                 .get(url)
-                .send()
+                .venue_send()
                 .await
                 .map_err(|e| Error::Provider(format!("kalshi market fetch failed: {e}")))?;
             if !resp.status().is_success() {
@@ -1725,7 +1725,7 @@ pub(crate) async fn fetch_odds_kalshi(req: OddsRequest) -> Result<OddsResponse> 
             if !ticker.is_empty() {
                 let url = format!("{}/markets/{}/orderbook", KALSHI_BASE_URL, ticker);
                 let resp =
-                    client.get(url).send().await.map_err(|e| {
+                    client.get(url).venue_send().await.map_err(|e| {
                         Error::Provider(format!("kalshi orderbook fetch failed: {e}"))
                     })?;
                 if !resp.status().is_success() {

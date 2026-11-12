@@ -150,7 +150,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
             );
             let resp = client
                 .get(&url)
-                .send()
+                .venue_send()
                 .await
                 .map_err(|e| Error::Provider(format!("polymarket tags list failed: {e}")))?;
 
@@ -290,7 +290,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
 
             let url = format!("{}/public-search", POLYMARKET_GAMMA_URL);
             let resp =
-                client.get(&url).query(&query).send().await.map_err(|e| {
+                client.get(&url).query(&query).venue_send().await.map_err(|e| {
                     Error::Provider(format!("polymarket public-search failed: {e}"))
                 })?;
 
@@ -462,7 +462,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
             let resp = client
                 .get(&url)
                 .query(&[query_param])
-                .send()
+                .venue_send()
                 .await
                 .map_err(|e| Error::Provider(format!("polymarket event lookup failed: {e}")))?;
 
@@ -684,7 +684,7 @@ pub(crate) async fn fetch_odds_polymarket(req: &OddsRequest) -> Result<OddsRespo
         );
         let resp = client
             .get(&url)
-            .send()
+            .venue_send()
             .await
             .map_err(|e| Error::Provider(format!("polymarket events list failed: {e}")))?;
 

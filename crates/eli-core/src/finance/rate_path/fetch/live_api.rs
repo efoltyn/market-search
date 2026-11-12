@@ -252,7 +252,7 @@ async fn fetch_kalshi_fed_markets(client: &reqwest::Client) -> Result<Vec<LiveMa
 
         let resp = client
             .get(url.as_str())
-            .send()
+            .venue_send()
             .await
             .map_err(|e| Error::Provider(format!("kalshi fed markets fetch: {e}")))?;
 
@@ -349,7 +349,7 @@ async fn fetch_polymarket_event_markets(
     let url = format!("{}/events?slug={}", crate::finance::POLYMARKET_GAMMA_URL, slug);
     let resp = client
         .get(&url)
-        .send()
+        .venue_send()
         .await
         .map_err(|e| Error::Provider(format!("polymarket event {slug}: {e}")))?;
     if !resp.status().is_success() {

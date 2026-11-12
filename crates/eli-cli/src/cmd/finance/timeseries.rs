@@ -3532,7 +3532,7 @@ async fn fetch_ratepath_constituents(
         let kalshi_resp = client
             .get(&kalshi_url)
             .query(&[("event_ticker", event_ticker.as_str()), ("limit", "20")])
-            .send()
+            .venue_send()
             .await
             .with_context(|| format!("kalshi event lookup {event_ticker}"))?;
         if !kalshi_resp.status().is_success() {
@@ -3602,7 +3602,7 @@ async fn fetch_ratepath_constituents(
 
     for slug in &poly_slugs {
         let url = format!("{}/events?slug={}", POLYMARKET_GAMMA_URL, slug);
-        let resp = match client.get(&url).send().await {
+        let resp = match client.get(&url).venue_send().await {
             Ok(r) => r,
             Err(_) => continue,
         };

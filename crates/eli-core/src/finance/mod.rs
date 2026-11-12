@@ -169,6 +169,8 @@ pub fn resolve_eia_api_key() -> std::result::Result<String, String> {
 }
 pub mod odds_db;
 pub mod policy;
+pub mod venue_http;
+pub use venue_http::VenueSend;
 
 pub fn default_cache_dir() -> PathBuf {
     std::env::temp_dir().join("eli-finance-cache")

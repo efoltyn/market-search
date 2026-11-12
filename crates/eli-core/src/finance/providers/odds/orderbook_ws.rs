@@ -123,7 +123,7 @@ pub async fn fetch_polymarket_orderbooks(
     let resp = client
         .post("https://clob.polymarket.com/books")
         .json(&body)
-        .send()
+        .venue_send()
         .await
         .map_err(|e| Error::Provider(format!("polymarket books fetch failed: {e}")))?;
     if !resp.status().is_success() {

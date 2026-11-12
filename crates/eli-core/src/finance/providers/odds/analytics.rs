@@ -10,7 +10,7 @@ async fn fetch_kalshi_tags_by_categories(
     let url = format!("{}/search/tags_by_categories", KALSHI_BASE_URL);
     let resp = client
         .get(&url)
-        .send()
+        .venue_send()
         .await
         .map_err(|e| Error::Provider(format!("kalshi tags_by_categories fetch failed: {e}")))?;
     if !resp.status().is_success() {

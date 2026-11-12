@@ -44,7 +44,7 @@ async fn fetch_latest_nyfed_effr_point() -> Result<(NyFedEffrPoint, DateTime<Utc
     );
     let resp = super::super::shared_client::GENERAL
         .get(&url)
-        .send()
+        .venue_send()
         .await
         .map_err(|e| Error::Provider(format!("ny fed effr fetch failed: {e}")))?;
     let status = resp.status();

@@ -341,8 +341,9 @@ fn kalshi_v1_candidates(resp: KalshiV1SearchResp, include_mentions: bool) -> Vec
     out
 }
 
-/// GET returning Ok(None) on 404, with the shared Kalshi throttle and
-/// 429/5xx backoff (Kalshi sends no Retry-After; the docs say back off).
+/// GET returning Ok(None) on 404. Spacing and 429 backoff come from
+/// venue_send (Kalshi sends no Retry-After; the docs say back off); a
+/// server error is retried here.
 async fn kalshi_get_json_opt(
     client: &reqwest::Client,
     url: &str,
@@ -351,11 +352,10 @@ async fn kalshi_get_json_opt(
 ) -> std::result::Result<Option<serde_json::Value>, String> {
     let mut attempt = 0usize;
     loop {
-        live_provider_throttle(url).await;
         let resp = client
             .get(url)
             .query(query)
-            .send()
+            .venue_send()
             .await
             .map_err(|e| format!("{label} failed: {e}"))?;
         let status = resp.status();
@@ -369,12 +369,12 @@ async fn kalshi_get_json_opt(
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        if (status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
-            && attempt < 4
-        {
+        if let Some(note) = eli_core::finance::venue_http::refusal_note(&resp) {
+            return Err(format!("{label} failed: {note}"));
+        }
+        if status.is_server_error() && attempt < 4 {
             attempt += 1;
             let backoff_ms = 400 * (1u64 << attempt);
-            live_provider_note_cooldown(url, backoff_ms).await;
             tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             continue;
         }

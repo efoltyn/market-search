@@ -1062,6 +1062,7 @@ dependencies = [
  "evalexpr",
  "futures",
  "html-escape",
+ "http 1.4.0",
  "ibapi",
  "rand 0.8.5",
  "readability",
