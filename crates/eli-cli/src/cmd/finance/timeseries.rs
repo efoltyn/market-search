@@ -73,20 +73,15 @@ fn is_timeseries_notice_stage(stage: Option<&str>) -> bool {
 }
 
 /// The tickers one call asked for, spelled as the caller wrote them, in
-/// order and without repeats: preset tickers, explicit tickers, prediction
-/// markets.
+/// order and without repeats: preset tickers, explicit tickers, and each
+/// prediction-market input as it was typed (`kalshi:kxfed-26dec:no`).
 fn requested_timeseries_tickers(
     preset: &[String],
     explicit: &[String],
-    markets: &[PredictionMarketRequest],
+    market_inputs: &[String],
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let all = preset
-        .iter()
-        .chain(explicit.iter())
-        .map(|t| t.as_str())
-        .chain(markets.iter().map(|m| m.market.as_str()));
-    for t in all {
+    for t in preset.iter().chain(explicit.iter()).chain(market_inputs.iter()) {
         let t = t.trim();
         if !t.is_empty() && !out.iter().any(|x| x == t) {
             out.push(t.to_string());
@@ -95,21 +90,82 @@ fn requested_timeseries_tickers(
     out
 }
 
+/// `s` without `prefix`, the prefix matched without regard to case.
+fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
+}
+
+/// A venue ticker in its three parts: `KALSHI:KXFED-26DEC-T3.50:NO` is
+/// ("KALSHI:", "KXFED-26DEC-T3.50", ":NO"). The prefix and the side are
+/// optional and matched without regard to case; a ticker with neither is
+/// all market.
+fn split_venue_ticker(ticker: &str) -> (&str, &str, &str) {
+    let t = ticker.trim();
+    let prefix_len = ["KALSHI:", "POLYMARKET:"]
+        .iter()
+        .find(|p| strip_prefix_ignore_case(t, p).is_some())
+        .map_or(0, |p| p.len());
+    let (prefix, rest) = t.split_at(prefix_len);
+    match rest.rfind(':') {
+        Some(i) if i > 0 && parse_prediction_market_side(&rest[i + 1..]).is_some() => {
+            (prefix, &rest[..i], &rest[i..])
+        }
+        _ => (prefix, rest, ""),
+    }
+}
+
 /// Give returned tickers back the spelling the caller used. The core
-/// upper-cases a ticker before it fetches, so `aapl` or `KF:btc` came back
-/// as `AAPL` and `KF:BTC`, and a caller matching on its own input found
-/// nothing. Only case is undone: `vix` still comes back as `^VIX`, and a
-/// bare Polymarket id as `POLYMARKET:<id>:YES`.
+/// upper-cases a ticker before it fetches, and a Kalshi ticker is sent to
+/// the venue in upper case, so `aapl`, `KF:btc` or `kxfed-26dec-t3.50` came
+/// back as `AAPL`, `KF:BTC` and `KALSHI:KXFED-26DEC-T3.50:YES`, and a caller
+/// matching on its own input found nothing. Only case is undone: `vix`
+/// still comes back as `^VIX`, a bare Polymarket id as
+/// `POLYMARKET:<id>:YES`, and the legs of an event under the venue's names.
 fn restore_requested_spelling(
     resp: &mut eli_core::finance::TimeseriesResponse,
     requested: &[String],
 ) {
+    let is_no = |side: &str| {
+        matches!(
+            parse_prediction_market_side(side.trim_start_matches(':')),
+            Some(PredictionMarketSide::No)
+        )
+    };
     let fix = |t: &mut String| {
         if requested.iter().any(|r| r == t) {
             return;
         }
         if let Some(r) = requested.iter().find(|r| r.eq_ignore_ascii_case(t)) {
             *t = r.clone();
+            return;
+        }
+        // The input was a bare market (kxfed-26dec-t3.50) or had another
+        // side or prefix spelling: the market part takes the caller's
+        // spelling, the prefix and the side stay as the tool writes them.
+        // With the same market asked for twice, the request for this side
+        // decides.
+        let (prefix, market, side) = split_venue_ticker(t);
+        if market.is_empty() {
+            return;
+        }
+        let asked: Vec<(&str, &str)> = requested
+            .iter()
+            .map(|r| split_venue_ticker(r))
+            .filter(|(_, m, _)| m.eq_ignore_ascii_case(market))
+            .map(|(_, m, s)| (m, s))
+            .collect();
+        let side_fits = |s: &str| side.is_empty() || is_no(s) == is_no(side);
+        let pick = asked
+            .iter()
+            .find(|(m, s)| *m == market && side_fits(s))
+            .or_else(|| asked.iter().find(|(_, s)| side_fits(s)))
+            .or_else(|| asked.iter().find(|(m, _)| *m == market))
+            .or_else(|| asked.first());
+        if let Some((m, _)) = pick {
+            if *m != market {
+                *t = format!("{prefix}{m}{side}");
+            }
         }
     };
     for s in &mut resp.series {
@@ -150,7 +206,10 @@ fn append_silent_drops(
     let dropped: Vec<String> = requested
         .iter()
         .filter(|req| {
-            let r = req.to_ascii_lowercase();
+            // Of a venue ticker the market part is what comes back:
+            // kalshi:kxfed-26dec:no returns its legs as
+            // KALSHI:KXFED-26DEC-T3.50:NO.
+            let r = split_venue_ticker(req).1.to_ascii_lowercase();
             !returned
                 .iter()
                 .any(|t| *t == r || t.contains(r.as_str()) || r.contains(t.as_str()))
@@ -167,6 +226,7 @@ fn append_silent_drops(
         let looks_like_pm_slug = t == t.to_ascii_lowercase()
             && t.contains('-')
             && !t.contains('=')
+            && !t.contains(':')
             && t.chars().any(|c| c.is_ascii_alphabetic());
         let message = if looks_like_pm_slug {
             "looks like a Polymarket slug — slugs don't join here; use the numeric market id from finance_odds markets[].ticker".to_string()
@@ -184,51 +244,47 @@ fn append_silent_drops(
     resp.errors.get_or_insert_with(Vec::new).extend(drop_errors);
 }
 
-/// How many of the requested tickers failed: (failed, out of). A ticker
-/// failed when a real (non-notice) error names it, however many errors do.
-/// An error label that matches no requested ticker counts once on both
-/// sides, so the first number can never pass the second.
+/// The last step of every path before shaping, in this order because the
+/// last two are keyed on ticker names: returned tickers go back to the
+/// caller's spelling, analytics are built once over the final series set,
+/// and a requested ticker that came back as nothing gets its error.
+/// `granularity` is the one the caller asked for (the response can carry a
+/// coarser one after a FRED downgrade).
+fn finish_timeseries_response(
+    resp: &mut eli_core::finance::TimeseriesResponse,
+    requested: &[String],
+    granularity: eli_core::finance::Span,
+) {
+    restore_requested_spelling(resp, requested);
+    if !resp.series.is_empty() {
+        resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
+            &resp.series,
+            resp.granularity,
+        ));
+    }
+    append_silent_drops(resp, requested, granularity);
+}
+
+/// How many tickers failed: the distinct names that real (non-notice)
+/// errors carry, leaving out a name that also came back as a series. The
+/// total a message gives is this number plus the series returned, so the
+/// two always add up, whatever was asked for (an event counts as its legs,
+/// and two spellings of one ticker as one).
 fn count_failed_tickers(
     real_errors: &[eli_core::finance::TimeseriesError],
-    requested: &[String],
-) -> (usize, usize) {
-    let mut keys: Vec<String> = Vec::new();
-    for r in requested {
-        let k = r.trim().to_ascii_lowercase();
-        if !k.is_empty() && !keys.contains(&k) {
-            keys.push(k);
-        }
-    }
-    let mut failed: HashSet<usize> = HashSet::new();
-    let mut stray: HashSet<String> = HashSet::new();
+    series: &[eli_core::finance::TickerSeries],
+) -> usize {
+    let mut failed: HashSet<&str> = HashSet::new();
     for e in real_errors {
         // A whole-bucket failure can name several tickers in one entry.
         for label in e.ticker.split(',') {
-            let label = label.trim().to_ascii_lowercase();
-            let hit = keys.iter().position(|k| *k == label).or_else(|| {
-                // KALSHI:KXFED-26DEC-T3.50:YES for a request of
-                // KXFED-26DEC-T3.50, ^VIX for vix: take the longest
-                // requested ticker the label contains or is part of.
-                if label.is_empty() {
-                    return None;
-                }
-                keys.iter()
-                    .enumerate()
-                    .filter(|(_, k)| label.contains(k.as_str()) || k.contains(label.as_str()))
-                    .max_by_key(|(_, k)| k.len())
-                    .map(|(i, _)| i)
-            });
-            match hit {
-                Some(i) => {
-                    failed.insert(i);
-                }
-                None => {
-                    stray.insert(label);
-                }
+            let label = label.trim();
+            if !label.is_empty() && !series.iter().any(|s| s.ticker.trim() == label) {
+                failed.insert(label);
             }
         }
     }
-    (failed.len() + stray.len(), keys.len() + stray.len())
+    failed.len()
 }
 
 /// A timeseries response in the shape every output shares.
@@ -252,11 +308,10 @@ struct ShapedTimeseries {
 /// - `status` recomputed as a real aggregate: absent = every ticker
 ///   returned, "partial" = some failed, "error" = nothing returned;
 /// - the `error` object is absent when nothing failed; a partial result
-///   carries one that counts the tickers that failed out of the tickers
-///   requested.
+///   carries one that counts the tickers that failed, out of those plus the
+///   series returned.
 fn shape_timeseries_response(
     resp: &eli_core::finance::TimeseriesResponse,
-    requested: &[String],
 ) -> Result<ShapedTimeseries> {
     let mut resp = resp.clone();
     let mut distinct: Vec<String> = Vec::new();
@@ -309,15 +364,23 @@ fn shape_timeseries_response(
         // Some returned, some failed. The core writes its count for one
         // provider bucket, with notices counted as failures and the caller's
         // other buckets unknown to it; the merge paths drop that object. So
-        // count here, over the whole call, and always say it.
-        let (failed, out_of) =
-            count_failed_tickers(resp.errors.as_deref().unwrap_or(&[]), requested);
+        // count here, over the whole call, and always say it. The total is
+        // the failed tickers plus the series returned, never a separate
+        // count of the request, so the three numbers cannot disagree.
+        let returned = resp.series.len();
+        let failed = count_failed_tickers(resp.errors.as_deref().unwrap_or(&[]), &resp.series);
+        let message = if failed == 0 {
+            // Every error is about a ticker that also returned a series.
+            format!("{returned} series returned; errors[] lists a problem with some of them.")
+        } else {
+            format!(
+                "{failed} of {} tickers failed; {returned} series returned.",
+                failed + returned
+            )
+        };
         resp.error = Some(eli_core::finance::ToolErrorInfo {
             error: "PartialTickerFetchFailed".to_string(),
-            message: format!(
-                "{failed} of {out_of} tickers failed; {} series returned.",
-                resp.series.len()
-            ),
+            message,
             hint: Some("errors[] gives the reason for each failed ticker.".to_string()),
             debug: None,
         });
@@ -366,11 +429,8 @@ fn shape_timeseries_response(
 /// - floats rounded to 7 significant digits (kills f32 feed noise like
 ///   747.4000244140625);
 /// - pretty JSON only at a terminal; compact for pipes/agents.
-fn emit_timeseries_stdout(
-    resp: &eli_core::finance::TimeseriesResponse,
-    requested: &[String],
-) -> Result<()> {
-    let mut shaped = shape_timeseries_response(resp, requested)?;
+fn emit_timeseries_stdout(resp: &eli_core::finance::TimeseriesResponse) -> Result<()> {
+    let mut shaped = shape_timeseries_response(resp)?;
     collapse_point_candles(&mut shaped.value);
     round_json_floats(&mut shaped.value);
     let out = json_to_stdout_string(&shaped.value)?;
@@ -392,10 +452,9 @@ fn emit_timeseries_stdout(
 fn write_timeseries_out(
     out_path: PathBuf,
     resp: &eli_core::finance::TimeseriesResponse,
-    requested: &[String],
     meta_args: &[String],
 ) -> Result<()> {
-    let shaped = shape_timeseries_response(resp, requested)?;
+    let shaped = shape_timeseries_response(resp)?;
     let json = serde_json::to_string_pretty(&shaped.value).context("serialize response")?;
     let wr = write_json_text_with_meta(
         out_path,
@@ -452,13 +511,20 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     let explicit_odds_provider = args.odds_provider.clone();
     let explicit_odds_market = args.odds_market.clone();
     let mut prediction_markets = Vec::new();
+    // Each prediction-market input as the caller typed it. The request list
+    // holds the parsed form (side split off, a Kalshi market in upper case).
+    let mut market_inputs: Vec<String> = Vec::new();
     let mut preset_stock_tickers = Vec::new();
     for t in &preset_tickers {
-        push_timeseries_input(t, &mut prediction_markets, &mut preset_stock_tickers);
+        if push_timeseries_input(t, &mut prediction_markets, &mut preset_stock_tickers) {
+            market_inputs.push(t.trim().to_string());
+        }
     }
     let mut explicit_stock_tickers = Vec::new();
     for t in &args.tickers {
-        push_timeseries_input(t, &mut prediction_markets, &mut explicit_stock_tickers);
+        if push_timeseries_input(t, &mut prediction_markets, &mut explicit_stock_tickers) {
+            market_inputs.push(t.trim().to_string());
+        }
     }
 
     if let Some(odds_req) = parse_optional_prediction_market_request(
@@ -467,6 +533,9 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         &args.odds_side,
     )? {
         push_prediction_market_request(&mut prediction_markets, odds_req);
+        if let Some(typed) = explicit_odds_market.as_deref() {
+            market_inputs.push(typed.trim().to_string());
+        }
     }
 
     let mut tickers = explicit_stock_tickers;
@@ -477,7 +546,9 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             if t.is_empty() || t.starts_with('#') {
                 continue;
             }
-            push_timeseries_input(t, &mut prediction_markets, &mut tickers);
+            if push_timeseries_input(t, &mut prediction_markets, &mut tickers) {
+                market_inputs.push(t.to_string());
+            }
         }
     }
 
@@ -558,7 +629,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     // What the caller asked for, in its own spelling: the reference for the
     // returned ticker names, the dropped-ticker check and the failure count.
     let requested =
-        requested_timeseries_tickers(&preset_stock_tickers, &tickers, &prediction_markets);
+        requested_timeseries_tickers(&preset_stock_tickers, &tickers, &market_inputs);
 
     // Standalone prediction market mode: only prediction-market tickers. A
     // preset counts as tickers, so `--preset crypto --tickers <market>` takes
@@ -612,7 +683,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                     .first()
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| "no usable prediction market series found".to_string());
-                let resp = eli_core::finance::TimeseriesResponse {
+                let mut resp = eli_core::finance::TimeseriesResponse {
                     provider: prediction_market_response_provider(&prediction_markets),
                     sources: Vec::new(),
                     tickers: prediction_markets.iter().map(|p| p.market.clone()).collect(),
@@ -638,16 +709,15 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                     analytics: None,
                     cache: None,
                 };
+                finish_timeseries_response(&mut resp, &requested, granularity);
                 return match args.out {
                     Some(out_path) => {
-                        write_timeseries_out(out_path, &resp, &requested, &pm_meta_args)
+                        write_timeseries_out(out_path, &resp, &pm_meta_args)
                     }
-                    None => emit_timeseries_stdout(&resp, &requested),
+                    None => emit_timeseries_stdout(&resp),
                 };
             }
             let series = market_series;
-            let analytics =
-                eli_core::finance::build_timeseries_analytics(&series, granularity);
             let provider = prediction_market_response_provider(&prediction_markets);
             let tickers: Vec<String> = series.iter().map(|s| s.ticker.clone()).collect();
             let mut resp = eli_core::finance::TimeseriesResponse {
@@ -668,14 +738,14 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                     Some(market_errors)
                 },
                 valid_tickers: None,
-                analytics: Some(analytics),
+                analytics: None,
                 cache: None,
             };
-            append_silent_drops(&mut resp, &requested, granularity);
+            finish_timeseries_response(&mut resp, &requested, granularity);
 
             return match args.out {
-                Some(out_path) => write_timeseries_out(out_path, &resp, &requested, &pm_meta_args),
-                None => emit_timeseries_stdout(&resp, &requested),
+                Some(out_path) => write_timeseries_out(out_path, &resp, &pm_meta_args),
+                None => emit_timeseries_stdout(&resp),
             };
         }
     }
@@ -796,8 +866,6 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             all_errors.extend(market_errors);
         }
 
-        let analytics =
-            eli_core::finance::build_timeseries_analytics(&all_series, granularity);
         let tickers_out: Vec<String> = all_series.iter().map(|s| s.ticker.clone()).collect();
         let mut resp = eli_core::finance::TimeseriesResponse {
             provider: eli_core::finance::ProviderKind::Fred, // closest match
@@ -813,24 +881,23 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             error: None,
             errors: if all_errors.is_empty() { None } else { Some(all_errors) },
             valid_tickers: None,
-            analytics: Some(analytics),
+            analytics: None,
             cache: None,
         };
         // An unknown CLEV: name, or a prediction market that failed, used to
         // vanish from this path without a word.
-        append_silent_drops(&mut resp, &requested, granularity);
+        finish_timeseries_response(&mut resp, &requested, granularity);
 
         return match args.out {
             Some(out_path) => write_timeseries_out(
                 out_path,
                 &resp,
-                &requested,
                 &[
                     "provider=cleveland_fed".to_string(),
                     format!("tickers={}", cleveland_tickers.join(",")),
                 ],
             ),
-            None => emit_timeseries_stdout(&resp, &requested),
+            None => emit_timeseries_stdout(&resp),
         };
     }
 
@@ -873,8 +940,6 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             all_errors.extend(market_errors);
         }
 
-        let analytics =
-            eli_core::finance::build_timeseries_analytics(&all_series, granularity);
         let tickers_out: Vec<String> = all_series.iter().map(|s| s.ticker.clone()).collect();
         let mut resp = eli_core::finance::TimeseriesResponse {
             provider: eli_core::finance::ProviderKind::Yahoo, // closest match (no rate_path enum variant)
@@ -890,22 +955,21 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             error: None,
             errors: if all_errors.is_empty() { None } else { Some(all_errors) },
             valid_tickers: None,
-            analytics: Some(analytics),
+            analytics: None,
             cache: None,
         };
-        append_silent_drops(&mut resp, &requested, granularity);
+        finish_timeseries_response(&mut resp, &requested, granularity);
 
         return match args.out {
             Some(out_path) => write_timeseries_out(
                 out_path,
                 &resp,
-                &requested,
                 &[
                     "provider=rate_path".to_string(),
                     format!("tickers={}", ratepath_tickers.join(",")),
                 ],
             ),
-            None => emit_timeseries_stdout(&resp, &requested),
+            None => emit_timeseries_stdout(&resp),
         };
     }
 
@@ -1554,34 +1618,22 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
     }
 
-    // Returned tickers go back to the caller's spelling before anything is
-    // keyed on them (analytics.stats, the drop check, the failure count).
-    restore_requested_spelling(&mut resp, &requested);
-
-    // Single analytics pass over the final merged series set (was recomputed
-    // after every individual merge above).
-    if !resp.series.is_empty() {
-        resp.analytics = Some(eli_core::finance::build_timeseries_analytics(
-            &resp.series,
-            resp.granularity,
-        ));
-    }
-
+    // Caller's spelling, one analytics pass over the final merged series set
+    // (it was recomputed after every merge above), the dropped-ticker check.
     // `sources`, `status` and the error object are settled by the shared
     // shaping step, the same for stdout and for --out.
-    append_silent_drops(&mut resp, &requested, granularity);
+    finish_timeseries_response(&mut resp, &requested, granularity);
 
     match args.out {
         Some(out_path) => write_timeseries_out(
             out_path,
             &resp,
-            &requested,
             &[
                 format!("range={}", args.range),
                 format!("granularity={}", args.granularity),
             ],
         ),
-        None => emit_timeseries_stdout(&resp, &requested),
+        None => emit_timeseries_stdout(&resp),
     }
 }
 
@@ -1831,9 +1883,16 @@ fn parse_optional_prediction_market_request(
         other => anyhow::bail!("unsupported --odds-side '{other}' (supported: yes, no)"),
     };
 
+    // A Kalshi ticker is upper case at the venue; a Polymarket id or slug is
+    // sent as typed.
+    let market = market.unwrap_or_default();
+    let market = match provider {
+        PredictionMarketProvider::Kalshi => market.to_ascii_uppercase(),
+        PredictionMarketProvider::Polymarket => market.to_string(),
+    };
     Ok(Some(PredictionMarketRequest {
         provider,
-        market: market.unwrap_or_default().to_string(),
+        market,
         side,
     }))
 }
@@ -1929,18 +1988,25 @@ fn expand_futures_curve(root: &str) -> Option<Vec<String>> {
     Some(tickers)
 }
 
+/// Sort one input into the prediction-market requests or the plain tickers.
+/// True when it was taken as a prediction market.
 fn push_timeseries_input(
     raw: &str,
     prediction_markets: &mut Vec<PredictionMarketRequest>,
     plain_tickers: &mut Vec<String>,
-) {
+) -> bool {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return;
+        return false;
     }
     if let Some(req) = parse_prediction_market_ticker(trimmed) {
         push_prediction_market_request(prediction_markets, req);
-    } else if let Some(curve_tickers) = expand_futures_curve(trimmed) {
+        return true;
+    }
+    // The futures roots are matched in upper case only, on the text as
+    // typed: never upper-case it first, or `cl` and `vix` would start to
+    // expand into IBKR contracts.
+    if let Some(curve_tickers) = expand_futures_curve(trimmed) {
         // Bare futures root symbol → auto-expand to the full curve
         for t in curve_tickers {
             plain_tickers.push(t);
@@ -1948,6 +2014,7 @@ fn push_timeseries_input(
     } else {
         plain_tickers.push(trimmed.to_string());
     }
+    false
 }
 
 fn push_prediction_market_request(
@@ -1973,21 +2040,23 @@ fn parse_prediction_market_ticker(raw: &str) -> Option<PredictionMarketRequest> 
         return None;
     }
 
-    if let Some(rest) = trimmed.strip_prefix("KALSHI:") {
+    // Venue prefixes, the event marker and the side are matched without
+    // regard to case. A Kalshi ticker is upper case at the venue (the odds
+    // tool upper-cases it the same way), so that is how it is sent; the
+    // caller's spelling comes back through restore_requested_spelling. A
+    // Polymarket id or slug is sent as typed.
+    if let Some(rest) = strip_prefix_ignore_case(trimmed, "KALSHI:") {
         let (market, side) = split_prediction_market_side(rest)?;
         return Some(PredictionMarketRequest {
             provider: PredictionMarketProvider::Kalshi,
-            market: market.to_string(),
+            market: market.to_ascii_uppercase(),
             side,
         });
     }
 
-    if let Some(rest) = trimmed.strip_prefix("POLYMARKET:") {
+    if let Some(rest) = strip_prefix_ignore_case(trimmed, "POLYMARKET:") {
         // POLYMARKET:EVENT:<id|slug>[:NO] expands to every leg of the event.
-        if let Some(event) = rest
-            .strip_prefix("EVENT:")
-            .or_else(|| rest.strip_prefix("event:"))
-        {
+        if let Some(event) = strip_prefix_ignore_case(rest, "EVENT:") {
             let (key, side) = split_prediction_market_side(event)?;
             return Some(PredictionMarketRequest {
                 provider: PredictionMarketProvider::Polymarket,
@@ -2005,12 +2074,10 @@ fn parse_prediction_market_ticker(raw: &str) -> Option<PredictionMarketRequest> 
 
     if let Some((market, side)) = trimmed.rsplit_once(':') {
         let side = parse_prediction_market_side(side)?;
-        if (market.starts_with("KX") && market.contains('-'))
-            || looks_like_bare_kalshi_market(market)
-        {
+        if let Some(kalshi) = as_kalshi_market_name(market) {
             return Some(PredictionMarketRequest {
                 provider: PredictionMarketProvider::Kalshi,
-                market: market.to_string(),
+                market: kalshi,
                 side,
             });
         }
@@ -2023,10 +2090,10 @@ fn parse_prediction_market_ticker(raw: &str) -> Option<PredictionMarketRequest> 
         }
     }
 
-    if (trimmed.starts_with("KX") && trimmed.contains('-')) || looks_like_bare_kalshi_market(trimmed) {
+    if let Some(kalshi) = as_kalshi_market_name(trimmed) {
         return Some(PredictionMarketRequest {
             provider: PredictionMarketProvider::Kalshi,
-            market: trimmed.to_string(),
+            market: kalshi,
             side: PredictionMarketSide::Yes,
         });
     }
@@ -2040,6 +2107,17 @@ fn parse_prediction_market_ticker(raw: &str) -> Option<PredictionMarketRequest> 
     }
 
     None
+}
+
+/// The upper-case form of `raw` when it reads as a Kalshi ticker without a
+/// venue prefix: KX and a dash, or the bare-market shape below. The rule is
+/// applied to the upper-cased text, so `kxfed-26dec-t3.50` is the same
+/// request as `KXFED-26DEC-T3.50`. One-dash symbols stay Yahoo's in any
+/// case (Btc-Usd, brk-b).
+fn as_kalshi_market_name(raw: &str) -> Option<String> {
+    let upper = raw.to_ascii_uppercase();
+    ((upper.starts_with("KX") && upper.contains('-')) || looks_like_bare_kalshi_market(&upper))
+        .then_some(upper)
 }
 
 /// A Kalshi MARKET ticker without the KX prefix (CONTROLS-2026-D,
