@@ -1,84 +1,93 @@
-/// Pyth Benchmarks TradingView shim — 24/7 OHLC candles for crypto, commodities, FX, metals.
-/// Endpoint: GET https://benchmarks.pyth.network/v1/shims/tradingview/history
-/// Free, no auth, no rate limit (public Pyth Data Association instance).
+/// PYTH: tickers, served without Pyth.
+///
+/// Pyth ended keyless access on 2026-08-26: its Benchmarks history endpoint
+/// answers 404, Hermes answers 401, and a key comes with a paid plan. So
+/// nothing here calls a Pyth host and there is no key setting.
+///
+/// A PYTH: name that Kraken Futures has a market for is served from that
+/// market's index (see kraken_futures.rs). The series keeps the ticker that
+/// was asked for, says where it came from (`source` "kraken_futures",
+/// `upstream_id` "spot/PF_XBTUSD") and always carries a data_quality notice
+/// about the change. For gold, silver, WTI and Brent, Kraken lists that
+/// index as a "24/7 Pyth Index", so those are still Pyth's numbers.
+///
+/// A name with no Kraken market (USD/JPY, the dollar index, any other Pyth
+/// feed symbol) fails with an error that names what to use instead.
 
-/// Map a Pyth symbol query (user-friendly name) to the canonical Pyth feed symbol.
-/// Returns None if the query doesn't map to a known Pyth feed.
-pub(crate) fn resolve_pyth_symbol(query: &str) -> Option<&'static str> {
-    let q = query.trim().to_ascii_lowercase();
-    match q.as_str() {
-        // Commodities
-        "oil" | "wti" | "crude" | "crude oil" | "cl" | "usoilspot" => {
-            Some("Commodities.USOILSPOT")
-        }
-        "brent" | "brent oil" | "bz" | "ukoilspot" => Some("Commodities.UKOILSPOT"),
+const PYTH_ENDED: &str = "Pyth ended keyless access on 2026-08-26";
 
-        // Metals
-        "gold" | "xau" | "gc" => Some("Metal.XAU/USD"),
-        "silver" | "xag" | "si" => Some("Metal.XAG/USD"),
-
-        // Crypto
-        "btc" | "bitcoin" => Some("Crypto.BTC/USD"),
-        "eth" | "ethereum" | "ether" => Some("Crypto.ETH/USD"),
-        "sol" | "solana" => Some("Crypto.SOL/USD"),
-
-        // FX
-        "eurusd" | "eur/usd" => Some("FX.EUR/USD"),
-        "usdjpy" | "usd/jpy" => Some("FX.USD/JPY"),
-        "dxy" | "usdxy" | "dollar" => Some("FX.USDXY"),
-
-        // If it already looks like a Pyth symbol (contains a dot), pass through
-        _ if q.contains('.') || q.contains('/') => None, // caller should use as-is
-        _ => None,
-    }
+enum PythRoute {
+    /// Served from the Kraken Futures index of `symbol`. `kf` is the ticker
+    /// that asks for the same series directly; `listed_as` is how Kraken
+    /// describes the index when it is one of Pyth's.
+    Kraken {
+        symbol: &'static str,
+        kf: &'static str,
+        listed_as: Option<&'static str>,
+    },
+    /// Not served. The text names what to use instead.
+    Unavailable(String),
 }
 
-/// Check if a ticker string should be routed to Pyth.
-/// Tickers with "PYTH:" prefix are always Pyth. Also matches known commodity/crypto names
-/// that Pyth covers 24/7 but Yahoo doesn't (or Yahoo has gaps on weekends).
+/// Check if a ticker string should be routed here: the "PYTH:" prefix in
+/// any case.
 pub fn is_pyth_ticker(ticker: &str) -> bool {
-    ticker.trim().starts_with("PYTH:")
+    ticker
+        .trim()
+        .get(..5)
+        .is_some_and(|p| p.eq_ignore_ascii_case("PYTH:"))
 }
 
-/// Strip the "PYTH:" prefix and resolve to a Pyth symbol.
-pub(crate) fn parse_pyth_ticker(ticker: &str) -> String {
-    let raw = ticker.trim().strip_prefix("PYTH:").unwrap_or(ticker).trim();
-    // Try canonical mapping first, fall back to raw (user may pass "Commodities.USOILSPOT" directly)
-    resolve_pyth_symbol(raw)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| raw.to_string())
-}
-
-/// Map our Span granularity to a Pyth TradingView resolution string.
-/// Supported: 1, 2, 5, 15, 30, 60, 120, 240, 360, 720, D, W, M
-fn pyth_resolution(granularity: Span) -> &'static str {
-    let secs = granularity.approx_duration().num_seconds();
-    if secs <= 60 {
-        "1" // 1 minute
-    } else if secs <= 120 {
-        "2"
-    } else if secs <= 300 {
-        "5"
-    } else if secs <= 900 {
-        "15"
-    } else if secs <= 1800 {
-        "30"
-    } else if secs <= 3600 {
-        "60" // 1 hour
-    } else if secs <= 7200 {
-        "120"
-    } else if secs <= 14400 {
-        "240"
-    } else if secs <= 21600 {
-        "360"
-    } else if secs <= 43200 {
-        "720"
-    } else if secs <= 86400 {
-        "D" // daily
-    } else if secs <= 604800 {
-        "W" // weekly
-    } else {
-        "M" // monthly
+/// Where a PYTH: ticker goes now. The prefix is optional so that
+/// `--provider pyth --tickers BTC` works. The names are the aliases this
+/// tool has always accepted, plus the Pyth feed symbols they stood for.
+fn pyth_route(ticker: &str) -> PythRoute {
+    let t = ticker.trim();
+    let raw = if is_pyth_ticker(t) { t[5..].trim() } else { t };
+    let kraken = |symbol, kf, listed_as| PythRoute::Kraken { symbol, kf, listed_as };
+    match raw.to_ascii_lowercase().as_str() {
+        "oil" | "wti" | "crude" | "crude oil" | "cl" | "usoilspot" | "commodities.usoilspot" => {
+            kraken("PF_WTIOILUSD", "KF:OIL", Some("WTI Crude Oil 24/7 Pyth Index"))
+        }
+        "brent" | "brent oil" | "bz" | "ukoilspot" | "commodities.ukoilspot" => {
+            kraken("PF_BRENTOILUSD", "KF:BRENT", Some("Brent Crude Oil 24/7 Pyth Index"))
+        }
+        "gold" | "xau" | "gc" | "metal.xau/usd" => {
+            kraken("PF_XAUUSD", "KF:GOLD", Some("Gold 24/7 Pyth Index"))
+        }
+        "silver" | "xag" | "si" | "metal.xag/usd" => {
+            kraken("PF_XAGUSD", "KF:SILVER", Some("Silver 24/7 Pyth Index"))
+        }
+        "btc" | "bitcoin" | "crypto.btc/usd" => kraken("PF_XBTUSD", "KF:BTC", None),
+        "eth" | "ethereum" | "ether" | "crypto.eth/usd" => kraken("PF_ETHUSD", "KF:ETH", None),
+        "sol" | "solana" | "crypto.sol/usd" => kraken("PF_SOLUSD", "KF:SOL", None),
+        "eurusd" | "eur/usd" | "fx.eur/usd" => kraken("PF_EURUSD", "KF:EUR", None),
+        "usdjpy" | "usd/jpy" | "fx.usd/jpy" => PythRoute::Unavailable(format!(
+            "{PYTH_ENDED}, and Kraken Futures lists no USD/JPY market. Use HL:xyz:JPY (a 24/7 perp) or USDJPY=X."
+        )),
+        "dxy" | "usdxy" | "dollar" | "fx.usdxy" => PythRoute::Unavailable(format!(
+            "{PYTH_ENDED}, and no keyless 24/7 source carries the dollar index. Use DX-Y.NYB."
+        )),
+        "" => PythRoute::Unavailable(format!(
+            "a PYTH: ticker needs a name, and {PYTH_ENDED}. Use a KF: ticker (Kraken Futures index, KF:BTC) or an HL: ticker (Hyperliquid perp, HL:xyz:GOLD)."
+        )),
+        _ => {
+            // "Equity.US.AAPL/USD" -> AAPL, "Crypto.DOGE/USD" -> DOGE, "XRP" -> XRP.
+            let name = raw.rsplit('.').next().unwrap_or(raw);
+            let base = name.split('/').next().unwrap_or(name).trim().to_ascii_uppercase();
+            let usable = !base.is_empty()
+                && base.len() <= 20
+                && base.chars().all(|c| c.is_ascii_alphanumeric());
+            PythRoute::Unavailable(if usable {
+                format!(
+                    "{PYTH_ENDED}, and '{raw}' has no mapped replacement. Try KF:{base} (Kraken Futures index) or a Hyperliquid perp: HL:{base} for crypto, HL:xyz:{base} for US stocks, metals, oil and FX."
+                )
+            } else {
+                format!(
+                    "{PYTH_ENDED}, and '{raw}' has no mapped replacement. Use a KF: ticker (Kraken Futures index, KF:BTC) or an HL: ticker (Hyperliquid perp, HL:xyz:GOLD)."
+                )
+            })
+        }
     }
 }
 
@@ -88,188 +97,53 @@ pub(crate) async fn fetch_pyth_series(
     end: DateTime<Utc>,
     granularity: Span,
 ) -> Result<(Vec<TickerSeries>, Vec<TimeseriesError>)> {
-    let resolution = pyth_resolution(granularity);
-
-    let client = &*crate::finance::shared_client::GENERAL;
-
-    let from_ts = start.timestamp();
-    let to_ts = end.timestamp();
-
     let mut out = Vec::with_capacity(tickers.len());
     let mut errors = Vec::new();
+    let mut refused = false;
 
     for ticker in tickers {
-        let pyth_symbol = parse_pyth_ticker(ticker);
-
-        // PYTH:OIL is a multi-source aggregate, not CME WTI. It typically
-        // tracks ~$3 below the CME WTI front-month due to basket composition.
-        // Attach a non-fatal warning so callers don't silently substitute it
-        // for WTI in commentary or charts.
-        if ticker.trim().eq_ignore_ascii_case("PYTH:OIL") {
-            errors.push(TimeseriesError {
-                ticker: ticker.clone(),
-                stage: Some("data_quality".to_string()),
-                message: "PYTH:OIL is a multi-source aggregate, not CME WTI \
-                    \u{2014} typically ~$3 below CL=F due to basket composition. \
-                    Use CL=F for WTI front month."
-                    .to_string(),
-            });
-        }
-
-        let url = format!(
-            "https://benchmarks.pyth.network/v1/shims/tradingview/history?symbol={}&resolution={}&from={}&to={}",
-            urlencoding::encode(&pyth_symbol),
-            resolution,
-            from_ts,
-            to_ts,
-        );
-
-        let start_time = std::time::Instant::now();
-        // Pyth 429s under parallel-worker load; one short backoff retry
-        // recovers most of them without meaningfully slowing the happy path.
-        let mut resp = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                errors.push(TimeseriesError {
-                    ticker: ticker.clone(),
-                    stage: Some("fetch".to_string()),
-                    message: format!("pyth fetch failed: {e}"),
-                });
+        let (symbol, kf, listed_as) = match pyth_route(ticker) {
+            PythRoute::Kraken { symbol, kf, listed_as } => (symbol, kf, listed_as),
+            PythRoute::Unavailable(message) => {
+                errors.push(kf_issue(ticker, "input", message));
                 continue;
             }
         };
-        if resp.status().as_u16() == 429 {
-            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            match client.get(&url).send().await {
-                Ok(r) => resp = r,
-                Err(e) => {
-                    errors.push(TimeseriesError {
-                        ticker: ticker.clone(),
-                        stage: Some("fetch".to_string()),
-                        message: format!("pyth fetch failed after 429 retry: {e}"),
-                    });
-                    continue;
+        if refused {
+            errors.push(kf_issue(ticker, "fetch", KF_SKIPPED.to_string()));
+            continue;
+        }
+        let target = KfTarget {
+            symbol: symbol.to_string(),
+            tick: KfTick::Index,
+        };
+        match kf_fetch_target(&target, start, end, granularity).await {
+            Ok(series) => {
+                // Never a silent swap: the series says what it is.
+                let what = match listed_as {
+                    Some(name) => format!(", which Kraken lists as \"{name}\""),
+                    None => String::new(),
+                };
+                errors.push(kf_issue(
+                    ticker,
+                    "data_quality",
+                    format!("{PYTH_ENDED}; this is the Kraken Futures index ({kf}){what}."),
+                ));
+                for message in series.notices {
+                    errors.push(kf_issue(ticker, "data_quality", message));
                 }
-            }
-        }
-
-        let status = resp.status();
-        let body = match resp.text().await {
-            Ok(b) => b,
-            Err(e) => {
-                errors.push(TimeseriesError {
+                out.push(TickerSeries {
                     ticker: ticker.clone(),
-                    stage: Some("read".to_string()),
-                    message: format!("pyth body read failed: {e}"),
+                    candles: series.candles,
+                    source: Some("kraken_futures".to_string()),
+                    upstream_id: Some(target.upstream_id()),
                 });
-                continue;
             }
-        };
-
-        info!(
-            target: "eli.finance.timeseries.pyth",
-            url = %url,
-            status = %status,
-            bytes = body.len(),
-            elapsed_ms = start_time.elapsed().as_millis(),
-            "pyth history fetch"
-        );
-
-        if !status.is_success() {
-            errors.push(TimeseriesError {
-                ticker: ticker.clone(),
-                stage: Some("fetch".to_string()),
-                message: format!("pyth http {}: {}", status, body.chars().take(200).collect::<String>()),
-            });
-            continue;
-        }
-
-        // Parse the TradingView-style response: { s, t[], o[], h[], l[], c[], v[] }
-        #[derive(Deserialize)]
-        struct TvHistory {
-            s: String,
-            #[serde(default)]
-            t: Vec<i64>,
-            #[serde(default)]
-            o: Vec<f64>,
-            #[serde(default)]
-            h: Vec<f64>,
-            #[serde(default)]
-            l: Vec<f64>,
-            #[serde(default)]
-            c: Vec<f64>,
-            #[serde(default)]
-            v: Vec<f64>,
-            #[serde(default)]
-            errmsg: Option<String>,
-        }
-
-        let tv: TvHistory = match serde_json::from_str(&body) {
-            Ok(parsed) => parsed,
             Err(e) => {
-                let debug_path = write_debug_payload("pyth_history", &url, &body);
-                errors.push(TimeseriesError {
-                    ticker: ticker.clone(),
-                    stage: Some("parse".to_string()),
-                    message: format!("pyth parse failed: {e}"),
-                });
-                continue;
+                refused = refused || e.refused;
+                errors.push(kf_issue(ticker, "fetch", e.message));
             }
-        };
-
-        if tv.s == "error" {
-            errors.push(TimeseriesError {
-                ticker: ticker.clone(),
-                stage: Some("api".to_string()),
-                message: format!(
-                    "pyth API error: {}",
-                    tv.errmsg.unwrap_or_else(|| "unknown".to_string())
-                ),
-            });
-            continue;
         }
-
-        if tv.t.is_empty() {
-            errors.push(TimeseriesError {
-                ticker: ticker.clone(),
-                stage: Some("fetch".to_string()),
-                message: "pyth returned 0 candles for this symbol/range".to_string(),
-            });
-            continue;
-        }
-
-        let n = tv.t.len();
-        let mut candles = Vec::with_capacity(n);
-        for i in 0..n {
-            let Some(t) = Utc.timestamp_opt(tv.t[i], 0).single() else {
-                continue;
-            };
-            candles.push(Candle {
-                t,
-                o: *tv.o.get(i).unwrap_or(&0.0),
-                h: *tv.h.get(i).unwrap_or(&0.0),
-                l: *tv.l.get(i).unwrap_or(&0.0),
-                c: *tv.c.get(i).unwrap_or(&0.0),
-                v: tv.v.get(i).copied().filter(|&v| v > 0.0),
-                kind: None,
-            });
-        }
-
-        candles.sort_by_key(|c| c.t);
-
-        // Use the original ticker (with PYTH: prefix) as the series label
-        // so downstream analytics can distinguish it
-        let upstream = ticker
-            .strip_prefix("PYTH:")
-            .or_else(|| ticker.strip_prefix("pyth:"))
-            .unwrap_or(ticker)
-            .to_string();
-        out.push(TickerSeries {
-            ticker: ticker.clone(),
-            candles,
-            source: Some("pyth".to_string()),
-            upstream_id: Some(upstream),
-        });
     }
 
     Ok((out, errors))
