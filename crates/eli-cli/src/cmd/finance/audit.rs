@@ -421,6 +421,22 @@ fn verify_chain(raw: &str) -> serde_json::Value {
     serde_json::json!({"intact": true, "records_verified": records})
 }
 
+/// True for a record of `finance ibkr` or `finance paper`: the commands that read a
+/// brokerage account or hold the user's own positions. MCP does not offer them, so
+/// the MCP view of the trail (`--mcp-view`) leaves their records and payloads out.
+fn is_account_record(v: &serde_json::Value) -> bool {
+    let Some(argv) = v.get("argv").and_then(|a| a.as_array()) else {
+        return false;
+    };
+    let mut words = argv.iter().filter_map(|w| w.as_str());
+    while let Some(word) = words.next() {
+        if word == "finance" {
+            return matches!(words.next(), Some("ibkr") | Some("paper"));
+        }
+    }
+    false
+}
+
 fn cmd_finance_log(args: FinanceLogArgs) -> Result<()> {
     let path = audit_log_path()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve platform data dir for activity trail"))?;
@@ -550,6 +566,12 @@ fn cmd_finance_log(args: FinanceLogArgs) -> Result<()> {
             }
             in_window(line)
         })
+        .filter(|line| {
+            !args.mcp_view
+                || !serde_json::from_str::<serde_json::Value>(line)
+                    .map(|v| is_account_record(&v))
+                    .unwrap_or(false)
+        })
         .collect();
 
     // Examiner bundle: record slice + referenced payloads + manifest with
@@ -667,6 +689,9 @@ fn cmd_finance_log(args: FinanceLogArgs) -> Result<()> {
                 continue;
             };
             if v.get("seq").and_then(|s| s.as_u64()) == Some(seq) {
+                if args.mcp_view && is_account_record(&v) {
+                    anyhow::bail!("record seq {seq} is an account command; read it with `market-search finance log --show-payload {seq}` in a terminal");
+                }
                 let Some(rel) = v.pointer("/payload/path").and_then(|p| p.as_str()) else {
                     anyhow::bail!("record seq {seq} has no archived payload");
                 };

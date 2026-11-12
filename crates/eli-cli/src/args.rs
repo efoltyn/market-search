@@ -399,6 +399,11 @@ struct FinanceLogArgs {
     /// Print the log file path and exit.
     #[arg(long = "where", default_value_t = false)]
     r#where: bool,
+
+    /// Set by the MCP server: leave out records of the account commands
+    /// (`finance ibkr`, `finance paper`), which MCP does not offer.
+    #[arg(long, hide = true, default_value_t = false)]
+    mcp_view: bool,
 }
 
 #[derive(Subcommand, Debug)]

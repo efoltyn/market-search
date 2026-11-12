@@ -2151,7 +2151,8 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             Ok(vec![s("finance"), s("short"), s("--ticker"), s(ticker)])
         }
         "finance_log" => {
-            let mut v = vec![s("finance"), s("log")];
+            // --mcp-view: records of the account commands stay out of reach.
+            let mut v = vec![s("finance"), s("log"), s("--mcp-view")];
             if let Some(tail) = args.get("tail").and_then(|n| n.as_u64()) {
                 v.extend([s("--tail"), tail.to_string()]);
             }

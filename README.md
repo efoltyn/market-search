@@ -240,6 +240,8 @@ Nothing is sent unless an agent calls the tool or you run the command. A note ca
 
 Runs on your own machine and IP, making the same requests your browser would, at human rates. That is why it is a local binary and not a hosted service.
 
+The MCP server only reads data. It runs the tools in its list and refuses any other name, and none of them places an order or moves money. `IBKR:` tickers and the `ibkr` options provider read prices through an Interactive Brokers gateway (TWS or IB Gateway) if you run one on the same machine. One command-line feature is outside MCP: `market-search finance ibkr` talks to that gateway and can read the account and place or cancel orders. `finance_log` does not show records of that command.
+
 Market Search fetches data for you; it does not license or redistribute it. Government and central-bank data (SEC, Treasury, NY Fed, OFR, CFTC, EIA, ECB, BIS, BOJ, BOE) is public. Other sources (Yahoo Finance, Kalshi, Polymarket, FRED, CBOE, Binance, Kraken and others) publish terms that limit use to personal, non-commercial purposes; you are responsible for using their data within those terms. Market Search is not affiliated with any of them, and nothing it returns is investment advice. It collects nothing about you; the only thing that reaches the developer is feedback you or your agent choose to send. See [PRIVACY.md](PRIVACY.md).
 
 [eliterminal.com](https://eliterminal.com) · Licensed under [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html).
