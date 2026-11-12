@@ -26,3 +26,4 @@
 # Internal/experimental — not part of public release
 /scripts/
 instincts/
+.netlify/

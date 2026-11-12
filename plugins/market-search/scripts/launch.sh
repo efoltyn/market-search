@@ -9,7 +9,7 @@
 # straight to the public sources (Kalshi, Polymarket, SEC, FRED, ...).
 set -eu
 
-VERSION="v0.6.1"
+VERSION="v0.6.2"
 REPO="efoltyn/market-search"
 
 for c in "${MARKET_SEARCH_BIN:-}" "$(command -v market-search 2>/dev/null || true)" "$HOME/.local/bin/market-search" "$HOME/.cargo/bin/market-search"; do
@@ -17,9 +17,9 @@ for c in "${MARKET_SEARCH_BIN:-}" "$(command -v market-search 2>/dev/null || tru
 done
 
 case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64)          T=aarch64-apple-darwin;      SUM=01bf2d4a3345de66192715655da8cda65d7103d99cba366bacd897e8cd8cf6ad ;;
-  Darwin-x86_64)         T=x86_64-apple-darwin;       SUM=c5ef1d719ad26eaac25d8c548eb0b546d870e1c5f44e7242a153f7243f82289d ;;
-  Linux-x86_64|Linux-amd64) T=x86_64-unknown-linux-gnu; SUM=fb4d89fc4fe6cf1d2534e7613e1b4550317fdf8501017b1995e83e3409caca2f ;;
+  Darwin-arm64)          T=aarch64-apple-darwin;      SUM=7673d2ebcbacff4ddcb18929c158e07c40df6d3a5162edebf3b90929f88972ac ;;
+  Darwin-x86_64)         T=x86_64-apple-darwin;       SUM=2fc3ccfee988a844d15d5d93fccfab038d75ac2ae5703c81272a30880dbd1a77 ;;
+  Linux-x86_64|Linux-amd64) T=x86_64-unknown-linux-gnu; SUM=353fbd51d88abb55f3843e90c9cfb3bd598be786548eff65ff75cef1ed450833 ;;
   *) echo "market-search: no prebuilt binary for $(uname -s)-$(uname -m). Install with: cargo install market-search" >&2; exit 1 ;;
 esac
 
