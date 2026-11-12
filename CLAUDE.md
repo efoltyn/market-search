@@ -1,9 +1,11 @@
 # Market Search — Onboarding Recipe for Coding Agents
 
-You (Claude Code, Codex, or any other coding agent) are reading this
-because someone just asked you to set up Market Search. Walk the user
-through the steps below in order. Pause where this file says PAUSE —
-those are the spots that need a human action you can't do yourself.
+This file is for a coding agent (Claude Code, Codex, or any other) whose
+user asks it to set up Market Search. When they do, walk them through
+the steps below in order. Pause where this file says PAUSE — those are
+the spots that need a human action you can't do yourself. For any other
+work in this repository, the steps are reference, and the last two
+sections (reporting problems, what not to do) still apply.
 
 Tell the user up front: "There are two parts. Local tools for me (this
 Claude Code / Codex session) — that's a binary install plus one setup
@@ -15,13 +17,12 @@ Linux computer that stays on, and it keeps the link up across reboots."
 
 ## Step 1 — Verify prerequisites
 
-Only one thing is required: git. The prebuilt binary needs no Rust
-toolchain — `cargo` matters only if the user wants to compile from
-source (Step 2, option b).
+The prebuilt binary needs nothing installed first. `git` and `cargo`
+matter only if the user wants to compile from source (Step 2, option b).
 
 | Check | Command | Fix if missing |
 |---|---|---|
-| git (required) | `which git` | macOS: `xcode-select --install`<br/>Linux: `apt install git` or distro equivalent |
+| git (optional — source build only) | `which git` | macOS: `xcode-select --install`<br/>Linux: `apt install git` or distro equivalent |
 | cargo (optional — source build only) | `which cargo` | Skip unless they want to compile. macOS/Linux: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh`<br/>Windows: https://rustup.rs |
 
 Don't stop the setup if `cargo` is missing — just take the prebuilt path below.
