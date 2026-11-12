@@ -743,13 +743,26 @@ fn write_json_out_with_meta<T: Serialize>(
     args: &[String],
 ) -> Result<MetaWriteResult> {
     let value = serde_json::to_value(payload).context("serialize response to value")?;
-    let out_path = resolve_programmatic_out_path(out_path, tool_name, &value, args);
+    let json = serde_json::to_string_pretty(payload).context("serialize response")?;
+    write_json_text_with_meta(out_path, &value, &json, tool_name, args)
+}
+
+/// The same write for a caller that already holds the document both as a
+/// value and as text: `json` is written as it is, `value` names an auto
+/// path and feeds the sidecar.
+fn write_json_text_with_meta(
+    out_path: PathBuf,
+    value: &serde_json::Value,
+    json: &str,
+    tool_name: &str,
+    args: &[String],
+) -> Result<MetaWriteResult> {
+    let out_path = resolve_programmatic_out_path(out_path, tool_name, value, args);
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
 
-    let json = serde_json::to_string_pretty(payload).context("serialize response")?;
-    std::fs::write(&out_path, &json).context("write --out")?;
+    std::fs::write(&out_path, json).context("write --out")?;
 
     let abs = resolve_abs_path(&out_path);
     let ctx = eli_core::meta::MetaContext {
@@ -763,7 +776,7 @@ fn write_json_out_with_meta<T: Serialize>(
             origin_query: None,
         }),
     };
-    let meta = eli_core::meta::build_json_meta(&value, ctx);
+    let meta = eli_core::meta::build_json_meta(value, ctx);
     let meta_path =
         eli_core::meta::write_sidecar(&meta, &out_path).context("write sidecar meta")?;
     Ok(MetaWriteResult {

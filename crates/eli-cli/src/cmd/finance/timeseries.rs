@@ -59,18 +59,205 @@ fn collapse_point_candles(value: &mut serde_json::Value) {
     }
 }
 
-/// Final output shaping shared by every timeseries stdout path:
+/// Stages that describe a series that was served, not a failure. They go to
+/// `notices` and never count against `status` or the failed-ticker count.
+fn is_timeseries_notice_stage(stage: Option<&str>) -> bool {
+    matches!(
+        stage,
+        Some("granularity_downgrade")
+            | Some("data_quality")
+            | Some("ibkr_fallback")
+            | Some("event_legs")
+            | Some("kalshi_event_legs")
+    )
+}
+
+/// The tickers one call asked for, spelled as the caller wrote them, in
+/// order and without repeats: preset tickers, explicit tickers, prediction
+/// markets.
+fn requested_timeseries_tickers(
+    preset: &[String],
+    explicit: &[String],
+    markets: &[PredictionMarketRequest],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let all = preset
+        .iter()
+        .chain(explicit.iter())
+        .map(|t| t.as_str())
+        .chain(markets.iter().map(|m| m.market.as_str()));
+    for t in all {
+        let t = t.trim();
+        if !t.is_empty() && !out.iter().any(|x| x == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+/// Give returned tickers back the spelling the caller used. The core
+/// upper-cases a ticker before it fetches, so `aapl` or `KF:btc` came back
+/// as `AAPL` and `KF:BTC`, and a caller matching on its own input found
+/// nothing. Only case is undone: `vix` still comes back as `^VIX`, and a
+/// bare Polymarket id as `POLYMARKET:<id>:YES`.
+fn restore_requested_spelling(
+    resp: &mut eli_core::finance::TimeseriesResponse,
+    requested: &[String],
+) {
+    let fix = |t: &mut String| {
+        if requested.iter().any(|r| r == t) {
+            return;
+        }
+        if let Some(r) = requested.iter().find(|r| r.eq_ignore_ascii_case(t)) {
+            *t = r.clone();
+        }
+    };
+    for s in &mut resp.series {
+        fix(&mut s.ticker);
+    }
+    for e in resp.errors.iter_mut().flatten() {
+        fix(&mut e.ticker);
+    }
+    for t in &mut resp.tickers {
+        fix(t);
+    }
+    for t in resp.valid_tickers.iter_mut().flatten() {
+        fix(t);
+    }
+}
+
+/// Every requested ticker must come back as a series or as an error. One
+/// that fell through both (a bucket that returned its siblings and skipped
+/// it) gets a `silent_drop` error, so the caller is told. Case is ignored:
+/// the returned spelling can differ from the requested one.
+fn append_silent_drops(
+    resp: &mut eli_core::finance::TimeseriesResponse,
+    requested: &[String],
+    granularity: eli_core::finance::Span,
+) {
+    // A returned ticker often differs from the input (906975 comes back as
+    // POLYMARKET:906975:YES, IBKR:FUT:CL:NYMEX as FUT:CL:NYMEX, vix as ^VIX),
+    // so a requested ticker is accounted for when it equals a returned one,
+    // is part of one, or contains one.
+    let returned: Vec<String> = resp
+        .series
+        .iter()
+        .map(|s| s.ticker.as_str())
+        .chain(resp.errors.iter().flatten().map(|e| e.ticker.as_str()))
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let dropped: Vec<String> = requested
+        .iter()
+        .filter(|req| {
+            let r = req.to_ascii_lowercase();
+            !returned
+                .iter()
+                .any(|t| *t == r || t.contains(r.as_str()) || r.contains(t.as_str()))
+        })
+        .cloned()
+        .collect();
+    if dropped.is_empty() {
+        return;
+    }
+    // Give the caller a reason it can act on.
+    let window_days = (resp.end - resp.start).num_days();
+    let intraday = granularity.approx_duration().num_seconds() < 86_400;
+    let drop_errors = dropped.into_iter().map(|t| {
+        let looks_like_pm_slug = t == t.to_ascii_lowercase()
+            && t.contains('-')
+            && !t.contains('=')
+            && t.chars().any(|c| c.is_ascii_alphabetic());
+        let message = if looks_like_pm_slug {
+            "looks like a Polymarket slug — slugs don't join here; use the numeric market id from finance_odds markets[].ticker".to_string()
+        } else if intraday && window_days <= 3 {
+            "no data in window — a short intraday range can fall entirely on a weekend/holiday; widen --range (e.g. 5d) or use --granularity 1d".to_string()
+        } else {
+            "no provider returned data for this ticker in the requested window".to_string()
+        };
+        eli_core::finance::TimeseriesError {
+            ticker: t,
+            stage: Some("silent_drop".to_string()),
+            message,
+        }
+    });
+    resp.errors.get_or_insert_with(Vec::new).extend(drop_errors);
+}
+
+/// How many of the requested tickers failed: (failed, out of). A ticker
+/// failed when a real (non-notice) error names it, however many errors do.
+/// An error label that matches no requested ticker counts once on both
+/// sides, so the first number can never pass the second.
+fn count_failed_tickers(
+    real_errors: &[eli_core::finance::TimeseriesError],
+    requested: &[String],
+) -> (usize, usize) {
+    let mut keys: Vec<String> = Vec::new();
+    for r in requested {
+        let k = r.trim().to_ascii_lowercase();
+        if !k.is_empty() && !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    let mut failed: HashSet<usize> = HashSet::new();
+    let mut stray: HashSet<String> = HashSet::new();
+    for e in real_errors {
+        // A whole-bucket failure can name several tickers in one entry.
+        for label in e.ticker.split(',') {
+            let label = label.trim().to_ascii_lowercase();
+            let hit = keys.iter().position(|k| *k == label).or_else(|| {
+                // KALSHI:KXFED-26DEC-T3.50:YES for a request of
+                // KXFED-26DEC-T3.50, ^VIX for vix: take the longest
+                // requested ticker the label contains or is part of.
+                if label.is_empty() {
+                    return None;
+                }
+                keys.iter()
+                    .enumerate()
+                    .filter(|(_, k)| label.contains(k.as_str()) || k.contains(label.as_str()))
+                    .max_by_key(|(_, k)| k.len())
+                    .map(|(i, _)| i)
+            });
+            match hit {
+                Some(i) => {
+                    failed.insert(i);
+                }
+                None => {
+                    stray.insert(label);
+                }
+            }
+        }
+    }
+    (failed.len() + stray.len(), keys.len() + stray.len())
+}
+
+/// A timeseries response in the shape every output shares.
+struct ShapedTimeseries {
+    value: serde_json::Value,
+    /// None when every ticker returned, else "partial" or "error".
+    status: Option<String>,
+    sources: Vec<String>,
+    series: usize,
+    errors: usize,
+    notices: usize,
+    /// The error object's message, when the document carries one.
+    error_message: Option<String>,
+}
+
+/// Final shaping shared by stdout and `--out`:
 /// - `sources` = distinct series[].source — the truth on mixed calls (the
-///   top-level `provider` reflects only the dispatch-time main bucket);
+///   top-level `provider` reflects only the dispatch-time main bucket, so it
+///   is dropped unless it names the single source);
+/// - informational entries move from `errors` to `notices`;
 /// - `status` recomputed as a real aggregate: absent = every ticker
-///   returned, "partial" = some failed, "error" = nothing returned (the old
-///   logic flipped to "error" when any single provider bucket struck out,
-///   even at 9/10 tickers succeeding);
-/// - point-candle collapse + all-zero volume drop;
-/// - floats rounded to 7 significant digits (kills f32 feed noise like
-///   747.4000244140625);
-/// - pretty JSON only at a terminal; compact for pipes/agents.
-fn emit_timeseries_stdout(resp: &eli_core::finance::TimeseriesResponse) -> Result<()> {
+///   returned, "partial" = some failed, "error" = nothing returned;
+/// - the `error` object is absent when nothing failed; a partial result
+///   carries one that counts the tickers that failed out of the tickers
+///   requested.
+fn shape_timeseries_response(
+    resp: &eli_core::finance::TimeseriesResponse,
+    requested: &[String],
+) -> Result<ShapedTimeseries> {
     let mut resp = resp.clone();
     let mut distinct: Vec<String> = Vec::new();
     for s in &resp.series {
@@ -89,14 +276,7 @@ fn emit_timeseries_stdout(resp: &eli_core::finance::TimeseriesResponse) -> Resul
     if let Some(errs) = resp.errors.take() {
         let mut real = Vec::new();
         for e in errs {
-            let informational = matches!(
-                e.stage.as_deref(),
-                Some("granularity_downgrade")
-                    | Some("data_quality")
-                    | Some("ibkr_fallback")
-                    | Some("event_legs")
-            );
-            if informational {
+            if is_timeseries_notice_stage(e.stage.as_deref()) {
                 notices.push(e);
             } else {
                 real.push(e);
@@ -107,12 +287,41 @@ fn emit_timeseries_stdout(resp: &eli_core::finance::TimeseriesResponse) -> Resul
         }
     }
     let err_count = resp.errors.as_ref().map_or(0, |e| e.len());
-    if err_count == 0 && !resp.series.is_empty() {
+    if resp.series.is_empty() {
+        // Nothing returned: the error object that came with it stands. When
+        // none did (each bucket failed by itself), the document still gets
+        // one, so "error" status always comes with a message.
+        if err_count > 0 && resp.error.is_none() {
+            resp.error = Some(eli_core::finance::ToolErrorInfo {
+                error: "TickerFetchFailed".to_string(),
+                message: "All tickers failed to fetch timeseries data.".to_string(),
+                hint: Some("errors[] gives the reason for each ticker.".to_string()),
+                debug: None,
+            });
+        }
+    } else if err_count == 0 {
         // The core counts every entry as a failed ticker, so a response whose
         // only entries were notices arrives with "1 of 1 tickers failed; 1
         // series returned". Nothing failed: drop the error object with them.
         resp.error = None;
         resp.valid_tickers = None;
+    } else {
+        // Some returned, some failed. The core writes its count for one
+        // provider bucket, with notices counted as failures and the caller's
+        // other buckets unknown to it; the merge paths drop that object. So
+        // count here, over the whole call, and always say it.
+        let (failed, out_of) =
+            count_failed_tickers(resp.errors.as_deref().unwrap_or(&[]), requested);
+        resp.error = Some(eli_core::finance::ToolErrorInfo {
+            error: "PartialTickerFetchFailed".to_string(),
+            message: format!(
+                "{failed} of {out_of} tickers failed; {} series returned.",
+                resp.series.len()
+            ),
+            hint: Some("errors[] gives the reason for each failed ticker.".to_string()),
+            debug: None,
+        });
+        resp.valid_tickers = Some(resp.series.iter().map(|s| s.ticker.clone()).collect());
     }
     // An error object with no series is an error even when it came without
     // per-ticker entries; `status` must not read as success next to it.
@@ -141,16 +350,82 @@ fn emit_timeseries_stdout(resp: &eli_core::finance::TimeseriesResponse) -> Resul
             obj.remove("provider");
         }
     }
-    collapse_point_candles(&mut value);
-    round_json_floats(&mut value);
-    let out = json_to_stdout_string(&value)?;
+    Ok(ShapedTimeseries {
+        value,
+        status: resp.status,
+        sources: resp.sources,
+        series: resp.series.len(),
+        errors: err_count,
+        notices: notices.len(),
+        error_message: resp.error.map(|e| e.message),
+    })
+}
+
+/// Stdout: the shaped document, then
+/// - point-candle collapse + all-zero volume drop;
+/// - floats rounded to 7 significant digits (kills f32 feed noise like
+///   747.4000244140625);
+/// - pretty JSON only at a terminal; compact for pipes/agents.
+fn emit_timeseries_stdout(
+    resp: &eli_core::finance::TimeseriesResponse,
+    requested: &[String],
+) -> Result<()> {
+    let mut shaped = shape_timeseries_response(resp, requested)?;
+    collapse_point_candles(&mut shaped.value);
+    round_json_floats(&mut shaped.value);
+    let out = json_to_stdout_string(&shaped.value)?;
     audit_set_summary(serde_json::json!({
-        "series": resp.series.len(),
-        "sources": resp.sources,
-        "status": resp.status,
+        "series": shaped.series,
+        "sources": shaped.sources,
+        "status": shaped.status,
         "bytes": out.len(),
     }));
     println!("{out}");
+    Ok(())
+}
+
+/// `--out`: the shaped document goes to the file with every candle field and
+/// full number precision (only stdout collapses flat candles and rounds).
+/// Stdout gets a one-line receipt that carries the document's status, so a
+/// pull where every ticker failed cannot pass for a good one: `ok` is true
+/// when the file was written and at least one series came back.
+fn write_timeseries_out(
+    out_path: PathBuf,
+    resp: &eli_core::finance::TimeseriesResponse,
+    requested: &[String],
+    meta_args: &[String],
+) -> Result<()> {
+    let shaped = shape_timeseries_response(resp, requested)?;
+    let json = serde_json::to_string_pretty(&shaped.value).context("serialize response")?;
+    let wr = write_json_text_with_meta(
+        out_path,
+        &shaped.value,
+        &json,
+        "finance.timeseries",
+        meta_args,
+    )?;
+    let status = shaped.status.as_deref().unwrap_or("ok");
+    let quoted = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
+    let mut line = format!(
+        "{{\"ok\":{},\"path\":{},\"meta_path\":{},\"status\":{},\"series\":{},\"errors\":{},\"notices\":{}",
+        status != "error",
+        quoted(&wr.out_path.display().to_string()),
+        quoted(&wr.meta_path.display().to_string()),
+        quoted(status),
+        shaped.series,
+        shaped.errors,
+        shaped.notices,
+    );
+    if status == "error" {
+        if let Some(message) = &shaped.error_message {
+            line.push_str(&format!(",\"error\":{}", quoted(message)));
+        }
+    }
+    line.push_str(&format!(
+        ",\"cache\":{}}}",
+        serde_json::to_string(&resp.cache).unwrap_or_else(|_| "null".to_string())
+    ));
+    println!("{line}");
     Ok(())
 }
 
@@ -280,6 +555,10 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
     if tickers.is_empty() && preset_stock_tickers.is_empty() && prediction_markets.is_empty() {
         anyhow::bail!("at least one ticker is required");
     }
+    // What the caller asked for, in its own spelling: the reference for the
+    // returned ticker names, the dropped-ticker check and the failure count.
+    let requested =
+        requested_timeseries_tickers(&preset_stock_tickers, &tickers, &prediction_markets);
 
     // Standalone prediction market mode: only prediction-market tickers.
     if tickers.is_empty() {
@@ -301,6 +580,11 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                     )
                 })
             });
+            let pm_meta_args = [
+                format!("range={}", args.range),
+                format!("granularity={}", args.granularity),
+                format!("prediction_markets={}", prediction_markets.len()),
+            ];
             let (market_series, market_errors) = match cap_error {
                 Some(message) => (
                     Vec::new(),
@@ -352,15 +636,19 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                     analytics: None,
                     cache: None,
                 };
-                emit_timeseries_stdout(&resp)?;
-                return Ok(());
+                return match args.out {
+                    Some(out_path) => {
+                        write_timeseries_out(out_path, &resp, &requested, &pm_meta_args)
+                    }
+                    None => emit_timeseries_stdout(&resp, &requested),
+                };
             }
             let series = market_series;
             let analytics =
                 eli_core::finance::build_timeseries_analytics(&series, granularity);
             let provider = prediction_market_response_provider(&prediction_markets);
             let tickers: Vec<String> = series.iter().map(|s| s.ticker.clone()).collect();
-            let resp = eli_core::finance::TimeseriesResponse {
+            let mut resp = eli_core::finance::TimeseriesResponse {
                 provider,
                 sources: Vec::new(),
                 tickers,
@@ -370,11 +658,7 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 end,
                 generated_at: now,
                 series,
-                status: if market_errors.is_empty() {
-                    None
-                } else {
-                    Some("partial".to_string())
-                },
+                status: None,
                 error: None,
                 errors: if market_errors.is_empty() {
                     None
@@ -385,30 +669,12 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 analytics: Some(analytics),
                 cache: None,
             };
+            append_silent_drops(&mut resp, &requested, granularity);
 
-            if let Some(out_path) = args.out {
-                let wr = write_json_out_with_meta(
-                    out_path,
-                    &resp,
-                    "finance.timeseries",
-                    &[
-                        format!("range={}", args.range),
-                        format!("granularity={}", args.granularity),
-                        format!("prediction_markets={}", prediction_markets.len()),
-                    ],
-                )?;
-                println!(
-                    "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
-                    serde_json::to_string(&wr.out_path.display().to_string())
-                        .unwrap_or_else(|_| "\"\"".to_string()),
-                    serde_json::to_string(&wr.meta_path.display().to_string())
-                        .unwrap_or_else(|_| "\"\"".to_string()),
-                );
-                return Ok(());
-            }
-
-            emit_timeseries_stdout(&resp)?;
-            return Ok(());
+            return match args.out {
+                Some(out_path) => write_timeseries_out(out_path, &resp, &requested, &pm_meta_args),
+                None => emit_timeseries_stdout(&resp, &requested),
+            };
         }
     }
 
@@ -517,19 +783,21 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
 
         let mut all_series = clev_series;
+        let mut all_errors: Vec<eli_core::finance::TimeseriesError> = Vec::new();
 
         // Merge prediction market series if present.
         if !prediction_markets.is_empty() {
-            let (market_series, _market_errors) =
+            let (market_series, market_errors) =
                 fetch_prediction_market_series_batch(&prediction_markets, start, end, granularity)
                     .await;
             all_series.extend(market_series);
+            all_errors.extend(market_errors);
         }
 
         let analytics =
             eli_core::finance::build_timeseries_analytics(&all_series, granularity);
         let tickers_out: Vec<String> = all_series.iter().map(|s| s.ticker.clone()).collect();
-        let resp = eli_core::finance::TimeseriesResponse {
+        let mut resp = eli_core::finance::TimeseriesResponse {
             provider: eli_core::finance::ProviderKind::Fred, // closest match
             sources: Vec::new(),
             tickers: tickers_out,
@@ -541,33 +809,27 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             series: all_series,
             status: None,
             error: None,
-            errors: None,
+            errors: if all_errors.is_empty() { None } else { Some(all_errors) },
             valid_tickers: None,
             analytics: Some(analytics),
             cache: None,
         };
+        // An unknown CLEV: name, or a prediction market that failed, used to
+        // vanish from this path without a word.
+        append_silent_drops(&mut resp, &requested, granularity);
 
-        if let Some(out_path) = args.out {
-            let wr = write_json_out_with_meta(
+        return match args.out {
+            Some(out_path) => write_timeseries_out(
                 out_path,
                 &resp,
-                "finance.timeseries",
+                &requested,
                 &[
-                    format!("provider=cleveland_fed"),
+                    "provider=cleveland_fed".to_string(),
                     format!("tickers={}", cleveland_tickers.join(",")),
                 ],
-            )?;
-            println!(
-                "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
-                serde_json::to_string(&wr.out_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-                serde_json::to_string(&wr.meta_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-            );
-        } else {
-            emit_timeseries_stdout(&resp)?;
-        }
-        return Ok(());
+            ),
+            None => emit_timeseries_stdout(&resp, &requested),
+        };
     }
 
     // Standalone RATEPATH path: only RATEPATH: tickers (+ optional prediction markets).
@@ -598,19 +860,21 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
 
         let mut all_series = rp_series;
+        let mut all_errors = rp_errors;
 
         // Merge prediction market series if present.
         if !prediction_markets.is_empty() {
-            let (market_series, _market_errors) =
+            let (market_series, market_errors) =
                 fetch_prediction_market_series_batch(&prediction_markets, start, end, granularity)
                     .await;
             all_series.extend(market_series);
+            all_errors.extend(market_errors);
         }
 
         let analytics =
             eli_core::finance::build_timeseries_analytics(&all_series, granularity);
         let tickers_out: Vec<String> = all_series.iter().map(|s| s.ticker.clone()).collect();
-        let resp = eli_core::finance::TimeseriesResponse {
+        let mut resp = eli_core::finance::TimeseriesResponse {
             provider: eli_core::finance::ProviderKind::Yahoo, // closest match (no rate_path enum variant)
             sources: vec!["rate_path".to_string()],
             tickers: tickers_out,
@@ -620,35 +884,27 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             end,
             generated_at: now,
             series: all_series,
-            status: if rp_errors.is_empty() { None } else { Some("partial".to_string()) },
+            status: None,
             error: None,
-            errors: if rp_errors.is_empty() { None } else { Some(rp_errors) },
+            errors: if all_errors.is_empty() { None } else { Some(all_errors) },
             valid_tickers: None,
             analytics: Some(analytics),
             cache: None,
         };
+        append_silent_drops(&mut resp, &requested, granularity);
 
-        if let Some(out_path) = args.out {
-            let wr = write_json_out_with_meta(
+        return match args.out {
+            Some(out_path) => write_timeseries_out(
                 out_path,
                 &resp,
-                "finance.timeseries",
+                &requested,
                 &[
-                    format!("provider=rate_path"),
+                    "provider=rate_path".to_string(),
                     format!("tickers={}", ratepath_tickers.join(",")),
                 ],
-            )?;
-            println!(
-                "{{\"ok\":true,\"path\":{},\"meta_path\":{}}}",
-                serde_json::to_string(&wr.out_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-                serde_json::to_string(&wr.meta_path.display().to_string())
-                    .unwrap_or_else(|_| "\"\"".to_string()),
-            );
-        } else {
-            emit_timeseries_stdout(&resp)?;
-        }
-        return Ok(());
+            ),
+            None => emit_timeseries_stdout(&resp, &requested),
+        };
     }
 
     // Route to the right provider based on ticker types.
@@ -1126,14 +1382,16 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!("warning: Pyth fetch failed: {e}");
-                resp.errors
-                    .get_or_insert_with(Vec::new)
-                    .push(eli_core::finance::TimeseriesError {
-                        ticker: pyth_tickers.join(","),
+                eprintln!("warning: PYTH: fetch failed: {e}");
+                // One error per ticker: errors[].ticker is a single-identifier contract.
+                let errs = resp.errors.get_or_insert_with(Vec::new);
+                for t in &pyth_tickers {
+                    errs.push(eli_core::finance::TimeseriesError {
+                        ticker: t.clone(),
                         stage: Some("pyth".to_string()),
-                        message: format!("Pyth provider failed: {e}"),
+                        message: format!("PYTH: fetch failed: {e}"),
                     });
+                }
             }
         }
     }
@@ -1150,13 +1408,14 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             }
             Err(e) => {
                 eprintln!("warning: Binance fetch failed: {e}");
-                resp.errors
-                    .get_or_insert_with(Vec::new)
-                    .push(eli_core::finance::TimeseriesError {
-                        ticker: binance_tickers.join(","),
+                let errs = resp.errors.get_or_insert_with(Vec::new);
+                for t in &binance_tickers {
+                    errs.push(eli_core::finance::TimeseriesError {
+                        ticker: t.clone(),
                         stage: Some("binance".to_string()),
                         message: format!("Binance provider failed: {e}"),
                     });
+                }
             }
         }
     }
@@ -1173,13 +1432,14 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             }
             Err(e) => {
                 eprintln!("warning: sovereign-yield (GOVT) fetch failed: {e}");
-                resp.errors
-                    .get_or_insert_with(Vec::new)
-                    .push(eli_core::finance::TimeseriesError {
-                        ticker: govt_tickers.join(","),
+                let errs = resp.errors.get_or_insert_with(Vec::new);
+                for t in &govt_tickers {
+                    errs.push(eli_core::finance::TimeseriesError {
+                        ticker: t.clone(),
                         stage: Some("govt".to_string()),
                         message: format!("GOVT provider failed: {e}"),
                     });
+                }
             }
         }
     }
@@ -1244,13 +1504,14 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
             }
             Err(e) => {
                 eprintln!("warning: Cleveland Fed fetch failed: {e}");
-                resp.errors
-                    .get_or_insert_with(Vec::new)
-                    .push(eli_core::finance::TimeseriesError {
-                        ticker: cleveland_tickers.join(","),
+                let errs = resp.errors.get_or_insert_with(Vec::new);
+                for t in &cleveland_tickers {
+                    errs.push(eli_core::finance::TimeseriesError {
+                        ticker: t.clone(),
                         stage: Some("cleveland_fed".to_string()),
                         message: format!("Cleveland Fed provider failed: {e}"),
                     });
+                }
             }
         }
     }
@@ -1291,6 +1552,10 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         }
     }
 
+    // Returned tickers go back to the caller's spelling before anything is
+    // keyed on them (analytics.stats, the drop check, the failure count).
+    restore_requested_spelling(&mut resp, &requested);
+
     // Single analytics pass over the final merged series set (was recomputed
     // after every individual merge above).
     if !resp.series.is_empty() {
@@ -1300,122 +1565,22 @@ async fn cmd_finance_timeseries(args: FinanceTimeseriesArgs) -> Result<()> {
         ));
     }
 
-    // Populate top-level `sources` with distinct providers actually present in series.
-    // The legacy `provider` field reflects only the dispatch-time main bucket and lies
-    // on mixed calls; `sources` is the truth.
-    {
-        let mut distinct: Vec<String> = Vec::new();
-        for s in &resp.series {
-            if let Some(src) = &s.source {
-                if !distinct.iter().any(|x| x == src) {
-                    distinct.push(src.clone());
-                }
-            }
-        }
-        distinct.sort();
-        resp.sources = distinct;
-    }
+    // `sources`, `status` and the error object are settled by the shared
+    // shaping step, the same for stdout and for --out.
+    append_silent_drops(&mut resp, &requested, granularity);
 
-    // Silent-drop detection: every requested ticker must appear in either resp.series
-    // or resp.errors. If a ticker fell through both buckets without an explicit error
-    // (e.g., classified to a bucket that returned data for siblings but skipped this one),
-    // surface it as a stage="silent_drop" error so the caller knows.
-    {
-        use std::collections::HashSet;
-        let mut requested: HashSet<String> = HashSet::new();
-        for t in &preset_stock_tickers {
-            requested.insert(t.clone());
-        }
-        for t in &tickers {
-            requested.insert(t.clone());
-        }
-        for pm in &prediction_markets {
-            requested.insert(pm.market.clone());
-        }
-        let mut accounted: HashSet<String> = HashSet::new();
-        for s in &resp.series {
-            // Series ticker often differs from input (PYTH:BTC ↔ PYTH:BTC, 906975 ↔
-            // POLYMARKET:906975:YES, IBKR:FUT:CL:NYMEX ↔ FUT:CL:NYMEX). Mark any
-            // requested ticker that appears as substring of the series ticker
-            // OR that contains the series ticker as accounted-for.
-            for req in &requested {
-                if s.ticker == *req
-                    || s.ticker.contains(req.as_str())
-                    || req.contains(s.ticker.as_str())
-                {
-                    accounted.insert(req.clone());
-                }
-            }
-        }
-        if let Some(errs) = &resp.errors {
-            for e in errs {
-                for req in &requested {
-                    if e.ticker == *req
-                        || e.ticker.contains(req.as_str())
-                        || req.contains(e.ticker.as_str())
-                    {
-                        accounted.insert(req.clone());
-                    }
-                }
-            }
-        }
-        let dropped: Vec<String> = requested.difference(&accounted).cloned().collect();
-        if !dropped.is_empty() {
-            // Give the caller a reason it can act on instead of the old
-            // "no error was recorded" shrug repeated verbatim per ticker.
-            let window_days = (resp.end - resp.start).num_days();
-            let intraday = granularity.approx_duration().num_seconds() < 86_400;
-            let drop_errors: Vec<eli_core::finance::TimeseriesError> = dropped
-                .into_iter()
-                .map(|t| {
-                    let looks_like_pm_slug = t == t.to_ascii_lowercase()
-                        && t.contains('-')
-                        && !t.contains('=')
-                        && t.chars().any(|c| c.is_ascii_alphabetic());
-                    let message = if looks_like_pm_slug {
-                        "looks like a Polymarket slug — slugs don't join here; use the numeric market id from finance_odds markets[].ticker".to_string()
-                    } else if intraday && window_days <= 3 {
-                        "no data in window — a short intraday range can fall entirely on a weekend/holiday; widen --range (e.g. 5d) or use --granularity 1d".to_string()
-                    } else {
-                        "no provider returned data for this ticker in the requested window".to_string()
-                    };
-                    eli_core::finance::TimeseriesError {
-                        ticker: t,
-                        stage: Some("silent_drop".to_string()),
-                        message,
-                    }
-                })
-                .collect();
-            resp.errors.get_or_insert_with(Vec::new).extend(drop_errors);
-            if resp.status.is_none() && !resp.series.is_empty() {
-                resp.status = Some("partial".to_string());
-            }
-        }
-    }
-
-    if let Some(out_path) = args.out {
-        let wr = write_json_out_with_meta(
+    match args.out {
+        Some(out_path) => write_timeseries_out(
             out_path,
             &resp,
-            "finance.timeseries",
+            &requested,
             &[
                 format!("range={}", args.range),
                 format!("granularity={}", args.granularity),
             ],
-        )?;
-        println!(
-            "{{\"ok\":true,\"path\":{},\"meta_path\":{},\"cache\":{}}}",
-            serde_json::to_string(&wr.out_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-            serde_json::to_string(&wr.meta_path.display().to_string())
-                .unwrap_or_else(|_| "\"\"".to_string()),
-            serde_json::to_string(&resp.cache).unwrap_or_else(|_| "null".to_string())
-        );
-        return Ok(());
+        ),
+        None => emit_timeseries_stdout(&resp, &requested),
     }
-
-    emit_timeseries_stdout(&resp)?;
-    Ok(())
 }
 
 fn parse_window_start(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
