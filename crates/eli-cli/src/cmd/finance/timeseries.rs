@@ -100,7 +100,16 @@ fn emit_timeseries_stdout(resp: &eli_core::finance::TimeseriesResponse) -> Resul
         }
     }
     let err_count = resp.errors.as_ref().map_or(0, |e| e.len());
-    resp.status = if resp.series.is_empty() && err_count > 0 {
+    if err_count == 0 && !resp.series.is_empty() {
+        // The core counts every entry as a failed ticker, so a response whose
+        // only entries were notices arrives with "1 of 1 tickers failed; 1
+        // series returned". Nothing failed: drop the error object with them.
+        resp.error = None;
+        resp.valid_tickers = None;
+    }
+    // An error object with no series is an error even when it came without
+    // per-ticker entries; `status` must not read as success next to it.
+    resp.status = if resp.series.is_empty() && (err_count > 0 || resp.error.is_some()) {
         Some("error".to_string())
     } else if err_count > 0 {
         Some("partial".to_string())
