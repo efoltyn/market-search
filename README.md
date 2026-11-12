@@ -175,7 +175,7 @@ Just trying it? `market-search mcp share` prints a temporary link that works whi
 | `AAPL`, `SPY`, `CL=F`, `BTC-USD` | Yahoo Finance | Stocks, ETFs, futures, crypto, FX |
 | `UNRATE`, `DGS10`, `CPIAUCSL` | FRED | 800,000+ macro series, no key |
 | `PYTH:BTC`, `PYTH:OIL` | Pyth Network | 24/7 crypto & commodity oracles |
-| `BN:BTC`, `BN:ETH` | Binance | Crypto OHLCV since 2019 |
+| `BN:BTCUSDT`, `BN:BTC`, `BN:BTCUSD` | Binance (plain-USD pairs: Binance.US) | Crypto OHLCV since 2017 (Binance.US since 2019) |
 | `KXRECSSNBER-26` | Kalshi | Probability + volume candles |
 | `609655` | Polymarket | Probability + volume candles |
 | `GOVT:US10Y`, `GOVT:DE10Y`, `GOVT:JP30Y` | CNBC | Government bond yields by country and tenor, daily back to 2000 |

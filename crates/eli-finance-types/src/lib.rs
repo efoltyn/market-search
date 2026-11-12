@@ -29,7 +29,8 @@ pub enum ProviderKind {
     Kalshi,
     /// Polymarket prediction market — probability history via CLOB API.
     Polymarket,
-    /// Binance — crypto OHLCV with depth back to 2017/2019.
+    /// Binance spot candles: the global exchange (public data mirror, back to
+    /// 2017) and Binance.US for plain-USD pairs (back to 2019).
     Binance,
     /// Sovereign bond yields (CNBC public bars) — GOVT: prefix, global 2Y/10Y/30Y curves.
     Govt,
@@ -405,7 +406,7 @@ pub struct TickerSeries {
     pub ticker: String,
     pub candles: Vec<Candle>,
     /// Upstream data source identifier ("yahoo", "fred", "pyth", "ibkr", "binance",
-    /// "cleveland_fed", "fed_h15", "polymarket", "kalshi", "mock").
+    /// "binance.us", "cleveland_fed", "fed_h15", "polymarket", "kalshi", "mock").
     /// Lets callers tell which provider served each series in mixed-source responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,

@@ -280,7 +280,10 @@ fn cache_key(
         // v: bump when TickerSeries / Candle / response shape changes so cache
         // entries from old binaries are invalidated. v=2 added source + upstream_id
         // to TickerSeries. v=3 added kind field to Candle (point vs OHLC).
-        v: 3,
+        // Binance alone is on v=4: BN: series used to come from Binance.US
+        // under the label "binance" and now name the venue that served them,
+        // so an entry cached by an older binary must not be read back.
+        v: if matches!(req.provider, ProviderKind::Binance) { 4 } else { 3 },
         provider: &req.provider,
         tickers: tickers_sorted,
         range: req.range.to_string_compact(),

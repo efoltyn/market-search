@@ -12,18 +12,25 @@ const POLYMARKET_GAMMA_URL: &str = "https://gamma-api.polymarket.com";
 ///   stretches visible at a glance;
 /// - `v` is dropped when zero across the whole series (indices like ^VIX
 ///   report no real volume — repeating `"v": 0.0` per candle is dead weight).
+///   Exchange venues are the exception: their volume is real, so a series
+///   that is zero throughout means "no trade in the whole window" and stays.
 fn collapse_point_candles(value: &mut serde_json::Value) {
     let Some(series) = value.get_mut("series").and_then(|v| v.as_array_mut()) else {
         return;
     };
     for s in series {
+        let exchange_volume = matches!(
+            s.get("source").and_then(|v| v.as_str()),
+            Some("binance") | Some("binance.us")
+        );
         let Some(candles) = s.get_mut("candles").and_then(|v| v.as_array_mut()) else {
             continue;
         };
-        let all_zero_vol = candles.iter().all(|c| {
-            c.get("v")
-                .map_or(true, |v| v.as_f64().unwrap_or(0.0) == 0.0)
-        });
+        let all_zero_vol = !exchange_volume
+            && candles.iter().all(|c| {
+                c.get("v")
+                    .map_or(true, |v| v.as_f64().unwrap_or(0.0) == 0.0)
+            });
         for c in candles.iter_mut() {
             let Some(obj) = c.as_object_mut() else { continue };
             // Never collapse a candle with real volume: a thin stock can print
