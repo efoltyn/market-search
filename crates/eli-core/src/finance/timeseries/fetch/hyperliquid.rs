@@ -150,6 +150,19 @@ async fn hl_post(body: &serde_json::Value) -> std::result::Result<serde_json::Va
     Err(last_err)
 }
 
+/// Hyperliquid answers http 500 to a candle or funding request for a name it
+/// does not list, the same as for a fault on its side. Say what that most
+/// likely means instead of passing on the bare status.
+fn hl_explain(coin: &str, e: String) -> String {
+    if e.starts_with("http 500") {
+        format!(
+            "{e}. Hyperliquid answers this for a name it does not list: check '{coin}' (names are case-sensitive: HL:BTC, HL:kPEPE, HL:xyz:GOLD)."
+        )
+    } else {
+        e
+    }
+}
+
 fn hl_num(v: Option<&serde_json::Value>) -> Option<f64> {
     v.and_then(|v| match v {
         serde_json::Value::String(s) => s.parse().ok(),
@@ -299,6 +312,7 @@ pub(crate) async fn fetch_hyperliquid_series(
                             funding_cache.insert(coin.clone(), rows);
                         }
                         Err(e) => {
+                            let e = hl_explain(&coin, e);
                             errors.push(err(ticker, "fetch", format!("hyperliquid fundingHistory '{coin}': {e}")));
                             continue;
                         }
@@ -321,6 +335,7 @@ pub(crate) async fn fetch_hyperliquid_series(
                 match hl_fetch_px(&coin, start, end, interval, secs).await {
                     Ok(c) => c,
                     Err(e) => {
+                        let e = hl_explain(&coin, e);
                         errors.push(err(ticker, "fetch", format!("hyperliquid candleSnapshot '{coin}': {e}")));
                         continue;
                     }
