@@ -471,21 +471,15 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
                 // can't see the shape of a move — only the wall of numbers. Additive and
                 // fallback-safe: on any parse hiccup we return the raw output unchanged.
                 if tool_name == "finance_timeseries" && output.len() > INLINE_THRESHOLD {
-                    match (
-                        serde_json::from_str::<serde_json::Value>(&output),
-                        mcp_timeseries_summary(&output),
-                    ) {
-                        (Ok(mut v), Some(sum)) => {
-                            match (v.as_object_mut(), serde_json::from_str::<serde_json::Value>(&sum))
-                            {
-                                (Some(obj), Ok(sum_v)) => {
-                                    obj.insert("_summary".to_string(), sum_v);
-                                    serde_json::to_string(&v).unwrap_or(output)
-                                }
-                                _ => output,
+                    match serde_json::from_str::<serde_json::Value>(&output) {
+                        Ok(mut v) => match (mcp_timeseries_summary(&v), v.as_object_mut()) {
+                            (Some(summary), Some(obj)) => {
+                                obj.insert("_summary".to_string(), summary);
+                                serde_json::to_string(&v).unwrap_or(output)
                             }
-                        }
-                        _ => output,
+                            _ => output,
+                        },
+                        Err(_) => output,
                     }
                 } else if tool_name == "finance_filings" {
                     // No-file-access client: drop the local-only path fields (download_dir,
@@ -544,20 +538,26 @@ async fn mcp_tools_call_inner(id: serde_json::Value, request: &serde_json::Value
                 let summary = mcp_build_summary(&tool_name, &output);
 
                 if saved {
+                    // The path goes through serde_json so that a Windows
+                    // temp path (backslashes) is still valid JSON.
                     format!(
                         "{{\
-                        \"_file\":\"{path}\",\
+                        \"_file\":{path},\
                         \"_chars\":{chars},\
                         {summary}\
                         }}",
-                        path = path,
+                        path = serde_json::Value::String(path),
                         chars = save_data.len(),
                         summary = summary,
                     )
                 } else {
-                    // File save failed — return truncated inline
-                    let truncated = &output[..4000.min(output.len())];
-                    truncated.to_string()
+                    // File save failed — return truncated inline, cut on a
+                    // character boundary.
+                    let mut cut = 4000.min(output.len());
+                    while !output.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    output[..cut].to_string()
                 }
             };
             // Prepend wall-clock timestamp to every tool response so the AI
@@ -938,22 +938,29 @@ fn mcp_bars_per_year(candles: &[serde_json::Value], source: Option<&str>) -> f64
     bars_per_day * days_per_year
 }
 
-/// Compute per-ticker summary stats from a timeseries JSON response.
-/// Returns a JSON string like `{"SPY":{"start":550.0,"end":530.0,...},...}` or None on parse failure.
-fn mcp_timeseries_summary(output: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(output).ok()?;
+/// Compute per-ticker summary stats from a timeseries response.
+/// Returns an object like `{"SPY":{"start":550.0,"end":530.0,...},...}`, or
+/// None when no series has a usable candle.
+fn mcp_timeseries_summary(v: &serde_json::Value) -> Option<serde_json::Value> {
     let series = v.get("series").and_then(|s| s.as_array())?;
 
     let mut map = serde_json::Map::new();
     for entry in series {
-        let ticker = entry.get("ticker").and_then(|t| t.as_str())?;
-        let candles = entry.get("candles").and_then(|c| c.as_array())?;
-        if candles.is_empty() {
+        // A series that cannot be summarized is left out; it no longer
+        // blanks the summary of every other series.
+        let (Some(ticker), Some(candles)) = (
+            entry.get("ticker").and_then(|t| t.as_str()),
+            entry.get("candles").and_then(|c| c.as_array()),
+        ) else {
             continue;
-        }
+        };
         let get_close = |c: &serde_json::Value| c.get("c").and_then(|x| x.as_f64());
-        let start = get_close(candles.first()?)?;
-        let end = get_close(candles.last()?)?;
+        let (Some(start), Some(end)) = (
+            candles.iter().find_map(get_close),
+            candles.iter().rev().find_map(get_close),
+        ) else {
+            continue;
+        };
         let return_pct = if start != 0.0 {
             (end / start - 1.0) * 100.0
         } else {
@@ -965,8 +972,10 @@ fn mcp_timeseries_summary(output: &str) -> Option<String> {
             .fold(
                 (f64::NEG_INFINITY, f64::INFINITY, String::new(), String::new()),
                 |(h, l, hd, ld), c| {
-                    let hi = c.get("h").and_then(|x| x.as_f64()).unwrap_or(h);
-                    let lo = c.get("l").and_then(|x| x.as_f64()).unwrap_or(l);
+                    // A point candle (FRED and other one-value series)
+                    // carries only a close, which is then its high and low.
+                    let hi = c.get("h").and_then(|x| x.as_f64()).or_else(|| get_close(c)).unwrap_or(h);
+                    let lo = c.get("l").and_then(|x| x.as_f64()).or_else(|| get_close(c)).unwrap_or(l);
                     let ts = get_ts(c);
                     let new_hd = if hi > h { ts.clone() } else { hd };
                     let new_ld = if lo < l { ts } else { ld };
@@ -1068,7 +1077,115 @@ fn mcp_timeseries_summary(output: &str) -> Option<String> {
     if map.is_empty() {
         None
     } else {
-        serde_json::to_string(&serde_json::Value::Object(map)).ok()
+        Some(serde_json::Value::Object(map))
+    }
+}
+
+/// What a stdio client sees of a large finance_timeseries result. The
+/// candles are in the file, so this has to carry everything a model must
+/// not miss: which tickers failed and why, and the notices (a series served
+/// from another source than its name says, a coarser granularity than was
+/// asked for). Those come first, then the per-ticker numbers.
+///
+/// Returns the members of a JSON object without the outer braces. serde_json
+/// writes every value, so a quote inside a message cannot break the JSON.
+fn mcp_timeseries_stdio_summary(v: &serde_json::Value) -> String {
+    const MAX_ISSUES: usize = 20;
+    const MAX_MESSAGE_CHARS: usize = 300;
+    const MAX_TICKER_CHARS: usize = 120;
+
+    #[derive(serde::Serialize)]
+    struct Issue {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ticker: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stage: Option<String>,
+        message: String,
+    }
+
+    #[derive(serde::Serialize)]
+    struct Members {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        errors: Option<Vec<Issue>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        errors_more: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notices: Option<Vec<Issue>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notices_more: Option<usize>,
+        #[serde(rename = "_schema", skip_serializing_if = "Option::is_none")]
+        schema: Option<&'static str>,
+        #[serde(rename = "_summary")]
+        summary: Option<serde_json::Value>,
+    }
+
+    // Cut on a character boundary and say that it was cut.
+    let clip = |text: &str, max_chars: usize| -> String {
+        match text.char_indices().nth(max_chars) {
+            Some((cut, _)) => format!("{}...", &text[..cut]),
+            None => text.to_string(),
+        }
+    };
+    let issues = |key: &str| -> (Option<Vec<Issue>>, Option<usize>) {
+        let list = match v.get(key).and_then(|x| x.as_array()) {
+            Some(list) if !list.is_empty() => list,
+            _ => return (None, None),
+        };
+        let shown = list
+            .iter()
+            .take(MAX_ISSUES)
+            .map(|item| {
+                let text = |field: &str| item.get(field).and_then(|x| x.as_str());
+                Issue {
+                    ticker: text("ticker").map(|t| clip(t, MAX_TICKER_CHARS)),
+                    stage: text("stage").map(|s| clip(s, MAX_TICKER_CHARS)),
+                    message: match text("message").or_else(|| item.as_str()) {
+                        Some(message) => clip(message, MAX_MESSAGE_CHARS),
+                        None => clip(&item.to_string(), MAX_MESSAGE_CHARS),
+                    },
+                }
+            })
+            .collect();
+        let left_out = list.len().saturating_sub(MAX_ISSUES);
+        (Some(shown), (left_out > 0).then_some(left_out))
+    };
+
+    let error = match v.get("error") {
+        Some(serde_json::Value::String(message)) => Some(clip(message, MAX_MESSAGE_CHARS)),
+        Some(serde_json::Value::Object(info)) => info
+            .get("message")
+            .or_else(|| info.get("error"))
+            .and_then(|x| x.as_str())
+            .map(|message| clip(message, MAX_MESSAGE_CHARS)),
+        _ => None,
+    };
+    let (errors, errors_more) = issues("errors");
+    let (notices, notices_more) = issues("notices");
+    let summary = mcp_timeseries_summary(v);
+
+    let members = Members {
+        status: v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| clip(s, MAX_TICKER_CHARS)),
+        error,
+        errors,
+        errors_more,
+        notices,
+        notices_more,
+        schema: summary
+            .is_some()
+            .then_some(".series[].{ticker,candles[].{t,o,h,l,c,v}}"),
+        summary,
+    };
+    match serde_json::to_string(&members) {
+        // An object always has both braces; drop them.
+        Ok(object) if object.len() >= 2 => object[1..object.len() - 1].to_string(),
+        _ => "\"_summary\":null".to_string(),
     }
 }
 
@@ -1332,15 +1449,7 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             parts.push("\"_schema\":\".{metrics,calls[],puts[],multi_expiry_summary.snapshots[]}\"".to_string());
             parts.join(",")
         }
-        "finance_timeseries" => {
-            match mcp_timeseries_summary(output) {
-                Some(summary) => format!(
-                    "\"_schema\":\".series[].{{ticker,candles[].{{t,o,h,l,c,v}}}}\",\"_summary\":{}",
-                    summary
-                ),
-                None => format!("\"_summary\":null"),
-            }
-        }
+        "finance_timeseries" => mcp_timeseries_stdio_summary(&v),
         "finance_movers" => {
             let mut lines = Vec::new();
             if let Some(movers) = v.get("movers").and_then(|m| m.as_array()) {
