@@ -72,21 +72,40 @@ fn pyth_route(ticker: &str) -> PythRoute {
             "a PYTH: ticker needs a name, and {PYTH_ENDED}. Use a KF: ticker (Kraken Futures index, KF:BTC) or an HL: ticker (Hyperliquid perp, HL:xyz:GOLD)."
         )),
         _ => {
-            // "Equity.US.AAPL/USD" -> AAPL, "Crypto.DOGE/USD" -> DOGE, "XRP" -> XRP.
-            let name = raw.rsplit('.').next().unwrap_or(raw);
-            let base = name.split('/').next().unwrap_or(name).trim().to_ascii_uppercase();
-            let usable = !base.is_empty()
-                && base.len() <= 20
-                && base.chars().all(|c| c.is_ascii_alphanumeric());
-            PythRoute::Unavailable(if usable {
-                format!(
-                    "{PYTH_ENDED}, and '{raw}' has no mapped replacement. Try KF:{base} (Kraken Futures index) or a Hyperliquid perp: HL:{base} for crypto, HL:xyz:{base} for US stocks, metals, oil and FX."
-                )
-            } else {
-                format!(
-                    "{PYTH_ENDED}, and '{raw}' has no mapped replacement. Use a KF: ticker (Kraken Futures index, KF:BTC) or an HL: ticker (Hyperliquid perp, HL:xyz:GOLD)."
-                )
-            })
+            // What to name instead depends on the feed. A KF: ticker is named
+            // only when the alias table has it: Kraken lists no stocks, so
+            // "KF:AAPL" would point at a market that does not exist.
+            let simple = |s: &str| {
+                !s.is_empty() && s.len() <= 20 && s.chars().all(|c| c.is_ascii_alphanumeric())
+            };
+            let before_slash =
+                |s: &str| s.split('/').next().unwrap_or(s).trim().to_ascii_uppercase();
+            // "Equity.US.AAPL/USD" -> AAPL, "Equity.US.BRK.B/USD" -> BRK.B.
+            let equity = raw
+                .get(..7)
+                .filter(|p| p.eq_ignore_ascii_case("equity."))
+                .and_then(|_| raw.splitn(3, '.').nth(2))
+                .map(before_slash);
+            // "Crypto.DOGE/USD" -> DOGE, "XRP" -> XRP.
+            let base = before_slash(raw.rsplit('.').next().unwrap_or(raw));
+            let advice = match equity {
+                Some(t) if simple(&t) => format!(
+                    "Use the plain ticker {t} (Yahoo) or HL:xyz:{t} (a 24/7 Hyperliquid perp, for the US stocks it lists)."
+                ),
+                Some(_) => {
+                    "Use the stock's plain ticker (Yahoo; a share class takes a dash, BRK-B).".to_string()
+                }
+                None if simple(&base) && kf_alias(&base).is_some() => {
+                    format!("Use KF:{base} (Kraken Futures index).")
+                }
+                None if simple(&base) => format!(
+                    "Try a Hyperliquid perp (HL:{base} for crypto; HL:xyz:{base} for US stocks, metals, oil and FX) or the Yahoo symbol."
+                ),
+                None => "Use a KF: ticker (Kraken Futures index, KF:BTC) or an HL: ticker (Hyperliquid perp, HL:xyz:GOLD).".to_string(),
+            };
+            PythRoute::Unavailable(format!(
+                "{PYTH_ENDED}, and '{raw}' has no mapped replacement. {advice}"
+            ))
         }
     }
 }
