@@ -419,6 +419,14 @@ impl VenueSend for reqwest::RequestBuilder {
                 "path": url.path(),
                 "query_len": url.query().map(str::len).unwrap_or(0),
             });
+            // The query is logged only for the venue hosts, whose read URLs
+            // carry nothing private; it shows cursors, offsets and batch sizes.
+            if let (Some(line), true) = (line.as_object_mut(), rule.is_some()) {
+                line.insert(
+                    "query".to_string(),
+                    serde_json::Value::String(url.query().unwrap_or_default().to_string()),
+                );
+            }
             if let (Some(line), Some(extra)) = (line.as_object_mut(), extra.as_object()) {
                 for (key, value) in extra {
                     line.insert(key.clone(), value.clone());

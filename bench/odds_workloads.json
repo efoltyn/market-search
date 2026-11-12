@@ -1,0 +1,50 @@
+{
+  "comment": "Workloads for odds_bench.py. The tickers go stale as markets settle; refresh vars when a workload returns nothing. Chosen 2026-11-12.",
+  "vars": {
+    "QUERY": "fed rate cut",
+    "SETTLED_QUERY": "fed decision",
+    "K_EVENT": "KXRATECUTCOUNT-26DEC31",
+    "K_LADDER": "KXFEDCUT-31DEC28",
+    "K_MARKET": "KXRATECUTCOUNT-26DEC31-T0",
+    "P_EVENT": "how-many-fed-rate-cuts-in-2026",
+    "P_MARKET": "616902",
+    "MIX20": "KXRATECUTCOUNT-26DEC31-T0,KXRATECUTCOUNT-26DEC31-T1,KXRATECUTCOUNT-26DEC31-T2,KXRATECUTCOUNT-26DEC31-T3,KXRATECUTCOUNT-26DEC31-T4,KXFEDDECISION-27APR-H0,KXFEDDECISION-27APR-H25,KXFEDDECISION-27APR-C25,KXFEDDECISION-27APR-C26,KXFEDDECISION-27APR-H26,616902,616903,616904,616905,616906,616907,616908,616909,616910,616911"
+  },
+  "cli": [
+    {"name": "k_search", "args": ["finance", "odds", "--search", "{QUERY}", "--provider", "kalshi", "--limit", "10"]},
+    {"name": "p_search", "args": ["finance", "odds", "--search", "{QUERY}", "--provider", "polymarket", "--limit", "10"]},
+    {"name": "both_search", "args": ["finance", "odds", "--search", "{QUERY}", "--provider", "auto", "--limit", "10"]},
+    {"name": "k_settled", "args": ["finance", "odds", "--search", "{SETTLED_QUERY}", "--provider", "kalshi", "--status", "settled", "--limit", "10"]},
+    {"name": "k_event", "args": ["finance", "odds", "--provider", "kalshi", "--event", "{K_EVENT}"]},
+    {"name": "k_ladder", "args": ["finance", "odds", "--provider", "kalshi", "--event", "{K_LADDER}"]},
+    {"name": "p_event", "args": ["finance", "odds", "--provider", "polymarket", "--event", "{P_EVENT}"]},
+    {"name": "k_market", "args": ["finance", "odds", "--provider", "kalshi", "--market", "{K_MARKET}"]},
+    {"name": "p_market", "args": ["finance", "odds", "--provider", "polymarket", "--market", "{P_MARKET}"]},
+    {"name": "k_book", "args": ["finance", "odds", "--provider", "kalshi", "--market", "{K_MARKET}", "--orderbook", "--depth", "10"]},
+    {"name": "p_book", "args": ["finance", "odds", "--provider", "polymarket", "--market", "{P_MARKET}", "--orderbook", "--depth", "10"]},
+    {"name": "k_trades", "args": ["finance", "odds", "--provider", "kalshi", "--market", "{K_MARKET}", "--trades", "--since", "7d"]},
+    {"name": "p_trades", "args": ["finance", "odds", "--provider", "polymarket", "--market", "{P_MARKET}", "--trades", "--since", "7d"]},
+    {"name": "ts_k_1", "args": ["finance", "timeseries", "--tickers", "{K_MARKET}", "--range", "30d", "--granularity", "1d"]},
+    {"name": "ts_p_1", "args": ["finance", "timeseries", "--tickers", "{P_MARKET}", "--range", "30d", "--granularity", "1d"]},
+    {"name": "ts_mix20_1h", "args": ["finance", "timeseries", "--tickers", "{MIX20}", "--range", "7d", "--granularity", "1h"]},
+    {"name": "ts_mix20_1d", "args": ["finance", "timeseries", "--tickers", "{MIX20}", "--range", "90d", "--granularity", "1d"]},
+    {"name": "rate_path_cold", "args": ["finance", "rate-path"]},
+    {"name": "rate_path_warm", "args": ["finance", "rate-path"]},
+    {"name": "sync", "slow": true, "args": ["finance", "odds", "sync"]},
+    {"name": "sync_again", "slow": true, "args": ["finance", "odds", "sync"]},
+    {"name": "local_search", "args": ["finance", "odds", "--search", "{QUERY}", "--local", "--limit", "10"]}
+  ],
+  "mcp": [
+    {"name": "mcp_k_search", "tool": "finance_odds", "arguments": {"search": "{QUERY}", "provider": "kalshi", "limit": 10}},
+    {"name": "mcp_p_search", "tool": "finance_odds", "arguments": {"search": "{QUERY}", "provider": "polymarket", "limit": 10}},
+    {"name": "mcp_k_event", "tool": "finance_odds", "arguments": {"provider": "kalshi", "event": "{K_EVENT}"}},
+    {"name": "mcp_p_event", "tool": "finance_odds", "arguments": {"provider": "polymarket", "event": "{P_EVENT}"}},
+    {"name": "mcp_k_market", "tool": "finance_odds", "arguments": {"provider": "kalshi", "market": "{K_MARKET}"}},
+    {"name": "mcp_k_book", "tool": "finance_odds", "arguments": {"provider": "kalshi", "market": "{K_MARKET}", "orderbook": true, "depth": 10}},
+    {"name": "mcp_p_book", "tool": "finance_odds", "arguments": {"provider": "polymarket", "market": "{P_MARKET}", "orderbook": true, "depth": 10}},
+    {"name": "mcp_ts_k_1", "tool": "finance_timeseries", "arguments": {"tickers": "{K_MARKET}", "range": "30d", "granularity": "1d"}},
+    {"name": "mcp_ts_p_1", "tool": "finance_timeseries", "arguments": {"tickers": "{P_MARKET}", "range": "30d", "granularity": "1d"}},
+    {"name": "mcp_ts_mix20_1h", "tool": "finance_timeseries", "arguments": {"tickers": "{MIX20}", "range": "7d", "granularity": "1h"}},
+    {"name": "mcp_rate_path", "tool": "finance_rate_path", "arguments": {}}
+  ]
+}
