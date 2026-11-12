@@ -3032,8 +3032,9 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
             "BAMLH0A0HYM2",
             // Commodities
             "DCOILWTICO", "DTWEXBGS",
-            // Live 24/7 via Pyth
-            "PYTH:OIL", "PYTH:GOLD", "PYTH:BTC",
+            // Live 24/7: the Kraken Futures index (oil and gold are Pyth's
+            // 24/7 index as Kraken lists it).
+            "KF:OIL", "KF:GOLD", "KF:BTC",
         ],
         "forex_majors" => vec![
             "EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "USDCAD=X",
@@ -3046,8 +3047,9 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
         "liquidity" => vec![
             "WALCL", "WTREGEN", "RRPONTSYD",
         ],
+        // The Kraken Futures index, 24/7, one-minute history since 2022-03.
         "crypto" => vec![
-            "PYTH:BTC", "PYTH:ETH", "PYTH:SOL",
+            "KF:BTC", "KF:ETH", "KF:SOL",
         ],
         // Global sovereign yields via CNBC (GOVT: prefix): the 10Y anchors of every
         // curve that feeds the US Treasury term premium, plus the 2s/30s that show
@@ -3236,7 +3238,7 @@ fn expand_timeseries_preset(preset: &str) -> Result<Vec<String>> {
 fn list_timeseries_presets() -> serde_json::Value {
     // (canonical name, comma-separated aliases, one-line description)
     let catalog: &[(&str, &str, &str)] = &[
-        ("macro", "", "34-series US macro dashboard: inflation, jobs, GDP, rates, debt, money, consumer, credit + live Pyth oil/gold/BTC"),
+        ("macro", "", "34-series US macro dashboard: inflation, jobs, GDP, rates, debt, money, consumer, credit + live oil/gold/BTC (Kraken Futures index, 24/7)"),
         ("recession", "recession_indicators", "Recession gauges: Sahm rule, 10Y-2Y & 10Y-3M curves, claims, unemployment, industrial production, Chicago Fed NAI"),
         ("credit", "credit_spreads,spreads", "Full ICE BofA OAS stack: IG, BBB, HY, BB, B, CCC, EM corporate spreads"),
         ("private_credit", "bdc", "Private credit / BDC complex: ARCC, OBDC, FSK, HTGC, MAIN, BXSL + CLO ETFs (JAAA/JBBB/CLOI) + HYG/BKLN + CCC OAS"),
@@ -3250,7 +3252,7 @@ fn list_timeseries_presets() -> serde_json::Value {
         ("fed_balance_sheet", "fed_bs,qe,qt", "Fed plumbing: total assets, Treasury & MBS holdings, reserves, RRP, TGA, M2, monetary base"),
         ("liquidity", "", "Net-liquidity inputs: Fed total assets, Treasury General Account, ON RRP"),
         ("forex_majors", "", "Nine USD majors: EUR, GBP, JPY, CHF, CAD, AUD, NZD, SEK, NOK"),
-        ("crypto", "", "BTC, ETH, SOL via Pyth (24/7)"),
+        ("crypto", "", "BTC, ETH, SOL: the Kraken Futures index (24/7)"),
         ("sovereigns", "govt,global_yields", "Global sovereign yields (GOVT:, CNBC): US/DE/FR 2-10-30Y, IT/ES 10Y, UK & Japan 10/30Y, CA/AU/CH/CN 10Y — values are yields in %"),
         ("stress_plumbing", "plumbing", "Funding/credit plumbing (daily): BDC price/NAV (OBDC/FSK/BXSL/ARCC), CoreWeave + Oracle bond yields (TRACE), Treasury buyback cover 10-20Y/20-30Y, SRF usage + SOFR 99th pct, OFR FSI + DVP repo volume, JNK/SPY ETF flows, VIX contango, equity put/call, BTC perp funding + DVOL, CCC OAS"),
         ("energy", "oil", "Energy futures front-month via IBKR: WTI, Brent, heating oil, RBOB, natgas, gasoil (falls back to Yahoo =F when IBKR is down)"),
