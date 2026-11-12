@@ -23,7 +23,9 @@ pub enum ProviderKind {
     Fred,
     /// Interactive Brokers TWS / IB Gateway via the official IB API.
     Ibkr,
-    /// Pyth Network Benchmarks — 24/7 oracle candles (crypto, commodities, FX, metals).
+    /// PYTH: prefix. Pyth ended keyless history on 2026-08-26, so these tickers
+    /// are served from the Kraken Futures index (see `KrakenFutures`) and their
+    /// series carry the source "kraken_futures". Nothing calls a Pyth host.
     Pyth,
     /// Kalshi prediction market — probability candlesticks via public API.
     Kalshi,
@@ -408,7 +410,7 @@ pub struct Candle {
 pub struct TickerSeries {
     pub ticker: String,
     pub candles: Vec<Candle>,
-    /// Upstream data source identifier ("yahoo", "fred", "pyth", "ibkr", "binance",
+    /// Upstream data source identifier ("yahoo", "fred", "kraken_futures", "ibkr", "binance",
     /// "binance.us", "cleveland_fed", "fed_h15", "polymarket", "kalshi", "mock").
     /// Lets callers tell which provider served each series in mixed-source responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -452,13 +454,13 @@ pub struct TimeseriesError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeseriesResponse {
-    /// Dispatch-time provider choice. On mixed-source calls (Yahoo + Pyth +
+    /// Dispatch-time provider choice. On mixed-source calls (Yahoo + Kraken Futures +
     /// Polymarket etc.) this only reflects the first / "main" bucket and
     /// is misleading on its own — see `sources` for the actual provider mix
     /// across returned series.
     pub provider: ProviderKind,
     /// Distinct upstream sources actually represented in `series` after merge.
-    /// `["yahoo"]` for a single-source call, `["yahoo","pyth","polymarket"]`
+    /// `["yahoo"]` for a single-source call, `["yahoo","kraken_futures","polymarket"]`
     /// for a mixed call, `["mixed"]` shorthand never used here — the array
     /// is the truth.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

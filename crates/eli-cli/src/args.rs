@@ -2233,7 +2233,7 @@ struct FinanceTimeseriesArgs {
     #[arg(long)]
     as_of: Option<String>,
 
-    /// Data provider (auto | yahoo | fred | ibkr | pyth | binance | govt | secnav | bond | buyback | nyfed | ofr | etf | cboe | hyperliquid | deribit). "auto" routes by ticker prefix: PYTH:/CLEV:/IBKR:/BN:/GOVT:/FRED:/NAV:/PNAV:/BOND:/BUYBACK:/NYFED:/OFR:/ETF:/CBOE:/HL:/DERIBIT: → matching provider; numeric (Polymarket) and Kalshi tickers (KX*, or SERIES-EVENT-LEG like CONTROLS-2026-D; KALSHI: for one-dash event tickers) auto-detected; bare names → Yahoo, with FRED fallback for macro-style IDs.
+    /// Data provider (auto | yahoo | fred | ibkr | kraken_futures | pyth | binance | govt | secnav | bond | buyback | nyfed | ofr | etf | cboe | hyperliquid | deribit; pyth is an old name for kraken_futures). "auto" routes by ticker prefix: KF:/PYTH:/CLEV:/IBKR:/BN:/GOVT:/FRED:/NAV:/PNAV:/BOND:/BUYBACK:/NYFED:/OFR:/ETF:/CBOE:/HL:/DERIBIT: → matching provider; numeric (Polymarket) and Kalshi tickers (KX*, or SERIES-EVENT-LEG like CONTROLS-2026-D; KALSHI: for one-dash event tickers) auto-detected; bare names → Yahoo, with FRED fallback for macro-style IDs.
     #[arg(long, default_value = "auto")]
     provider: String,
 

@@ -174,7 +174,7 @@ Just trying it? `market-search mcp share` prints a temporary link that works whi
 |--------|----------|----------|
 | `AAPL`, `SPY`, `CL=F`, `BTC-USD` | Yahoo Finance | Stocks, ETFs, futures, crypto, FX |
 | `UNRATE`, `DGS10`, `CPIAUCSL` | FRED | 800,000+ macro series, no key |
-| `PYTH:BTC`, `PYTH:OIL` | Pyth Network | 24/7 crypto & commodity oracles |
+| `KF:BTC`, `KF:GOLD`, `KF:OIL`, `KF:US100` | Kraken Futures | 24/7 index candles for crypto, metals, energy and FX; `KF:US100` tracks the Nasdaq-100. `KF:BTC:TRADE` adds volume. `PYTH:` tickers return this index |
 | `BN:BTCUSDT`, `BN:BTC`, `BN:BTCUSD` | Binance (plain-USD pairs: Binance.US) | Crypto OHLCV since 2017 (Binance.US since 2019) |
 | `KXRECSSNBER-26` | Kalshi | Probability + volume candles |
 | `609655` | Polymarket | Probability + volume candles |
@@ -186,7 +186,7 @@ Just trying it? `market-search mcp share` prints a temporary link that works whi
 | `BUYBACK:20-30Y:COVER` | US Treasury | Treasury buyback operations |
 | `ETF:JNK:FLOW` | Fund issuers | ETF flows, shares outstanding, NAV |
 | `CBOE:VXCONTANGO`, `CBOE:PCR_EQUITY` | CBOE | VIX futures curve, put/call ratios |
-| `HL:BTC:FUNDING_APR` | Hyperliquid | Perpetual funding and open interest |
+| `HL:BTC:FUNDING_APR`, `HL:xyz:SP500` | Hyperliquid | Perpetual prices, funding and open interest, including 24/7 stock, index and commodity perps (`HL:xyz:`) |
 | `DERIBIT:DVOL:BTC` | Deribit | Crypto implied volatility, funding, skew |
 
 Mix them in one call:
@@ -214,7 +214,7 @@ Core tools need no API keys.
 | US Treasury | None |
 | OFR | None |
 | CBOE | None |
-| Pyth Network | None |
+| Kraken Futures | None |
 | Binance · Hyperliquid · Deribit | None |
 | CNBC | None |
 | ECB · BIS · BOJ · BOE | None |
