@@ -157,6 +157,10 @@ fn mcp_write_response<W: std::io::Write>(out: &mut W, response: &serde_json::Val
 /// client via serverInfo.icons below (MCP SEP-973, the spec-correct path).
 const FAVICON_PNG: &[u8] = include_bytes!("favicon.png");
 
+/// What the server tells a client about itself. Sent in the `initialize` result and in
+/// `server/discover`, so a client on either handshake reads the same text.
+const MCP_INSTRUCTIONS: &str = "Free market data for agents. finance_timeseries is the spine: stocks, FX, futures, sovereign yields (GOVT:), FRED, funding plumbing (NYFED:/OFR:/BUYBACK:), credit (BOND:/PNAV:), flows and vol (ETF:/CBOE:), 24/7 crypto and commodity index prices (KF:), crypto leverage (HL:/DERIBIT:), Polymarket and Kalshi odds on one UTC axis in one call.";
+
 fn mcp_initialize(id: serde_json::Value, request: &serde_json::Value) -> serde_json::Value {
     // Version negotiation (MCP spec): when the client sends a protocolVersion, echo it
     // back rather than forcing our own — a strict client that requested an older version
@@ -208,7 +212,8 @@ fn mcp_initialize(id: serde_json::Value, request: &serde_json::Value) -> serde_j
         "result": {
             "protocolVersion": protocol_version,
             "capabilities": { "tools": {} },
-            "serverInfo": server_info
+            "serverInfo": server_info,
+            "instructions": MCP_INSTRUCTIONS
         }
     })
 }
@@ -276,7 +281,7 @@ fn mcp_server_discover(id: serde_json::Value) -> serde_json::Value {
                     "version": env!("CARGO_PKG_VERSION"),
                 }
             },
-            "instructions": "Free market data for agents. finance_timeseries is the spine: stocks, FX, futures, sovereign yields (GOVT:), FRED, funding plumbing (NYFED:/OFR:/BUYBACK:), credit (BOND:/PNAV:), flows and vol (ETF:/CBOE:), crypto leverage (HL:/DERIBIT:), Polymarket and Kalshi odds on one UTC axis in one call.",
+            "instructions": MCP_INSTRUCTIONS,
             "ttlMs": MCP_LIST_TTL_MS,
             "cacheScope": "public"
         }
